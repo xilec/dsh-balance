@@ -27,6 +27,14 @@ export const DEFAULT_CREDIT_MIN_DELTA = 0.01
 export const DEFAULT_SPEND_MIN_DELTA = 0.001
 
 /**
+ * Money is rounded to six decimals on the way out.
+ *
+ * Differences of binary floats otherwise leak artefacts such as
+ * `0.11000000000000298` into the day rows and the stored overrides.
+ */
+const round6 = (value) => Math.round(value * 1e6) / 1e6
+
+/**
  * Calendar fields of an instant in a zone.
  *
  * @param tsMs - epoch milliseconds.
@@ -101,8 +109,8 @@ export function movements(series, options = {}) {
     const prev = series[i - 1]
     const cur = series[i]
     const delta = prev.total - cur.total
-    const spend = delta > 0 && delta >= spendMin ? delta : 0
-    const credit = delta < 0 && -delta >= creditMin ? -delta : 0
+    const spend = delta > 0 && delta >= spendMin ? round6(delta) : 0
+    const credit = delta < 0 && -delta >= creditMin ? round6(-delta) : 0
     const interval = {
       from: prev.t,
       to: cur.t,
@@ -149,7 +157,7 @@ export function buildLedger(options) {
     const fromKey = dayKeyOf(interval.from, zone)
     const toKey = dayKeyOf(interval.to, zone)
     const target = toKey
-    sampled.set(target, (sampled.get(target) ?? 0) + interval.spend)
+    sampled.set(target, round6((sampled.get(target) ?? 0) + interval.spend))
     if (fromKey !== toKey) coarseKeys.add(target)
   }
 
@@ -168,7 +176,7 @@ export function buildLedger(options) {
     }
   })
 
-  const sum = (from, to) => rows.slice(from, to).reduce((acc, row) => acc + row.spend, 0)
+  const sum = (from, to) => round6(rows.slice(from, to).reduce((acc, row) => acc + row.spend, 0))
   const firstSampleMs = series.length > 0 ? series[0].t : null
   // A window is "covered" only when sampling already started before its first day,
   // otherwise its total is a partial sum the UI must label as such.
@@ -184,7 +192,7 @@ export function buildLedger(options) {
     todayKey,
     rows,
     credits: credits.slice(-50).reverse(),
-    creditTotal: credits.reduce((acc, c) => acc + c.amount, 0),
+    creditTotal: round6(credits.reduce((acc, c) => acc + c.amount, 0)),
     totals: {
       d1: { amount: sum(rows.length - 1, rows.length), covered: windowCovered(1) },
       w1: { amount: sum(Math.max(0, rows.length - 7), rows.length), covered: windowCovered(7) },

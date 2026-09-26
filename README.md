@@ -99,8 +99,11 @@ in
 }
 ```
 
-The composition row is read at startup: restart `dsh` after changing it. The
-browser half is picked up by a page reload.
+The composition row is read while the Host runs, but a plugin's *code* is imported
+once: after changing the row or the plugin, quit `dsh` **completely** (closing the
+window or reloading the page does not restart the Host process) and start it again.
+A browser-half change only needs a reload, and that reload should bypass the cache
+(<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd>).
 
 ### As a dsh plugin
 
