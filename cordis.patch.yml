@@ -1,0 +1,24 @@
+# dsh-balance bundle layer: one plugin row.
+#
+# Подключается из home-слоя $DSH_HOME/cordis.patch.yml (см. dsh-balance.nix в
+# nixos-config): строка `name` указывает на lib/index.js пакета, браузерная
+# половина находится по ближайшему package.json (exports["./client"]).
+- insert:
+    - id: dsh-balance
+      name: dsh-balance
+      config:
+        # Опрос баланса хостом (мс). 300000 = 5 минут: точность дельт по дням
+        # выше не нужна, а в суточный лимит запросов это укладывается с запасом.
+        refreshIntervalMs: 300000
+        # Как часто браузерная половина перечитывает кэш хоста (мс).
+        clientPollIntervalMs: 15000
+        # Валюта учёта расхода: USD — валюта аккаунта. Если в ответе баланса её
+        # нет, хост автоматически переключается на фактическую валюту аккаунта.
+        currency: USD
+        # Пороги окраски чипа.
+        warningThreshold: 10
+        dangerThreshold: 5
+        # Граница суток для дневной таблицы: local — часовой пояс машины.
+        dayZone: local
+        # Сколько дней хранить и показывать.
+        historyDays: 30

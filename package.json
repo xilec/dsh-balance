@@ -1,0 +1,40 @@
+{
+  "name": "dsh-balance",
+  "version": "0.1.0",
+  "description": "DeepSeek account balance history and spend in the dsh shell: 1d/1w/1m cost measured from balance differences, with a per-day ledger and session cost estimate",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./client/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "client",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout"
+      ]
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-home-paths": "*",
+    "@deepseek-ai/schemastery": "*",
+    "zod": "*"
+  }
+}
