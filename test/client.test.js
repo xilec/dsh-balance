@@ -58,6 +58,22 @@ function reactStub() {
   return react
 }
 
+/** Find every element whose props match one predicate. */
+function find(node, predicate, out = []) {
+  if (node === null || node === undefined || Array.isArray(node)) {
+    for (const child of node ?? []) find(child, predicate, out)
+    return out
+  }
+  if (typeof node === 'string' || typeof node === 'number') return out
+  if (typeof node.type === 'function') {
+    find(node.type({ ...node.props, children: node.children }), predicate, out)
+    return out
+  }
+  if (predicate(node)) out.push(node)
+  find(node.children, predicate, out)
+  return out
+}
+
 /** Render an element tree (calling function components) down to its text. */
 function textOf(node) {
   if (node === null || node === undefined || node === false || node === true) return ''
@@ -185,7 +201,7 @@ test('the chip renders the balance, the 1d/1w/1m metrics and the session cost', 
   const previousFetch = globalThis.fetch
   const calls = []
   globalThis.fetch = async (url, options) => {
-    calls.push({ url, method: options?.method ?? 'GET' })
+    calls.push({ url, method: options?.method ?? 'GET', body: options?.body })
     if (String(url).startsWith('/dsh-balance/hello')) return { ok: true, status: 200, json: async () => ({ ok: true }) }
     return { ok: true, status: 200, json: async () => payload }
   }
@@ -204,6 +220,7 @@ test('the chip renders the balance, the 1d/1w/1m metrics and the session cost', 
     assert.match(rendered, /0\.42/, 'the session cost renders')
     assert.equal(calls.some((call) => call.url === '/dsh-balance'), true)
     assert.equal(calls.some((call) => call.url === '/dsh-balance/hello' && call.method === 'POST'), true)
+    assert.equal(calls.some((call) => String(call.body).includes('"phase":"mount"')), true, 'the chip reports a completed render')
   } finally {
     react.stop()
     globalThis.fetch = previousFetch
@@ -227,6 +244,75 @@ test('the chip asks the host about the session the main view retains', async () 
     void textOf(react.createElement(Chip, { t: (key) => key, useSessions: select }))
     await new Promise((resolve) => setTimeout(resolve, 10))
     assert.equal(urls.some((url) => url.includes('sessionId=session-7')), true, urls.join(', '))
+  } finally {
+    react.stop()
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('the panel renders the balance cards, the day ledger and the tabs', async () => {
+  const { react, exported } = await loadClient()
+  react.beginRender()
+  const cardText = textOf(react.createElement(exported.__internals.Card, {
+    t: (key) => key,
+    state: { status: 'ok', payload, error: null, at: Date.now() },
+    onClose: () => {},
+  }))
+  assert.match(cardText, /card\.title/)
+  assert.match(cardText, /12\.34/, 'the balance card renders')
+  assert.match(cardText, /tab\.days/)
+  assert.match(cardText, /25\.09/, 'the day rows render')
+  assert.match(cardText, /days\.open/, 'today is marked as still filling')
+  assert.match(cardText, /footer\.rule/)
+})
+
+test('the settings tab posts the fields it edits', async () => {
+  const { react, exported } = await loadClient()
+  const previousFetch = globalThis.fetch
+  const posts = []
+  globalThis.fetch = async (url, options) => {
+    if (options?.method === 'POST') posts.push({ url, body: JSON.parse(options.body) })
+    return { ok: true, status: 200, json: async () => ({ ok: true, changed: [], sampling: payload.sampling, ...payload }) }
+  }
+  try {
+    react.beginRender()
+    const tree = react.createElement(exported.__internals.Settings, {
+      t: (key) => key,
+      state: { status: 'ok', payload, error: null, at: Date.now() },
+    })
+    assert.match(textOf(tree), /settings\.currency/)
+    const apply = find(tree, (element) => element.props?.className === 'dshb_btn dshb_btn_primary')[0]
+    assert.ok(apply !== undefined, 'the apply button exists')
+    await apply.props.onClick()
+    const settingsPosts = posts.filter((post) => post.url === '/dsh-balance/settings')
+    assert.equal(settingsPosts.length, 1)
+    assert.equal(typeof settingsPosts[0].body.currency, 'string')
+    assert.equal(typeof settingsPosts[0].body.refreshIntervalMs, 'number')
+  } finally {
+    react.stop()
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('a day row saves and clears a manual correction through the host', async () => {
+  const { react, exported } = await loadClient()
+  const { DaysTable } = exported.__internals
+  const previousFetch = globalThis.fetch
+  const posts = []
+  globalThis.fetch = async (url, options) => {
+    if (options?.method === 'POST') posts.push({ url, body: JSON.parse(options.body) })
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  try {
+    const ledger = { ...payload.ledger, rows: [...payload.ledger.rows, { key: '2026-09-24', spend: 2, computed: 2, override: 2, coarse: true, open: false }] }
+    react.beginRender()
+    const tree = react.createElement(DaysTable, { t: (key) => key, ledger, currency: 'USD' })
+    const text = textOf(tree)
+    assert.match(text, /days\.coarse/, 'a coarse day is flagged')
+    const reset = find(tree, (element) => element.type === 'button' && element.props?.className === 'dshb_btn')[0]
+    assert.ok(reset !== undefined, 'the reset button exists for an overridden day')
+    await reset.props.onClick()
+    assert.deepEqual(posts.at(-1), { url: '/dsh-balance/overrides', body: { date: '2026-09-24', amount: null } })
   } finally {
     react.stop()
     globalThis.fetch = previousFetch

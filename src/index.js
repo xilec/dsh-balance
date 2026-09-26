@@ -133,13 +133,26 @@ export function apply(ctx, config) {
   let samples = []
   /** Manual per-day corrections `{ [YYYY-MM-DD]: amount }`. */
   let overrides = {}
-  /** Last browser half that checked in, for the diagnostics line in the card. */
-  let clientHello = { version: null, at: 0, count: 0 }
+  /**
+   * Last browser half that checked in, for the diagnostics line in the card.
+   * `reads` counts payload reads, `mounts` counts chip renders — a nonzero
+   * `mounts` is how a headless check proves the browser half really rendered.
+   */
+  let clientHello = { version: null, at: 0, count: 0, reads: 0, mounts: 0 }
   /** Cached balance payload; stays on the last good value when a fetch fails. */
   let cache = { ok: false, balances: [], isAvailable: false, error: null, fetchedAt: 0, stale: false }
   let inflight = null
   let loopTimer = null
   let loaded = false
+  /**
+   * Settings the user changed from the panel, and only those.
+   *
+   * The composition row stays the source of truth: a fresh start reads the row,
+   * and a persisted value wins only for a key the panel actually wrote. Persisting
+   * the whole runtime config instead (as the first draft did) silently shadowed
+   * every later edit of the nix row.
+   */
+  let uiPrefs = {}
 
   const persist = async () => {
     if (dir === '') return
@@ -150,15 +163,7 @@ export function apply(ctx, config) {
         // The last browser half that checked in. Kept on disk so a headless
         // diagnosis can tell whether the client half ever loaded.
         client: clientHello,
-        prefs: {
-          currency: runtime.currency,
-          dayZone: runtime.dayZone,
-          refreshIntervalMs: runtime.refreshIntervalMs,
-          clientPollIntervalMs: runtime.clientPollIntervalMs,
-          warningThreshold: runtime.warningThreshold,
-          dangerThreshold: runtime.dangerThreshold,
-          historyDays: runtime.historyDays,
-        },
+        prefs: uiPrefs,
         updatedAt: Date.now(),
       })
     } catch (error) {
@@ -178,9 +183,12 @@ export function apply(ctx, config) {
       if (state.client !== null && typeof state.client === 'object') clientHello = { ...clientHello, ...state.client }
       const prefs = state.prefs ?? {}
       for (const [key, check] of Object.entries(MUTABLE_SETTINGS)) {
-        if (prefs[key] !== undefined && check(prefs[key])) runtime[key] = key === 'currency' ? String(prefs[key]).toUpperCase() : prefs[key]
+        if (prefs[key] !== undefined && check(prefs[key])) {
+          runtime[key] = key === 'currency' ? String(prefs[key]).toUpperCase() : prefs[key]
+          uiPrefs[key] = runtime[key]
+        }
       }
-      log(`loaded ${samples.length} samples, ${Object.keys(overrides).length} overrides`)
+      log(`loaded ${samples.length} samples, ${Object.keys(overrides).length} overrides, ${Object.keys(uiPrefs).length} panel settings`)
     } catch (error) {
       warn(`cannot read history: ${message(error)}`)
     } finally {
@@ -473,10 +481,13 @@ export function apply(ctx, config) {
           return
         }
         const body = await readJsonBody(req).catch(() => ({}))
+        const mount = body.phase === 'mount'
         clientHello = {
           version: typeof body.version === 'string' ? body.version : null,
           at: Date.now(),
           count: clientHello.count + 1,
+          reads: clientHello.reads + (mount ? 0 : 1),
+          mounts: clientHello.mounts + (mount ? 1 : 0),
         }
         void persist()
         sendJson(res, 200, { ok: true, refreshIntervalMs: runtime.refreshIntervalMs, clientPollIntervalMs: runtime.clientPollIntervalMs })
@@ -544,6 +555,7 @@ export function apply(ctx, config) {
             return
           }
           runtime[key] = key === 'currency' ? String(body[key]).toUpperCase() : body[key]
+          uiPrefs[key] = runtime[key]
           changed.push(key)
         }
         if (changed.includes('refreshIntervalMs')) resetLoop()

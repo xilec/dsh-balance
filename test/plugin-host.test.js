@@ -203,8 +203,9 @@ test('settings accept a known key and reject an unknown value', async () => {
 test('the client hello route records the browser half on disk', async () => {
   await withPlugin(async ({ ctx, home }) => {
     const hello = response()
-    await ctx.routes.get('/dsh-balance/hello')(request('POST', '/dsh-balance/hello', { version: '0.1.0' }), hello)
+    await ctx.routes.get('/dsh-balance/hello')(request('POST', '/dsh-balance/hello', { version: '0.1.0', phase: 'read' }), hello)
     assert.equal(JSON.parse(hello.body).ok, true)
+    await ctx.routes.get('/dsh-balance/hello')(request('POST', '/dsh-balance/hello', { version: '0.1.0', phase: 'mount' }), response())
     // persist() is fire-and-forget from the route; give it a tick.
     await new Promise((resolve) => setTimeout(resolve, 20))
     const state = JSON.parse(await (await import('node:fs/promises')).readFile(join(home, 'dsh-balance', 'state.json'), 'utf8'))
@@ -214,7 +215,9 @@ test('the client hello route records the browser half on disk', async () => {
     await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), read)
     const payload = JSON.parse(read.body)
     assert.equal(payload.client.version, '0.1.0')
-    assert.equal(payload.client.count, 1)
+    assert.equal(payload.client.count, 2)
+    assert.equal(payload.client.reads, 1)
+    assert.equal(payload.client.mounts, 1)
   })
 })
 
@@ -263,6 +266,53 @@ test('the account currency replaces a preference the account does not have', asy
     globalThis.fetch = previousFetch
     await rm(home, { recursive: true, force: true })
   }
+})
+
+test('the composition row wins at startup, and a panel setting overrides it', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
+  const previousHome = process.env.DSH_HOME
+  const previousFetch = globalThis.fetch
+  process.env.DSH_HOME = home
+  const ctx = hostContext()
+  try {
+    const module = await import(`../src/index.js?prefs=${encodeURIComponent(home)}`)
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    await mkdir(join(home, 'dsh-balance'), { recursive: true })
+    await writeFile(
+      join(home, 'dsh-balance', 'state.json'),
+      JSON.stringify({ version: 1, overrides: {}, prefs: { refreshIntervalMs: 60000, currency: 'eur' } }),
+      'utf8',
+    )
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({ is_available: true, balance_infos: [{ currency: 'USD', total_balance: '9.5', granted_balance: '0', topped_up_balance: '9.5' }] }),
+    })
+    module.apply(ctx, module.Config({ apiKey: 'test-key', refreshIntervalMs: 300000, currency: 'USD' }))
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    const res = response()
+    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), res)
+    const payload = JSON.parse(res.body)
+    assert.equal(payload.sampling.refreshIntervalMs, 60000, 'the panel value wins for the key it set')
+    assert.equal(payload.balance.currencyPreference, 'EUR', 'and is normalized to upper case')
+    assert.equal(payload.balance.currency, 'USD', 'the account currency still replaces a preference it lacks')
+    assert.equal(payload.ledger.currency, 'USD')
+  } finally {
+    globalThis.fetch = previousFetch
+    ctx.dispose()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a fresh start reads the composition row', async () => {
+  await withPlugin(async ({ ctx }) => {
+    const res = response()
+    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), res)
+    const payload = JSON.parse(res.body)
+    assert.equal(payload.sampling.refreshIntervalMs, 300000)
+    assert.equal(payload.balance.currencyPreference, 'USD')
+  })
 })
 
 test('a failing fetch keeps the last balance and reports the error', async () => {

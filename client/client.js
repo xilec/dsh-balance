@@ -308,6 +308,14 @@ window.__ModuleLoader__.load({
         for (const listener of [...listeners]) listener()
       }
 
+      function sayHello(phase) {
+        void fetch('/dsh-balance/hello', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ version: VERSION, phase }),
+        }).catch(() => {})
+      }
+
       async function read() {
         if (inflight !== null) {
           refetchRequested = true
@@ -326,11 +334,7 @@ window.__ModuleLoader__.load({
             snapshot = { status: 'ok', payload, error: null, at: Date.now() }
             if (!helloSent) {
               helloSent = true
-              void fetch('/dsh-balance/hello', {
-                method: 'POST',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ version: VERSION }),
-              }).catch(() => {})
+              sayHello('read')
             }
           } catch (error) {
             snapshot = {
@@ -380,6 +384,7 @@ window.__ModuleLoader__.load({
       }
 
       return {
+        sayHello,
         subscribe(listener) {
           listeners.add(listener)
           if (subscribers === 0) {
@@ -479,6 +484,8 @@ window.__ModuleLoader__.load({
 
       react.useEffect(() => {
         store.setSessionId(sessionId)
+        // Reports a completed render, which a reachability probe alone cannot prove.
+        store.sayHello('mount')
       }, [sessionId])
 
       // The overlay layer spans the whole frame and publishes nothing about the
@@ -603,6 +610,7 @@ window.__ModuleLoader__.load({
       const primary = balance?.primary ?? null
 
       react.useEffect(() => {
+        if (typeof document === 'undefined') return undefined
         const onKey = (event) => {
           if (event.key === 'Escape') onClose()
         }
@@ -872,6 +880,11 @@ window.__ModuleLoader__.load({
 
     exports.apply = apply
     exports.inject = inject
+    /**
+     * Internals for the test suite only. The module loader reads `apply`/`inject`
+     * and ignores everything else, so this adds no public surface to the plugin.
+     */
+    exports.__internals = { Chip, Tooltip, Card, DaysTable, Credits, Settings, createStore, money, duration, statusLevel }
     return module.exports
   },
 })

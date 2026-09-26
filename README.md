@@ -158,7 +158,7 @@ src/session-cost.js   the sessionProjections unit (tokens priced per event time)
 src/store.js          samples.ndjson and state.json on disk
 src/index.js          the Host plugin: sampler loop, HTTP routes
 client/client.js      the browser half: the chip, the tooltip, the panel
-test/                 node --test suite (50 cases, no build step)
+test/                 node --test suite (55 cases, no build step)
 ```
 
 `npm test` runs the suite; `nix flake check` runs the same suite with the dsh
