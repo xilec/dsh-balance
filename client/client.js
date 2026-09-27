@@ -181,6 +181,7 @@ window.__ModuleLoader__.load({
         'days.coarse': 'coarse',
         'days.open': 'in progress',
         'days.reset': 'reset',
+        'days.growing': '+{amount} after the correction',
         'credits.empty': 'no credits recorded yet',
         'credits.note': 'a rising balance is a top-up, a refund, or a correction',
         'settings.currency': 'Currency',
@@ -268,6 +269,7 @@ window.__ModuleLoader__.load({
         'days.coarse': 'грубо',
         'days.open': 'идёт',
         'days.reset': 'сброс',
+        'days.growing': '+{amount} после правки',
         'credits.empty': 'пополнений пока нет',
         'credits.note': 'рост баланса — это пополнение, возврат или правка',
         'settings.currency': 'Валюта',
@@ -351,6 +353,18 @@ window.__ModuleLoader__.load({
       if (typeof ts !== 'number' || ts <= 0) return null
       const date = new Date(ts)
       return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+    }
+
+    /**
+     * The pricing page, always the English one.
+     *
+     * The Host owns the rule (and the URL it was verified on), but a Host started
+     * before a locale fix may still report the Chinese page; the panel is not the
+     * place to reproduce that.
+     */
+    function rulesUrl(url) {
+      if (typeof url !== 'string' || url === '') return 'https://api-docs.deepseek.com/quick_start/pricing'
+      return url.replace('/zh-cn/', '/')
     }
 
     function dayLabel(key) {
@@ -800,7 +814,7 @@ window.__ModuleLoader__.load({
       if (!local.peak && (peak.reason === 'holiday' || peak.reason === 'weekend')) {
         lines.push(t(`peak.reason.${peak.reason}`))
       }
-      lines.push(t('peak.source', { url: peak.rule?.sourceUrl ?? '', date: peak.rule?.verifiedOn ?? '' }))
+      lines.push(t('peak.source', { url: rulesUrl(peak.rule?.sourceUrl), date: peak.rule?.verifiedOn ?? '' }))
       return lines
     }
 
@@ -867,7 +881,7 @@ window.__ModuleLoader__.load({
               h('a', {
                 key: 'link',
                 className: 'dshb_link',
-                href: payload?.peak?.rule?.sourceUrl ?? 'https://api-docs.deepseek.com/quick_start/pricing',
+                href: rulesUrl(payload?.peak?.rule?.sourceUrl),
                 target: '_blank',
                 rel: 'noreferrer',
               }, t('footer.ruleLink')),
@@ -1028,6 +1042,9 @@ window.__ModuleLoader__.load({
             })),
             h('td', { key: 'a' }, h('div', { className: 'dshb_row_flags' }, [
               row.coarse ? h('span', { key: 'c', className: 'dshb_flag' }, t('days.coarse')) : null,
+              row.measuredAfter > 0
+                ? h('span', { key: 'g', className: 'dshb_flag' }, t('days.growing', { amount: money(row.measuredAfter, currency) }))
+                : null,
               row.override !== null ? h('button', {
                 key: 'r',
                 className: 'dshb_btn',

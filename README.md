@@ -48,7 +48,9 @@ differences into:
 
 * **1d / 1w / 1m totals** — calendar days in the zone you choose;
 * **a per-day ledger** — each row showing the value derived from samples and an
-  input to correct it by hand;
+  input to correct it by hand. A correction is a *base*: it carries the instant it
+  was made, and the samples that arrive afterwards are added to it, so fixing
+  today's figure does not freeze the rest of today;
 * **credit events** — a rising balance is recorded as a top-up/refund rather than
   as negative spend.
 

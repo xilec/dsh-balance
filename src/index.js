@@ -553,7 +553,9 @@ export function apply(ctx, config) {
             sendJson(res, 400, { ok: false, error: 'amount must be a non-negative number or null' })
             return
           }
-          overrides = { ...overrides, [date]: Math.round(amount * 1e6) / 1e6 }
+          // The instant matters: the ledger adds only the samples that arrive after
+          // it, so a corrected day keeps filling instead of freezing.
+          overrides = { ...overrides, [date]: { amount: Math.round(amount * 1e6) / 1e6, at: Date.now() } }
         }
         if (!loaded) await ready
         await persist()

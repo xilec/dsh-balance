@@ -13,6 +13,12 @@
  * which for the usual sampling cadence (minutes) is exact; an interval spanning
  * days is marked `coarse`, and per-day overrides exist for exactly that case.
  *
+ * A manual override carries both the amount the user typed and the instant they
+ * typed it (`{ amount, at }`). It is a *base*, not a frozen value: only the samples
+ * that arrived after that instant are added to it, so correcting today's figure
+ * does not stop the rest of today from being counted. A bare number (the older
+ * shape, still accepted) has no instant and therefore stays frozen.
+ *
  * Pure module: no imports, no clock, no IO. The caller supplies samples,
  * overrides and "now".
  */
@@ -79,6 +85,22 @@ export function recentDayKeys(endKey, count) {
     keys.push(date.toISOString().slice(0, 10))
   }
   return keys
+}
+
+/**
+ * Read one entry of the override map.
+ *
+ * @param value - `{ amount, at }` as the panel writes it, or a bare number from an
+ * older state file (which has no instant and is therefore frozen).
+ * @returns `{ base, at }`, or null when the entry is unusable.
+ */
+function overrideEntry(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? { base: value, at: null } : null
+  if (value === null || typeof value !== 'object') return null
+  const base = Number(value.amount)
+  if (!Number.isFinite(base)) return null
+  const at = Number(value.at)
+  return { base, at: Number.isFinite(at) ? at : null }
 }
 
 /** Keep only the samples of one currency, sorted ascending by time. */
@@ -160,15 +182,28 @@ export function buildLedger(options) {
     if (fromKey !== toKey) coarseKeys.add(target)
   }
 
+  /** Spend of the intervals that closed after an instant, on one day. */
+  const measuredAfter = (key, at) => {
+    if (at === null) return 0
+    return round6(intervals.reduce((total, interval) => {
+      if (interval.spend <= 0) return total
+      if (interval.to <= at) return total
+      return dayKeyOf(interval.to, zone) === key ? total + interval.spend : total
+    }, 0))
+  }
+
   const rows = keys.map((key) => {
-    const override = Object.prototype.hasOwnProperty.call(overrides, key) ? Number(overrides[key]) : null
+    const entry = overrideEntry(overrides[key])
     const computed = sampled.get(key) ?? 0
-    const hasOverride = override !== null && Number.isFinite(override)
+    const added = entry === null ? 0 : measuredAfter(key, entry.at)
     return {
       key,
-      spend: hasOverride ? override : computed,
+      spend: entry === null ? computed : round6(entry.base + added),
       computed,
-      override: hasOverride ? override : null,
+      override: entry === null ? null : entry.base,
+      overrideAt: entry === null ? null : entry.at,
+      /** Spend that arrived after the manual base was set. */
+      measuredAfter: added,
       coarse: coarseKeys.has(key),
       /** True when the day ends after the newest sample: its value is still filling. */
       open: key === todayKey,

@@ -452,6 +452,17 @@ test('the panel opens on the summary with the cards in order', async () => {
   assert.equal(textOf(summaryTab), 'tab.summary', 'the summary tab is active on open')
   const rule = find(tree, (element) => element.type === 'a' && element.props?.className === 'dshb_link')[0]
   assert.equal(rule.props.href, 'https://api-docs.deepseek.com/quick_start/pricing', 'the rules link points at the English page')
+  // A Host started before the locale fix still reports the Chinese page; the panel
+  // normalizes it rather than sending the reader there.
+  const chinese = { ...payload, peak: { ...payload.peak, rule: { ...payload.peak.rule, sourceUrl: 'https://api-docs.deepseek.com/zh-cn/quick_start/pricing' } } }
+  react.beginRender()
+  const normalized = find(react.createElement(exported.__internals.Popover, {
+    t: (key) => key,
+    state: { status: 'ok', payload: chinese, error: null, at: Date.now() },
+    projection: { cost: 0.33, currency: 'USD' },
+    onClose: () => {},
+  }), (element) => element.type === 'a' && element.props?.className === 'dshb_link')[0]
+  assert.equal(normalized.props.href, 'https://api-docs.deepseek.com/quick_start/pricing')
 })
 
 test('the panel holds the summary height for every tab', async () => {
@@ -554,11 +565,16 @@ test('a day row saves and clears a manual correction through the Host', async ()
   try {
     const ledger = {
       ...payload.ledger,
-      rows: [...payload.ledger.rows, { key: '2026-09-16', spend: 2, computed: 2, override: 2, coarse: true, open: false }],
+      rows: [
+        ...payload.ledger.rows,
+        { key: '2026-09-16', spend: 2.4, computed: 2, override: 2, overrideAt: Date.now() - 3600_000, measuredAfter: 0.4, coarse: true, open: false },
+      ],
     }
     react.beginRender()
     const tree = react.createElement(exported.__internals.DaysTable, { t: (key) => key, ledger, currency: 'USD' })
-    assert.match(textOf(tree), /days\.coarse/, 'a coarse day is flagged')
+    const flags = textOf(tree)
+    assert.match(flags, /days\.coarse/, 'a coarse day is flagged')
+    assert.match(flags, /days\.growing/, 'a corrected day shows the samples that arrived after the correction')
     const reset = find(tree, (element) => element.type === 'button' && element.props?.className === 'dshb_btn')[0]
     assert.ok(reset !== undefined, 'the reset button exists for an overridden day')
     await reset.props.onClick()
