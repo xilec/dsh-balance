@@ -186,10 +186,24 @@ nix flake check   # the same suite inside Nix
 Locally `node_modules` is a symlink to the dsh kernel's `node_modules` (that is
 how a plugin resolves platform packages at runtime); the `devDependencies` in
 `package.json` exist for CI, which has no kernel checkout and installs the same
-packages from npm. `npm ci` therefore belongs to CI, not to a development tree.
+packages from npm. `npm ci` therefore belongs to CI, not to a development tree —
+and so do the lint scripts, which need those tools installed:
 
-GitHub Actions runs the suite and builds the flake package on every push and pull
-request.
+```sh
+# in a kernel-linked development tree
+npx knip --no-config-hints                                        # dead code
+npx jscpd --min-tokens 60 --min-lines 10 --threshold 1 \
+  --reporters console --format javascript src client              # duplication
+```
+
+`knip.json` fails on an unused file, export, dependency or binary; the two
+deliberate exceptions are the platform packages (resolved from the dsh kernel at
+runtime) and `react` (supplied by the client module loader). `jscpd` fails above
+1% duplicated lines in `src/` and `client/`; the test suite repeats fixtures on
+purpose and is not scanned.
+
+GitHub Actions runs the suite, both lint checks and the flake package build on
+every push and pull request.
 
 ## Sources
 

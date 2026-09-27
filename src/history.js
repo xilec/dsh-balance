@@ -17,14 +17,13 @@
  * overrides and "now".
  */
 
-const MINUTE_MS = 60_000
-const HOUR_MS = 60 * MINUTE_MS
+const HOUR_MS = 60 * 60_000
 
 /** Smallest credit worth recording; below this a rising balance is rounding noise. */
-export const DEFAULT_CREDIT_MIN_DELTA = 0.01
+const DEFAULT_CREDIT_MIN_DELTA = 0.01
 
 /** Smallest spend worth recording, in the account currency. */
-export const DEFAULT_SPEND_MIN_DELTA = 0.001
+const DEFAULT_SPEND_MIN_DELTA = 0.001
 
 /**
  * Money is rounded to six decimals on the way out.
@@ -41,7 +40,7 @@ const round6 = (value) => Math.round(value * 1e6) / 1e6
  * @param zone - IANA zone name, or `local`/undefined for the host's own zone.
  * @returns `{ dateKey, hour, minute }`, the key being `YYYY-MM-DD`.
  */
-export function zoneFields(tsMs, zone) {
+function zoneFields(tsMs, zone) {
   if (!zone || zone === 'local') {
     const d = new Date(tsMs)
     const month = String(d.getMonth() + 1).padStart(2, '0')
@@ -83,7 +82,7 @@ export function recentDayKeys(endKey, count) {
 }
 
 /** Keep only the samples of one currency, sorted ascending by time. */
-export function seriesFor(samples, currency) {
+function seriesFor(samples, currency) {
   return (Array.isArray(samples) ? samples : [])
     .filter((s) => s && typeof s.t === 'number' && Number.isFinite(s.t) &&
       typeof s.total === 'number' && Number.isFinite(s.total) &&
@@ -267,4 +266,3 @@ export function serializeSamples(samples) {
   return samples.map((s) => JSON.stringify(s)).join('\n') + (samples.length > 0 ? '\n' : '')
 }
 
-export { MINUTE_MS, HOUR_MS }

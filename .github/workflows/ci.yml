@@ -24,7 +24,7 @@ jobs:
           node-version-file: package.json
           cache: npm
 
-      # --ignore-scripts: the suite only needs the three platform packages
+      # --ignore-scripts: the suite only needs the platform packages
       # (zod, @deepseek-ai/schemastery, @deepseek-ai/dsh-home-paths) to resolve
       # the bare imports in src/*.js. We do not run lifecycle scripts at all,
       # which keeps the job fast and removes an arbitrary-code-execution path
@@ -41,6 +41,32 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+  lint:
+    name: Dead code and duplication
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      # knip (knip.json) fails the job on an unused file, export, dependency or
+      # binary. Two deliberate exceptions live in that config: the platform
+      # packages the plugin resolves from the dsh kernel rather than from npm,
+      # and `react`, which the client module loader supplies at runtime.
+      #
+      # jscpd fails above the duplication budget the `lint:dup` script sets
+      # (1% of lines, clones of at least 10 lines / 60 tokens, src/ and client/
+      # only — the test suite repeats fixtures on purpose).
+      - name: Check for dead code and duplication
+        run: npm run lint
 
   package:
     name: Flake package

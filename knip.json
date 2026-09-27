@@ -1,0 +1,23 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "entry": [
+    "src/index.js",
+    "client/client.js",
+    "test/*.test.js"
+  ],
+  "project": [
+    "src/**/*.js",
+    "client/**/*.js"
+  ],
+  "ignoreDependencies": [
+    "react"
+  ],
+  "rules": {
+    "exports": "error",
+    "files": "error",
+    "dependencies": "error",
+    "devDependencies": "error",
+    "unlisted": "error",
+    "binaries": "error"
+  }
+}

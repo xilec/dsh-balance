@@ -31,7 +31,7 @@ export const RULE_SOURCE_URL = 'https://api-docs.deepseek.com/quick_start/pricin
 export const RULE_VERIFIED_ON = '2026-09-27'
 
 /** Peak windows as `[startMinute, endMinute)` offsets from 00:00 Beijing time. */
-export const PEAK_WINDOWS_BJT_MINUTES = Object.freeze([
+const PEAK_WINDOWS_BJT_MINUTES = Object.freeze([
   Object.freeze([9 * 60, 12 * 60]),
   Object.freeze([14 * 60, 18 * 60]),
 ])
@@ -100,7 +100,7 @@ const RATES_20260823 = Object.freeze({
 })
 
 /** Effective-dated rate tables; the last entry whose `fromMs` is not after the instant wins. */
-export const RATE_SCHEDULE = Object.freeze([
+const RATE_SCHEDULE = Object.freeze([
   // 2026-08-23 00:00 BJT: peak/off-peak pricing and all-day off-peak weekends start.
   Object.freeze({ fromMs: Date.UTC(2026, 7, 22, 16, 0, 0), rates: RATES_20260823 }),
   // 2026-09-10 12:00 BJT: the current Flash price cut.
@@ -125,7 +125,7 @@ export function bjtFields(tsMs) {
 }
 
 /** Normalize a holiday list (array or Set of `YYYY-MM-DD`) to a Set. */
-export function holidaySet(holidays) {
+function holidaySet(holidays) {
   if (holidays instanceof Set) return holidays
   if (Array.isArray(holidays)) return new Set(holidays)
   return new Set(PUBLIC_HOLIDAYS_2026)
@@ -152,7 +152,7 @@ export function isPeakInstant(tsMs, holidays = PUBLIC_HOLIDAYS_2026) {
 }
 
 /** Epoch ms of 00:00 Beijing time on the Beijing day containing `tsMs`. */
-export function bjtDayStartMs(tsMs) {
+function bjtDayStartMs(tsMs) {
   return Math.floor((tsMs + BJT_OFFSET_MS) / DAY_MS) * DAY_MS - BJT_OFFSET_MS
 }
 

@@ -466,6 +466,37 @@ export function apply(ctx, config) {
       res.end(text)
     }
 
+    /**
+     * Register a POST route: the method guard and the JSON body read are the same
+     * for every writer, so they live here instead of in each handler. A lenient
+     * route (the client heartbeat, the refresh trigger) keeps going with an empty
+     * body when the payload is unreadable, because it carries no required fields.
+     */
+    const postRoute = (path, label, handle, { lenient = false } = {}) => {
+      webCtx.effect(() => webCtx.webServer.register({
+        kind: 'exact',
+        path,
+        async handler(req, res) {
+          if (req.method !== 'POST') {
+            res.writeHead(405, { Allow: 'POST' })
+            res.end()
+            return
+          }
+          let body
+          try {
+            body = await readJsonBody(req)
+          } catch (error) {
+            if (!lenient) {
+              sendJson(res, 400, { ok: false, error: message(error) })
+              return
+            }
+            body = {}
+          }
+          await handle(body, res)
+        },
+      }), label)
+    }
+
     webCtx.effect(() => webCtx.webServer.register({
       kind: 'exact',
       path: '/dsh-balance',
@@ -490,59 +521,25 @@ export function apply(ctx, config) {
       },
     }), 'dsh-balance: read route')
 
-    webCtx.effect(() => webCtx.webServer.register({
-      kind: 'exact',
-      path: '/dsh-balance/refresh',
-      async handler(req, res) {
-        if (req.method !== 'POST') {
-          res.writeHead(405, { Allow: 'POST' })
-          res.end()
-          return
-        }
-        await refresh()
-        sendJson(res, 200, buildPayload(''))
-      },
-    }), 'dsh-balance: refresh route')
+    postRoute('/dsh-balance/refresh', 'dsh-balance: refresh route', async (body, res) => {
+      await refresh()
+      sendJson(res, 200, buildPayload(''))
+    }, { lenient: true })
 
-    webCtx.effect(() => webCtx.webServer.register({
-      kind: 'exact',
-      path: '/dsh-balance/hello',
-      async handler(req, res) {
-        if (req.method !== 'POST') {
-          res.writeHead(405, { Allow: 'POST' })
-          res.end()
-          return
-        }
-        const body = await readJsonBody(req).catch(() => ({}))
-        const mount = body.phase === 'mount'
-        clientHello = {
-          version: typeof body.version === 'string' ? body.version : null,
-          at: Date.now(),
-          count: clientHello.count + 1,
-          reads: clientHello.reads + (mount ? 0 : 1),
-          mounts: clientHello.mounts + (mount ? 1 : 0),
-        }
-        void persist()
-        sendJson(res, 200, { ok: true, refreshIntervalMs: runtime.refreshIntervalMs, clientPollIntervalMs: runtime.clientPollIntervalMs })
-      },
-    }), 'dsh-balance: client hello route')
+    postRoute('/dsh-balance/hello', 'dsh-balance: client hello route', async (body, res) => {
+      const mount = body.phase === 'mount'
+      clientHello = {
+        version: typeof body.version === 'string' ? body.version : null,
+        at: Date.now(),
+        count: clientHello.count + 1,
+        reads: clientHello.reads + (mount ? 0 : 1),
+        mounts: clientHello.mounts + (mount ? 1 : 0),
+      }
+      void persist()
+      sendJson(res, 200, { ok: true, refreshIntervalMs: runtime.refreshIntervalMs, clientPollIntervalMs: runtime.clientPollIntervalMs })
+    }, { lenient: true })
 
-    webCtx.effect(() => webCtx.webServer.register({
-      kind: 'exact',
-      path: '/dsh-balance/overrides',
-      async handler(req, res) {
-        if (req.method !== 'POST') {
-          res.writeHead(405, { Allow: 'POST' })
-          res.end()
-          return
-        }
-        let body
-        try {
-          body = await readJsonBody(req)
-        } catch (error) {
-          sendJson(res, 400, { ok: false, error: message(error) })
-          return
-        }
+    postRoute('/dsh-balance/overrides', 'dsh-balance: overrides route', async (body, res) => {
         const date = typeof body.date === 'string' ? body.date : ''
         if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
           sendJson(res, 400, { ok: false, error: 'date must be YYYY-MM-DD' })
@@ -561,25 +558,9 @@ export function apply(ctx, config) {
         if (!loaded) await ready
         await persist()
         sendJson(res, 200, { ok: true, overrides, ledger: ledgerPayload() })
-      },
-    }), 'dsh-balance: overrides route')
+    })
 
-    webCtx.effect(() => webCtx.webServer.register({
-      kind: 'exact',
-      path: '/dsh-balance/settings',
-      async handler(req, res) {
-        if (req.method !== 'POST') {
-          res.writeHead(405, { Allow: 'POST' })
-          res.end()
-          return
-        }
-        let body
-        try {
-          body = await readJsonBody(req)
-        } catch (error) {
-          sendJson(res, 400, { ok: false, error: message(error) })
-          return
-        }
+    postRoute('/dsh-balance/settings', 'dsh-balance: settings route', async (body, res) => {
         const changed = []
         for (const [key, check] of Object.entries(MUTABLE_SETTINGS)) {
           if (body[key] === undefined) continue
@@ -594,8 +575,7 @@ export function apply(ctx, config) {
         if (changed.includes('refreshIntervalMs')) resetLoop()
         if (changed.length > 0) await persist()
         sendJson(res, 200, { ok: true, changed, sampling: { refreshIntervalMs: runtime.refreshIntervalMs, clientPollIntervalMs: runtime.clientPollIntervalMs } })
-      },
-    }), 'dsh-balance: settings route')
+    })
   })
 }
 

@@ -17,13 +17,13 @@ import { dirname, join } from 'node:path'
 import { compactSamples, parseSamples, serializeSamples } from './history.js'
 
 /** File name of the append-only sample log. */
-export const SAMPLES_FILE = 'samples.ndjson'
+const SAMPLES_FILE = 'samples.ndjson'
 
 /** File name of the JSON state document. */
-export const STATE_FILE = 'state.json'
+const STATE_FILE = 'state.json'
 
 /** How long full-resolution samples are kept before hourly thinning (days). */
-export const DEFAULT_KEEP_DAYS = 120
+const DEFAULT_KEEP_DAYS = 120
 
 /** Read a text file, returning `fallback` when it does not exist yet. */
 async function readTextIfPresent(path, fallback = '') {
@@ -33,19 +33,6 @@ async function readTextIfPresent(path, fallback = '') {
     if (error !== null && typeof error === 'object' && error.code === 'ENOENT') return fallback
     throw error
   }
-}
-
-/**
- * Read and thin the sample log.
- *
- * @param dir - the plugin's state directory.
- * @param options.keepDays - full-resolution retention window.
- * @returns samples ascending by time; damaged lines are dropped.
- */
-export async function readSamples(dir, options = {}) {
-  const text = await readTextIfPresent(join(dir, SAMPLES_FILE))
-  const samples = parseSamples(text)
-  return compactSamples(samples, { keepDays: options.keepDays ?? DEFAULT_KEEP_DAYS })
 }
 
 /**
@@ -86,7 +73,7 @@ export async function appendSample(dir, sample) {
  * @param dir - the plugin's state directory.
  * @param samples - the samples to persist.
  */
-export async function writeSamples(dir, samples) {
+async function writeSamples(dir, samples) {
   await writeAtomic(join(dir, SAMPLES_FILE), serializeSamples(samples))
 }
 

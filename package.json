@@ -20,7 +20,10 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.js",
-    "ci": "npm ci --ignore-scripts && npm test"
+    "lint:dead": "knip --no-config-hints",
+    "lint:dup": "jscpd --min-tokens 60 --min-lines 10 --threshold 1 --reporters console --format javascript src client",
+    "lint": "npm run lint:dead && npm run lint:dup",
+    "ci": "npm ci --ignore-scripts && npm run lint && npm test"
   },
   "engines": {
     "node": ">=22"
@@ -39,6 +42,8 @@
   "devDependencies": {
     "@deepseek-ai/dsh-home-paths": "0.1.7-rc.2",
     "@deepseek-ai/schemastery": "3.18.4",
+    "jscpd": "4.3.0",
+    "knip": "5.88.1",
     "zod": "4.4.3"
   }
 }
