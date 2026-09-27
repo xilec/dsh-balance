@@ -13,8 +13,12 @@ Balance, then the last day / week / month, then this session — one pill in the
 composer dock, immediately left of the shipped turn counters, with the same size,
 colour and hover wash as the token-usage pills beside it. It carries no labels
 (the legend is the native tooltip), and clicking it opens the panel anchored above
-the line, exactly as the token-usage pills open theirs: the summary cards, the
-per-day ledger with editable rows, the credit (top-up) events and the settings.
+the line, exactly as the token-usage pills open theirs. The panel opens on
+**Summary** — the account cards plus every figure the plugin holds (balance split,
+the three windows, the session estimate, the tariff and its next change, sample
+count and cadence, credits, when the balance was last read, and the partial/coarse
+warnings) — and then offers **Days** (the editable per-day ledger), **Credits** and
+**Settings**.
 
 The peak indicator is the coloured chip in the session header:
 

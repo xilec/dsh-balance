@@ -64,6 +64,9 @@ window.__ModuleLoader__.load({
         '.dshb_modal_title{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary)}',
         '.dshb_modal_sub{font-size:11px;color:var(--dsw-alias-label-tertiary)}',
         '.dshb_close{border:0;background:transparent;color:inherit;font-size:18px;line-height:1;cursor:pointer;padding:0 4px}',
+        '.dshb_rows{display:flex;flex-direction:column;gap:3px}',
+        '.dshb_row{display:flex;justify-content:space-between;gap:12px}',
+        '.dshb_row span:last-child{color:var(--dsw-alias-label-tertiary)}',
         '.dshb_meta{display:flex;flex-wrap:wrap;gap:4px 12px;color:var(--dsw-alias-label-tertiary);font-size:11px}',
         '.dshb_flag{color:var(--dsw-alias-state-warn-primary,#f59e0b);font-size:11px}',
         '.dshb_link{color:var(--dsw-alias-label-link,var(--dsw-alias-state-info-primary,#3b82f6));cursor:pointer;',
@@ -139,6 +142,8 @@ window.__ModuleLoader__.load({
         'tip.spend1w': 'Last 7 days',
         'tip.spend1m': 'Last 30 days',
         'tip.session': 'This session (estimate)',
+        'tip.tariff': 'Tariff now',
+        'tip.next': 'Next change',
         'tip.samples': 'Samples',
         'tip.cadence': 'Median gap',
         'tip.fetched': 'Balance read',
@@ -155,6 +160,7 @@ window.__ModuleLoader__.load({
         'tip.stale': 'showing the last successful read',
         'card.title': 'DeepSeek balance and spend',
         'card.sub': 'spend is measured as the drop of the account balance, plus credits',
+        'tab.summary': 'Summary',
         'tab.days': 'Days',
         'tab.credits': 'Credits',
         'tab.settings': 'Settings',
@@ -223,6 +229,8 @@ window.__ModuleLoader__.load({
         'tip.spend1w': 'За 7 дней',
         'tip.spend1m': 'За 30 дней',
         'tip.session': 'Эта сессия (оценка)',
+        'tip.tariff': 'Тариф сейчас',
+        'tip.next': 'Следующая смена',
         'tip.samples': 'Сэмплов',
         'tip.cadence': 'Медианный интервал',
         'tip.fetched': 'Баланс прочитан',
@@ -239,6 +247,7 @@ window.__ModuleLoader__.load({
         'tip.stale': 'показано последнее успешное чтение',
         'card.title': 'Баланс и расход DeepSeek',
         'card.sub': 'расход считается как падение баланса плюс пополнения',
+        'tab.summary': 'Сводка',
         'tab.days': 'Дни',
         'tab.credits': 'Пополнения',
         'tab.settings': 'Настройки',
@@ -792,60 +801,21 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The panel behind the pill: the summary cards, the per-day ledger, the credit
-     * events and the settings, anchored above the readout like the token-usage
-     * dialogs rather than a full-screen modal.
+     * The panel behind the pill: the summary first, then the per-day ledger, the
+     * credit events and the settings, anchored above the readout like the
+     * token-usage dialogs rather than a full-screen modal.
      */
     function Popover({ t, state, projection, onClose }) {
-      const [tab, setTab] = react.useState('days')
+      const [tab, setTab] = react.useState('summary')
       const payload = state.payload
-      const currency = payload?.balance?.currency ?? 'USD'
-      const ledger = payload?.ledger ?? null
-      const balance = payload?.balance ?? null
-      const primary = balance?.primary ?? null
-      const sessionCost = projection?.cost ?? payload?.session?.cost ?? null
-      const sessionCurrency = projection?.currency ?? payload?.session?.currency ?? currency
 
-      const card = (key, label, value, hint) => h('div', { className: 'dshb_card', key }, [
-        h('div', { className: 'dshb_card_label', key: 'l' }, label),
-        h('div', { className: 'dshb_card_value', key: 'v' }, value),
-        hint === undefined ? null : h('div', { className: 'dshb_card_hint', key: 'h' }, hint),
-      ])
-
-      // Balance, today and this session on the first row; the two rolling totals
-      // below them, month first, week after it.
-      const cards = h('div', { className: 'dshb_cards', key: 'cards' }, [
-        card('bal', t('card.balance'),
-          primary === null ? '—' : money(primary.total, currency),
-          primary === null
-            ? (balance?.error === 'api-key-missing' ? t('tip.error.api-key-missing') : t('card.unavailable'))
-            : `${t('tip.toppedUp')} ${money(primary.toppedUp, currency)} · ${t('tip.granted')} ${money(primary.granted, currency)}`),
-        card('d1', t('card.today'), ledger === null ? '—' : money(ledger.totals.d1.amount, currency)),
-        card('ses', t('card.session'), sessionCost === null ? '—' : money(sessionCost, sessionCurrency),
-          payload?.peak === undefined ? undefined : t(`reason.${payload.peak.phase ?? 'off-peak'}`)),
-        card('m1', t('card.month'), ledger === null ? '—' : money(ledger.totals.m1.amount, currency)),
-        card('w1', t('card.week'), ledger === null ? '—' : money(ledger.totals.w1.amount, currency)),
-      ])
-
-      const meta = []
-      if (ledger !== null) {
-        meta.push(`${t('tip.samples')} ${ledger.sampleCount}`)
-        if (ledger.medianGapMs !== null) meta.push(`${t('tip.cadence')} ${duration(ledger.medianGapMs)}`)
-        meta.push(`${t('tip.credits')} ${money(ledger.creditTotal, currency)} (${ledger.credits.length})`)
-      }
-      meta.push(`${t('tip.fetched')} ${balance?.fetchedAt ? clock(balance.fetchedAt) : t('common.never')}`)
-      if (balance?.stale) meta.push(t('tip.stale'))
-
-      const flags = []
-      if (payload?.session?.unpriced?.length > 0) flags.push(t('tip.unpriced', { models: payload.session.unpriced.join(', ') }))
-      if (ledger !== null && !ledger.totals.m1.covered) flags.push(t('tip.partial'))
-      if (ledger !== null && ledger.rows.some((entry) => entry.coarse)) flags.push(t('tip.coarse'))
-
-      const body = tab === 'days'
-        ? h(DaysTable, { t, ledger, currency, key: 'days' })
-        : tab === 'credits'
-          ? h(Credits, { t, ledger, currency, key: 'credits' })
-          : h(Settings, { t, state, key: 'settings' })
+      const body = tab === 'summary'
+        ? h(Summary, { t, state, projection, key: 'summary' })
+        : tab === 'days'
+          ? h(DaysTable, { t, ledger: payload?.ledger ?? null, currency: payload?.balance?.currency ?? 'USD', key: 'days' })
+          : tab === 'credits'
+            ? h(Credits, { t, ledger: payload?.ledger ?? null, currency: payload?.balance?.currency ?? 'USD', key: 'credits' })
+            : h(Settings, { t, state, key: 'settings' })
 
       return [
         h('div', { className: 'dshb_catch', key: 'catch', onClick: onClose }),
@@ -858,10 +828,7 @@ window.__ModuleLoader__.load({
             h('button', { className: 'dshb_close', key: 'x', onClick: onClose, title: t('common.close') }, '×'),
           ]),
           h('div', { className: 'dshb_popover_body', key: 'body' }, [
-            cards,
-            h('div', { className: 'dshb_meta', key: 'meta' }, meta.join(' · ')),
-            flags.length === 0 ? null : h('div', { className: 'dshb_flag', key: 'flags' }, flags.join(' · ')),
-            h('div', { className: 'dshb_tabs', key: 'tabs' }, ['days', 'credits', 'settings'].map((id) =>
+            h('div', { className: 'dshb_tabs', key: 'tabs' }, ['summary', 'days', 'credits', 'settings'].map((id) =>
               h('button', {
                 key: id,
                 className: 'dshb_tab',
@@ -893,6 +860,84 @@ window.__ModuleLoader__.load({
           ]),
         ]),
       ]
+    }
+
+    /**
+     * The opening tab: the account cards plus every figure the plugin knows, which
+     * is what the old hover tooltip used to spell out.
+     */
+    function Summary({ t, state, projection }) {
+      const payload = state.payload
+      const currency = payload?.balance?.currency ?? 'USD'
+      const ledger = payload?.ledger ?? null
+      const balance = payload?.balance ?? null
+      const primary = balance?.primary ?? null
+      const peak = payload?.peak ?? null
+      const sessionCost = projection?.cost ?? payload?.session?.cost ?? null
+      const sessionCurrency = projection?.currency ?? payload?.session?.currency ?? currency
+
+      const card = (key, label, value, hint) => h('div', { className: 'dshb_card', key }, [
+        h('div', { className: 'dshb_card_label', key: 'l' }, label),
+        h('div', { className: 'dshb_card_value', key: 'v' }, value),
+        hint === undefined ? null : h('div', { className: 'dshb_card_hint', key: 'h' }, hint),
+      ])
+
+      // Balance, today and this session on the first row; then the two rolling
+      // totals, week first, month after it.
+      const cards = h('div', { className: 'dshb_cards', key: 'cards' }, [
+        card('bal', t('card.balance'),
+          primary === null ? '—' : money(primary.total, currency),
+          primary === null
+            ? (balance?.error === 'api-key-missing' ? t('tip.error.api-key-missing') : t('card.unavailable'))
+            : `${t('tip.toppedUp')} ${money(primary.toppedUp, currency)} · ${t('tip.granted')} ${money(primary.granted, currency)}`),
+        card('d1', t('card.today'), ledger === null ? '—' : money(ledger.totals.d1.amount, currency)),
+        card('ses', t('card.session'), sessionCost === null ? '—' : money(sessionCost, sessionCurrency),
+          peak === null ? undefined : t(`reason.${peak.phase ?? 'off-peak'}`)),
+        card('w1', t('card.week'), ledger === null ? '—' : money(ledger.totals.w1.amount, currency)),
+        card('m1', t('card.month'), ledger === null ? '—' : money(ledger.totals.m1.amount, currency)),
+      ])
+
+      const rows = []
+      const row = (label, value) => rows.push(h('div', { className: 'dshb_row', key: label }, [
+        h('span', { key: 'l' }, label),
+        h('span', { key: 'v' }, value),
+      ]))
+      row(t('tip.balance'), primary === null ? '—' : money(primary.total, currency))
+      if (primary !== null) {
+        row(t('tip.toppedUp'), money(primary.toppedUp, currency))
+        row(t('tip.granted'), money(primary.granted, currency))
+      }
+      if (ledger !== null) {
+        row(t('tip.spend1d'), money(ledger.totals.d1.amount, currency))
+        row(t('tip.spend1w'), money(ledger.totals.w1.amount, currency))
+        row(t('tip.spend1m'), money(ledger.totals.m1.amount, currency))
+      }
+      row(t('tip.session'), sessionCost === null ? '—' : money(sessionCost, sessionCurrency))
+      if (peak !== null) {
+        row(t('tip.tariff'), t(`reason.${peak.phase ?? 'off-peak'}`))
+        if (peak.changeAt !== null && peak.changeAt !== undefined) {
+          row(t('tip.next'), `${clock(peak.changeAt)} · ${formatRemaining(peak.untilMs ?? 0)}`)
+        }
+      }
+      if (ledger !== null) {
+        row(t('tip.samples'), `${ledger.sampleCount}`)
+        if (ledger.medianGapMs !== null) row(t('tip.cadence'), duration(ledger.medianGapMs))
+        row(t('tip.credits'), `${money(ledger.creditTotal, currency)} (${ledger.credits.length})`)
+      }
+      row(t('tip.fetched'), balance?.fetchedAt
+        ? `${clock(balance.fetchedAt)}${balance.stale ? ` · ${t('tip.stale')}` : ''}`
+        : t('common.never'))
+
+      const flags = []
+      if (payload?.session?.unpriced?.length > 0) flags.push(t('tip.unpriced', { models: payload.session.unpriced.join(', ') }))
+      if (ledger !== null && !ledger.totals.m1.covered) flags.push(t('tip.partial'))
+      if (ledger !== null && ledger.rows.some((entry) => entry.coarse)) flags.push(t('tip.coarse'))
+
+      return h('div', { className: 'dshb_body' }, [
+        cards,
+        h('div', { className: 'dshb_rows', key: 'rows' }, rows),
+        flags.length === 0 ? null : h('div', { className: 'dshb_flag', key: 'flags' }, flags.join(' · ')),
+      ])
     }
 
     function DaysTable({ t, ledger, currency }) {
@@ -1106,7 +1151,7 @@ window.__ModuleLoader__.load({
      * and ignores everything else, so this adds no public surface to the plugin.
      */
     exports.__internals = {
-      Readout, Popover, DaysTable, Credits, Settings, createPeakChip, createStore,
+      Readout, Popover, Summary, DaysTable, Credits, Settings, createPeakChip, createStore,
       money, duration, formatRemaining, statusLevel, phaseFromSchedule, effectiveRoute,
       routeFromModelSelection, routeFromCatalogDefault, isPeakRuleRoute, settingsOf, peakLines,
     }

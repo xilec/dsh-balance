@@ -426,7 +426,7 @@ test('the route helpers prefer the projection and fall back to the catalog defau
   assert.equal(isPeakRuleRoute('pi-ai'), false)
 })
 
-test('the panel puts this session on the first row and the week below it', async () => {
+test('the panel opens on the summary with the cards in order', async () => {
   const { exported, react } = await loadClient()
   react.beginRender()
   const tree = react.createElement(exported.__internals.Popover, {
@@ -436,13 +436,38 @@ test('the panel puts this session on the first row and the week below it', async
     onClose: () => {},
   })
   const text = textOf(tree)
-  const order = ['card.balance', 'card.today', 'card.session', 'card.month', 'card.week'].map((key) => text.indexOf(key))
+  // Balance, today and this session first, then the week, then the month.
+  const order = ['card.balance', 'card.today', 'card.session', 'card.week', 'card.month'].map((key) => text.indexOf(key))
   assert.equal(order.every((index) => index >= 0), true, text)
   assert.deepEqual([...order].sort((a, b) => a - b), order, 'the cards render in the intended order')
   assert.match(text, /card\.title/)
+  assert.match(text, /tab\.summary/)
   assert.match(text, /tab\.days/)
+  // The tab row lists summary first and the summary is what is rendered.
+  assert.ok(text.indexOf('tab.summary') < text.indexOf('tab.days'))
+  assert.match(text, /tip\.samples/, 'the summary carries the statistics')
+  const summaryTab = find(tree, (element) => element.type === 'button' && element.props?.['data-active'] === 'true')[0]
+  assert.equal(textOf(summaryTab), 'tab.summary', 'the summary tab is active on open')
   const rule = find(tree, (element) => element.type === 'a' && element.props?.className === 'dshb_link')[0]
   assert.equal(rule.props.href, 'https://api-docs.deepseek.com/quick_start/pricing', 'the rules link points at the English page')
+})
+
+test('the summary tab spells out every figure the plugin holds', async () => {
+  const { exported, react } = await loadClient()
+  react.beginRender()
+  const tree = react.createElement(exported.__internals.Summary, {
+    t: (key) => key,
+    state: { status: 'ok', payload, error: null, at: Date.now() },
+    projection: { cost: 0.91, currency: 'USD' },
+  })
+  const text = textOf(tree)
+  for (const key of ['tip.balance', 'tip.toppedUp', 'tip.granted', 'tip.spend1d', 'tip.spend1w', 'tip.spend1m', 'tip.session', 'tip.tariff', 'tip.next', 'tip.samples', 'tip.cadence', 'tip.credits', 'tip.fetched']) {
+    assert.match(text, new RegExp(key.replace('.', '\\.')), `the summary is missing ${key}`)
+  }
+  assert.match(text, /\$19\.52/)
+  assert.match(text, /\$0\.91/, 'the projection supplies the session figure')
+  assert.match(text, /5/, 'the sample count is listed')
+  assert.match(text, /5m/, 'the median sampling gap is listed')
 })
 
 test('the pill opens the anchored panel, and the catch layer closes it', async () => {
