@@ -37,56 +37,52 @@ window.__ModuleLoader__.load({
       tag.dataset.plugin = 'dsh-balance'
       tag.dataset.pluginCss = CSS_ID
       tag.textContent = [
-        // The readout copies the shipped stats pills: same size, same tertiary
-        // colour, same hover wash, dot separators between the metrics.
-        '.dshb_readout{box-sizing:border-box;min-width:0;max-width:100%;font-size:calc(var(--dsh-content-font-size-secondary,13px) - 1px);',
+        // The readout copies the shipped stats pills: same font size, same tertiary
+        // colour, same hover wash, dot separators between the figures.
+        '.dshb_readout{box-sizing:border-box;min-width:0;max-width:100%;',
+        'font-size:calc(var(--dsh-content-font-size-secondary,13px) - 1px);',
         'line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px));display:flex;align-items:center;justify-content:center}',
         '.dshb_pill{box-sizing:border-box;max-width:100%;color:var(--dsw-alias-label-tertiary);font:inherit;',
         'font-variant-numeric:tabular-nums;line-height:inherit;white-space:nowrap;background:0 0;border:none;border-radius:999px;',
-        'align-items:center;gap:6px;padding:1px 8px;display:inline-flex;cursor:pointer;overflow:hidden;text-overflow:ellipsis}',
-        '.dshb_pill:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}',
+        'align-items:center;gap:2px;padding:1px 8px;display:inline-flex;cursor:pointer;overflow:hidden;text-overflow:ellipsis}',
+        '.dshb_pill:hover,.dshb_pill[aria-expanded="true"]{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}',
         '.dshb_metric_muted{opacity:.55}',
-        '.dshb_sep{background:var(--dsw-alias-label-caption);border-radius:1px;flex:none;width:2px;height:2px;margin:0 8px}',
+        '.dshb_sep{background:var(--dsw-alias-label-caption);border-radius:1px;flex:none;width:2px;height:2px;margin:0 6px}',
         '.dshb_anchor{position:relative;display:inline-flex;min-width:0}',
-        '.dshb_tip{position:absolute;bottom:calc(100% + 8px);left:0;z-index:31;min-width:300px;max-width:min(440px,92vw);',
-        'padding:10px 12px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.25));',
+        // The panel is an anchored popover — the behaviour of the token-usage pills
+        // beside it: no dimmed backdrop, just a catch layer for outside clicks.
+        '.dshb_catch{position:fixed;inset:0;z-index:60}',
+        '.dshb_popover{position:absolute;bottom:calc(100% + 8px);left:0;z-index:61;width:min(560px,92vw);',
+        'max-height:min(72vh,660px);display:flex;flex-direction:column;overflow:hidden;border-radius:10px;',
+        'border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.25));',
         'background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1,#fff));color:var(--dsw-alias-label-secondary);',
-        'font-size:12px;line-height:1.6;box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,.18));',
-        'display:flex;flex-direction:column;gap:4px;text-align:left;white-space:normal}',
-        '.dshb_tip_head{display:flex;align-items:center;justify-content:space-between;gap:12px;font-weight:600;color:var(--dsw-alias-label-primary)}',
-        '.dshb_tip_row{display:flex;justify-content:space-between;gap:12px}',
-        '.dshb_tip_row span:last-child{color:var(--dsw-alias-label-tertiary)}',
-        '.dshb_tip_note{color:var(--dsw-alias-label-tertiary);font-size:11px}',
-        '.dshb_tip_flag{color:var(--dsw-alias-state-warn-primary,#f59e0b)}',
+        'font-size:12px;line-height:1.6;box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,.18));text-align:left;white-space:normal}',
+        '.dshb_popover_head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:10px 12px 0}',
+        '.dshb_popover_body{padding:10px 12px 12px;overflow:auto;display:flex;flex-direction:column;gap:10px}',
+        '.dshb_popover_foot{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;',
+        'border-top:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18))}',
+        '.dshb_modal_title{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary)}',
+        '.dshb_modal_sub{font-size:11px;color:var(--dsw-alias-label-tertiary)}',
+        '.dshb_close{border:0;background:transparent;color:inherit;font-size:18px;line-height:1;cursor:pointer;padding:0 4px}',
+        '.dshb_meta{display:flex;flex-wrap:wrap;gap:4px 12px;color:var(--dsw-alias-label-tertiary);font-size:11px}',
+        '.dshb_flag{color:var(--dsw-alias-state-warn-primary,#f59e0b);font-size:11px}',
         '.dshb_link{color:var(--dsw-alias-label-link,var(--dsw-alias-state-info-primary,#3b82f6));cursor:pointer;',
         'text-decoration:none;background:none;border:none;padding:0;font:inherit;text-align:left}',
         '.dshb_link:hover{text-decoration:underline}',
-        '.dshb_backdrop{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;',
-        'padding:24px;background:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.45))}',
-        '.dshb_modal{width:min(720px,96vw);max-height:min(78vh,760px);display:flex;flex-direction:column;',
-        'border-radius:12px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.25));',
-        'background:var(--dsw-alias-bg-layer-1,var(--dsw-hovercard-bg,#fff));color:var(--dsw-alias-label-primary);',
-        'box-shadow:var(--dsw-shadow-lv3,0 18px 48px rgba(0,0,0,.28));overflow:hidden}',
-        '.dshb_modal_head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:14px 16px;',
-        'border-bottom:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18))}',
-        '.dshb_modal_title{font-size:14px;font-weight:600}',
-        '.dshb_modal_sub{font-size:11.5px;color:var(--dsw-alias-label-tertiary)}',
-        '.dshb_close{border:0;background:transparent;color:inherit;font-size:18px;line-height:1;cursor:pointer;padding:4px}',
-        '.dshb_tabs{display:flex;gap:4px;padding:10px 16px 0}',
+        '.dshb_cards{display:flex;gap:8px;flex-wrap:wrap}',
+        '.dshb_card{flex:1 1 140px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:10px;padding:8px 10px}',
+        '.dshb_card_label{font-size:11px;color:var(--dsw-alias-label-tertiary)}',
+        '.dshb_card_value{font-size:16px;font-weight:600;margin-top:2px}',
+        '.dshb_card_hint{font-size:11px;color:var(--dsw-alias-label-tertiary);margin-top:2px}',
+        '.dshb_tabs{display:flex;gap:4px}',
         '.dshb_tab{border:1px solid transparent;background:transparent;color:var(--dsw-alias-label-secondary);',
         'font:inherit;font-size:12px;padding:4px 10px;border-radius:999px;cursor:pointer}',
         '.dshb_tab[data-active="true"]{background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.12));',
         'border-color:var(--dsw-alias-border-l2,rgba(128,128,128,.25));color:var(--dsw-alias-label-primary)}',
-        '.dshb_body{padding:12px 16px 16px;overflow:auto;display:flex;flex-direction:column;gap:12px}',
-        '.dshb_cards{display:flex;gap:10px;flex-wrap:wrap}',
-        '.dshb_card{flex:1 1 150px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:10px;padding:10px 12px}',
-        '.dshb_card_label{font-size:11px;color:var(--dsw-alias-label-tertiary)}',
-        '.dshb_card_value{font-size:18px;font-weight:600;margin-top:2px}',
-        '.dshb_card_hint{font-size:11px;color:var(--dsw-alias-label-tertiary);margin-top:2px}',
         '.dshb_table{width:100%;border-collapse:collapse;font-size:12px}',
-        '.dshb_table th{text-align:left;font-weight:500;color:var(--dsw-alias-label-tertiary);',
-        'padding:6px 6px;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));position:sticky;top:0;',
-        'background:var(--dsw-alias-bg-layer-1,var(--dsw-hovercard-bg,#fff))}',
+        '.dshb_table th{text-align:left;font-weight:500;color:var(--dsw-alias-label-tertiary);padding:6px 6px;',
+        'border-bottom:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));position:sticky;top:0;',
+        'background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1,#fff))}',
         '.dshb_table td{padding:4px 6px;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.1))}',
         '.dshb_table tr[data-today="true"] td{font-weight:600}',
         '.dshb_num{text-align:right;font-variant-numeric:tabular-nums}',
@@ -98,13 +94,12 @@ window.__ModuleLoader__.load({
         'font:inherit;font-size:11.5px;padding:2px 8px;border-radius:6px;cursor:pointer}',
         '.dshb_btn:disabled{opacity:.5;cursor:default}',
         '.dshb_btn_primary{background:var(--dsw-alias-state-success-primary,#10b981);border-color:transparent;color:#fff}',
-        '.dshb_settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}',
+        '.dshb_settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}',
         '.dshb_field{display:flex;flex-direction:column;gap:3px;font-size:12px}',
         '.dshb_field span{color:var(--dsw-alias-label-tertiary);font-size:11px}',
         '.dshb_field input{border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.35));border-radius:6px;',
         'padding:4px 8px;background:var(--dsw-alias-bg-base,transparent);color:inherit;font:inherit;font-size:12px}',
-        '.dshb_footer{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:11.5px;',
-        'color:var(--dsw-alias-label-tertiary)}',
+        '.dshb_footer{display:flex;align-items:center;gap:10px;font-size:11.5px;color:var(--dsw-alias-label-tertiary)}',
         '.dshb_credits{display:flex;flex-direction:column;gap:4px;font-size:12px}',
         '.dshb_credit{display:flex;justify-content:space-between;gap:12px}',
         '.dshb_error{color:var(--dsw-alias-state-error-primary,#ef4444)}',
@@ -118,7 +113,6 @@ window.__ModuleLoader__.load({
         '.dshb_peak_peak:hover{background:#8e2c2c}',
         '.dshb_peak_soon:hover{background:#8f6a08}',
         '.dshb_peak_off-peak:hover{background:#237a50}',
-        '.dshb_catch{position:fixed;inset:0;z-index:60}',
         '.dshb_panel{position:absolute;z-index:61;display:flex;flex-direction:column;gap:3px;width:max-content;',
         'max-width:min(440px,88vw);padding:10px 12px;border:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.25));',
         'border-radius:10px;background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1,#fff));',
@@ -138,7 +132,6 @@ window.__ModuleLoader__.load({
         'readout.balance': 'b',
         'readout.session': 's',
         'readout.aria': 'DeepSeek balance and spend',
-        'tip.title': 'Account and spend',
         'tip.balance': 'Balance',
         'tip.toppedUp': 'Topped up',
         'tip.granted': 'Granted',
@@ -146,8 +139,6 @@ window.__ModuleLoader__.load({
         'tip.spend1w': 'Last 7 days',
         'tip.spend1m': 'Last 30 days',
         'tip.session': 'This session (estimate)',
-        'tip.tariff': 'Tariff now',
-        'tip.next': 'Next change',
         'tip.samples': 'Samples',
         'tip.cadence': 'Median gap',
         'tip.fetched': 'Balance read',
@@ -155,7 +146,6 @@ window.__ModuleLoader__.load({
         'tip.partial': 'partial: sampling started later',
         'tip.coarse': 'some days are coarse — the app was closed across a day boundary',
         'tip.unpriced': 'not priced: {models}',
-        'tip.open': 'Click for the per-day ledger, credits and sampling settings',
         'reason.peak': 'peak rates',
         'reason.soon': 'peak rates start soon',
         'reason.off-peak': 'off-peak rates',
@@ -226,7 +216,6 @@ window.__ModuleLoader__.load({
         'readout.balance': 'б',
         'readout.session': 'с',
         'readout.aria': 'Баланс и расход DeepSeek',
-        'tip.title': 'Баланс и расход',
         'tip.balance': 'Баланс',
         'tip.toppedUp': 'Пополнено',
         'tip.granted': 'Подарочные',
@@ -234,8 +223,6 @@ window.__ModuleLoader__.load({
         'tip.spend1w': 'За 7 дней',
         'tip.spend1m': 'За 30 дней',
         'tip.session': 'Эта сессия (оценка)',
-        'tip.tariff': 'Тариф сейчас',
-        'tip.next': 'Следующая смена',
         'tip.samples': 'Сэмплов',
         'tip.cadence': 'Медианный интервал',
         'tip.fetched': 'Баланс прочитан',
@@ -243,7 +230,6 @@ window.__ModuleLoader__.load({
         'tip.partial': 'частично: сэмплирование началось позже',
         'tip.coarse': 'часть дней помечена как грубые — приложение было закрыто через границу суток',
         'tip.unpriced': 'без цены: {models}',
-        'tip.open': 'Клик — таблица по дням, пополнения и настройки опроса',
         'reason.peak': 'пиковый тариф',
         'reason.soon': 'скоро пиковый тариф',
         'reason.off-peak': 'льготный тариф',
@@ -640,13 +626,11 @@ window.__ModuleLoader__.load({
       // fallback when the projection unit is not registered.
       const projection = typeof props.useProjection === 'function' ? props.useProjection('dshBalanceCost') : undefined
       const [open, setOpen] = react.useState(false)
-      const [hover, setHover] = react.useState(false)
       const payload = state.payload
       const balance = payload?.balance ?? null
       const primary = balance?.primary ?? null
       const ledger = payload?.ledger ?? null
       const currency = balance?.currency ?? 'USD'
-      const level = statusLevel(primary?.total ?? null, balance?.thresholds)
       const sessionCost = projection?.cost ?? payload?.session?.cost ?? null
       const sessionCurrency = projection?.currency ?? payload?.session?.currency ?? currency
 
@@ -655,42 +639,61 @@ window.__ModuleLoader__.load({
         store.sayHello('mount')
       }, [props.sessionId])
 
-      // Two decimals everywhere: the day figures are cents, so rounding them to one
-      // decimal would hide most of the signal.
-      const metric = (label, value, covered = true) => h('span', {
-        className: `dshb_metric${covered ? '' : ' dshb_metric_muted'}`,
-        key: label,
-      }, `${label}:${value}`)
+      react.useEffect(() => {
+        if (!open || typeof document === 'undefined') return undefined
+        const onKey = (event) => {
+          if (event.key === 'Escape') setOpen(false)
+        }
+        document.addEventListener('keydown', onKey)
+        return () => document.removeEventListener('keydown', onKey)
+      }, [open])
 
-      const metrics = [
-        metric(t('readout.balance'), primary === null ? '—' : money(primary.total, currency)),
+      /**
+       * The line carries no labels: balance, the three window totals and the session
+       * estimate, each figure keeping its own currency symbol. The legend lives in
+       * the native title and in the panel, because the pill shares one line with the
+       * turn counters and the token pills.
+       */
+      const legend = [
+        t('tip.balance'),
+        `${t('tip.spend1d')}/${t('tip.spend1w')}/${t('tip.spend1m')}`,
+        t('tip.session'),
+      ].join(' · ')
+
+      const window_ = (key, value, covered) => h('span', {
+        key,
+        className: covered ? undefined : 'dshb_metric_muted',
+      }, money(value, currency))
+
+      const spend = ledger === null
+        ? h('span', { key: 'spend' }, '—')
+        : h('span', { key: 'spend' }, [
+          window_('1d', ledger.totals.d1.amount, ledger.totals.d1.covered),
+          h('span', { key: 'slash1' }, '/'),
+          window_('1w', ledger.totals.w1.amount, ledger.totals.w1.covered),
+          h('span', { key: 'slash2' }, '/'),
+          window_('1m', ledger.totals.m1.amount, ledger.totals.m1.covered),
+        ])
+
+      const line = [
+        h('span', { key: 'balance' }, primary === null ? '—' : money(primary.total, currency)),
         h('span', { className: 'dshb_sep', key: 'sep1' }),
-        metric('1d', ledger === null ? '—' : money(ledger.totals.d1.amount, currency), ledger === null || ledger.totals.d1.covered),
+        spend,
         h('span', { className: 'dshb_sep', key: 'sep2' }),
-        metric('1w', ledger === null ? '—' : money(ledger.totals.w1.amount, currency), ledger === null || ledger.totals.w1.covered),
-        h('span', { className: 'dshb_sep', key: 'sep3' }),
-        metric('1m', ledger === null ? '—' : money(ledger.totals.m1.amount, currency), ledger === null || ledger.totals.m1.covered),
-        h('span', { className: 'dshb_sep', key: 'sep4' }),
-        metric(t('readout.session'), sessionCost === null ? '—' : money(sessionCost, sessionCurrency)),
+        h('span', { key: 'session' }, sessionCost === null ? '—' : money(sessionCost, sessionCurrency)),
       ]
 
-      return h('div', { className: 'dshb_readout' }, h('div', {
-        className: 'dshb_anchor',
-        'data-level': level,
-        onMouseEnter: () => setHover(true),
-        onMouseLeave: () => setHover(false),
-      }, [
-        hover && open === false
-          ? h(Tooltip, { key: 'tip', t, state, projection, onOpen: () => setOpen(true) })
-          : null,
+      return h('div', { className: 'dshb_readout' }, h('div', { className: 'dshb_anchor' }, [
         h('button', {
           key: 'pill',
           type: 'button',
           className: 'dshb_pill',
-          'aria-label': t('readout.aria'),
-          onClick: () => setOpen(true),
-        }, metrics),
-        open ? h(Card, { key: 'card', t, state, projection, onClose: () => setOpen(false) }) : null,
+          title: legend,
+          'aria-label': `${t('readout.aria')}: ${legend}`,
+          'aria-expanded': open,
+          onClick: () => setOpen((value) => !value),
+        }, line),
+        open ? h(Popover, { key: 'popover', t, state, projection, onClose: () => setOpen(false) }) : null,
       ]))
     }
 
@@ -788,64 +791,12 @@ window.__ModuleLoader__.load({
       return lines
     }
 
-    function Tooltip({ t, state, projection, onOpen }) {
-      const payload = state.payload
-      if (payload === null) {
-        return h('div', { className: 'dshb_tip' }, state.error ?? '…')
-      }
-      const balance = payload.balance
-      const ledger = payload.ledger
-      const peak = payload.peak
-      const primary = balance?.primary ?? null
-      const currency = balance?.currency ?? 'USD'
-      const rows = []
-      const row = (label, value, key) => rows.push(h('div', { className: 'dshb_tip_row', key }, [
-        h('span', { key: 'l' }, label),
-        h('span', { key: 'v' }, value),
-      ]))
-
-      rows.push(h('div', { className: 'dshb_tip_head', key: 'head' }, [
-        h('span', { key: 't' }, t('tip.title')),
-        h('span', { key: 'r', className: state.status === 'error' ? 'dshb_error' : 'dshb_tip_note' },
-          state.status === 'error' ? (state.error ?? '') : t(`reason.${peak?.phase ?? 'off-peak'}`)),
-      ]))
-      if (primary !== null) {
-        row(t('tip.balance'), money(primary.total, currency), 'bal')
-        row(t('tip.toppedUp'), money(primary.toppedUp, currency), 'top')
-        row(t('tip.granted'), money(primary.granted, currency), 'gra')
-      } else {
-        row(t('tip.balance'), balance?.error === 'api-key-missing' ? t('tip.error.api-key-missing') : t('card.unavailable'), 'bal')
-      }
-      if (ledger !== null) {
-        row(t('tip.spend1d'), money(ledger.totals.d1.amount, currency), 'd1')
-        row(t('tip.spend1w'), money(ledger.totals.w1.amount, currency), 'w1')
-        row(t('tip.spend1m'), money(ledger.totals.m1.amount, currency), 'm1')
-      }
-      const sessionCost = projection?.cost ?? payload.session?.cost ?? null
-      if (sessionCost !== null) {
-        row(t('tip.session'), money(sessionCost, projection?.currency ?? payload.session?.currency ?? currency), 'ses')
-      }
-      if (payload.session !== null && payload.session?.unpriced?.length > 0) {
-        rows.push(h('div', { className: 'dshb_tip_note dshb_tip_flag', key: 'unpriced' }, t('tip.unpriced', { models: payload.session.unpriced.join(', ') })))
-      }
-      if (peak?.changeAt !== null && peak?.changeAt !== undefined) {
-        row(t('tip.next'), `${clock(peak.changeAt)} · ${formatRemaining(peak.untilMs ?? 0)}`, 'next')
-      }
-      if (ledger !== null) {
-        row(t('tip.samples'), `${ledger.sampleCount}`, 'samples')
-        if (ledger.medianGapMs !== null) row(t('tip.cadence'), duration(ledger.medianGapMs), 'gap')
-        if (!ledger.totals.m1.covered) rows.push(h('div', { className: 'dshb_tip_note dshb_tip_flag', key: 'partial' }, t('tip.partial')))
-        if (ledger.rows.some((entry) => entry.coarse)) rows.push(h('div', { className: 'dshb_tip_note dshb_tip_flag', key: 'coarse' }, t('tip.coarse')))
-        row(t('tip.credits'), `${money(ledger.creditTotal, currency)} (${ledger.credits.length})`, 'credits')
-      }
-      row(t('tip.fetched'), balance?.fetchedAt ? `${clock(balance.fetchedAt)}${balance.stale ? ` · ${t('tip.stale')}` : ''}` : t('common.never'), 'fetched')
-      rows.push(h('button', { className: 'dshb_link', key: 'open', type: 'button', onClick: onOpen }, t('tip.open')))
-      return h('div', { className: 'dshb_tip' }, rows)
-    }
-    //#endregion
-
-    //#region panel
-    function Card({ t, state, projection, onClose }) {
+    /**
+     * The panel behind the pill: the summary cards, the per-day ledger, the credit
+     * events and the settings, anchored above the readout like the token-usage
+     * dialogs rather than a full-screen modal.
+     */
+    function Popover({ t, state, projection, onClose }) {
       const [tab, setTab] = react.useState('days')
       const payload = state.payload
       const currency = payload?.balance?.currency ?? 'USD'
@@ -854,15 +805,6 @@ window.__ModuleLoader__.load({
       const primary = balance?.primary ?? null
       const sessionCost = projection?.cost ?? payload?.session?.cost ?? null
       const sessionCurrency = projection?.currency ?? payload?.session?.currency ?? currency
-
-      react.useEffect(() => {
-        if (typeof document === 'undefined') return undefined
-        const onKey = (event) => {
-          if (event.key === 'Escape') onClose()
-        }
-        document.addEventListener('keydown', onKey)
-        return () => document.removeEventListener('keydown', onKey)
-      }, [onClose])
 
       const card = (key, label, value, hint) => h('div', { className: 'dshb_card', key }, [
         h('div', { className: 'dshb_card_label', key: 'l' }, label),
@@ -876,7 +818,7 @@ window.__ModuleLoader__.load({
         card('bal', t('card.balance'),
           primary === null ? '—' : money(primary.total, currency),
           primary === null
-            ? (balance?.error ?? t('card.unavailable'))
+            ? (balance?.error === 'api-key-missing' ? t('tip.error.api-key-missing') : t('card.unavailable'))
             : `${t('tip.toppedUp')} ${money(primary.toppedUp, currency)} · ${t('tip.granted')} ${money(primary.granted, currency)}`),
         card('d1', t('card.today'), ledger === null ? '—' : money(ledger.totals.d1.amount, currency)),
         card('ses', t('card.session'), sessionCost === null ? '—' : money(sessionCost, sessionCurrency),
@@ -885,55 +827,72 @@ window.__ModuleLoader__.load({
         card('w1', t('card.week'), ledger === null ? '—' : money(ledger.totals.w1.amount, currency)),
       ])
 
+      const meta = []
+      if (ledger !== null) {
+        meta.push(`${t('tip.samples')} ${ledger.sampleCount}`)
+        if (ledger.medianGapMs !== null) meta.push(`${t('tip.cadence')} ${duration(ledger.medianGapMs)}`)
+        meta.push(`${t('tip.credits')} ${money(ledger.creditTotal, currency)} (${ledger.credits.length})`)
+      }
+      meta.push(`${t('tip.fetched')} ${balance?.fetchedAt ? clock(balance.fetchedAt) : t('common.never')}`)
+      if (balance?.stale) meta.push(t('tip.stale'))
+
+      const flags = []
+      if (payload?.session?.unpriced?.length > 0) flags.push(t('tip.unpriced', { models: payload.session.unpriced.join(', ') }))
+      if (ledger !== null && !ledger.totals.m1.covered) flags.push(t('tip.partial'))
+      if (ledger !== null && ledger.rows.some((entry) => entry.coarse)) flags.push(t('tip.coarse'))
+
       const body = tab === 'days'
         ? h(DaysTable, { t, ledger, currency, key: 'days' })
         : tab === 'credits'
           ? h(Credits, { t, ledger, currency, key: 'credits' })
           : h(Settings, { t, state, key: 'settings' })
 
-      return h('div', {
-        className: 'dshb_backdrop',
-        onClick: (event) => {
-          if (event.target === event.currentTarget) onClose()
-        },
-      }, h('div', { className: 'dshb_modal' }, [
-        h('div', { className: 'dshb_modal_head', key: 'head' }, [
-          h('div', { key: 'titles' }, [
-            h('div', { className: 'dshb_modal_title', key: 't' }, t('card.title')),
-            h('div', { className: 'dshb_modal_sub', key: 's' }, t('card.sub')),
+      return [
+        h('div', { className: 'dshb_catch', key: 'catch', onClick: onClose }),
+        h('div', { className: 'dshb_popover', key: 'popover', role: 'dialog', 'aria-label': t('card.title') }, [
+          h('div', { className: 'dshb_popover_head', key: 'head' }, [
+            h('div', { key: 'titles' }, [
+              h('div', { className: 'dshb_modal_title', key: 't' }, t('card.title')),
+              h('div', { className: 'dshb_modal_sub', key: 's' }, t('card.sub')),
+            ]),
+            h('button', { className: 'dshb_close', key: 'x', onClick: onClose, title: t('common.close') }, '×'),
           ]),
-          h('button', { className: 'dshb_close', key: 'x', onClick: onClose, title: t('common.close') }, '×'),
+          h('div', { className: 'dshb_popover_body', key: 'body' }, [
+            cards,
+            h('div', { className: 'dshb_meta', key: 'meta' }, meta.join(' · ')),
+            flags.length === 0 ? null : h('div', { className: 'dshb_flag', key: 'flags' }, flags.join(' · ')),
+            h('div', { className: 'dshb_tabs', key: 'tabs' }, ['days', 'credits', 'settings'].map((id) =>
+              h('button', {
+                key: id,
+                className: 'dshb_tab',
+                'data-active': tab === id ? 'true' : 'false',
+                onClick: () => setTab(id),
+              }, t(`tab.${id}`)))),
+            body,
+          ]),
+          h('div', { className: 'dshb_popover_foot', key: 'foot' }, [
+            h('div', { className: 'dshb_footer', key: 'l' }, [
+              h('span', { key: 'rule' }, `${t('footer.rule')}: `),
+              h('a', {
+                key: 'link',
+                className: 'dshb_link',
+                href: payload?.peak?.rule?.sourceUrl ?? 'https://api-docs.deepseek.com/quick_start/pricing',
+                target: '_blank',
+                rel: 'noreferrer',
+              }, t('footer.ruleLink')),
+              h('span', { key: 'verified' }, ` · ${payload?.peak?.rule?.verifiedOn ?? ''}`),
+            ]),
+            h('div', { className: 'dshb_footer', key: 'r' }, [
+              h('button', {
+                className: 'dshb_btn',
+                key: 'refresh',
+                onClick: () => store.forceRefresh().catch(() => {}),
+              }, t('common.refresh')),
+              h('span', { key: 'versions' }, `${t('footer.host', { version: payload?.host?.version ?? '?' })} · ${t('footer.client', { version: VERSION })}`),
+            ]),
+          ]),
         ]),
-        h('div', { className: 'dshb_tabs', key: 'tabs' }, ['days', 'credits', 'settings'].map((id) =>
-          h('button', {
-            key: id,
-            className: 'dshb_tab',
-            'data-active': tab === id ? 'true' : 'false',
-            onClick: () => setTab(id),
-          }, t(`tab.${id}`)))),
-        h('div', { className: 'dshb_body', key: 'body' }, [cards, body]),
-        h('div', { className: 'dshb_modal_head', key: 'foot' }, [
-          h('div', { className: 'dshb_footer', key: 'l' }, [
-            h('span', { key: 'rule' }, `${t('footer.rule')}: `),
-            h('a', {
-              key: 'link',
-              className: 'dshb_link',
-              href: payload?.peak?.rule?.sourceUrl ?? 'https://api-docs.deepseek.com/quick_start/pricing',
-              target: '_blank',
-              rel: 'noreferrer',
-            }, t('footer.ruleLink')),
-            h('span', { key: 'verified' }, ` · ${payload?.peak?.rule?.verifiedOn ?? ''}`),
-          ]),
-          h('div', { className: 'dshb_footer', key: 'r' }, [
-            h('button', {
-              className: 'dshb_btn',
-              key: 'refresh',
-              onClick: () => store.forceRefresh().catch(() => {}),
-            }, t('common.refresh')),
-            h('span', { key: 'versions' }, `${t('footer.host', { version: payload?.host?.version ?? '?' })} · ${t('footer.client', { version: VERSION })}`),
-          ]),
-        ]),
-      ]))
+      ]
     }
 
     function DaysTable({ t, ledger, currency }) {
@@ -999,7 +958,7 @@ window.__ModuleLoader__.load({
               },
             })),
             h('td', { key: 'a' }, h('div', { className: 'dshb_row_flags' }, [
-              row.coarse ? h('span', { key: 'c', className: 'dshb_tip_flag' }, t('days.coarse')) : null,
+              row.coarse ? h('span', { key: 'c', className: 'dshb_flag' }, t('days.coarse')) : null,
               row.override !== null ? h('button', {
                 key: 'r',
                 className: 'dshb_btn',
@@ -1147,7 +1106,7 @@ window.__ModuleLoader__.load({
      * and ignores everything else, so this adds no public surface to the plugin.
      */
     exports.__internals = {
-      Readout, Card, DaysTable, Credits, Settings, Tooltip, createPeakChip, createStore,
+      Readout, Popover, DaysTable, Credits, Settings, createPeakChip, createStore,
       money, duration, formatRemaining, statusLevel, phaseFromSchedule, effectiveRoute,
       routeFromModelSelection, routeFromCatalogDefault, isPeakRuleRoute, settingsOf, peakLines,
     }

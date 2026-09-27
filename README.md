@@ -6,14 +6,15 @@ estimated from tokens — plus a **peak-tariff indicator** that shares the same
 pricing rule.
 
 ```
-b:$19.52 · 1d:$0.39 · 1w:$2.29 · 1m:$10.43 · s:$0.33       5 turns · 12 steps
+$19.52 · $0.39/$2.29/$10.43 · $0.33        5 turns · 12 steps
 ```
 
-The line above sits in the composer dock immediately left of the shipped turn
-counters, in the same size and colour as the token pills beside it. Hovering it
-explains every figure; clicking it (or the link in the tooltip) opens the panel
-with the per-day ledger — every day editable — the credit (top-up) events and the
-sampling settings.
+Balance, then the last day / week / month, then this session — one pill in the
+composer dock, immediately left of the shipped turn counters, with the same size,
+colour and hover wash as the token-usage pills beside it. It carries no labels
+(the legend is the native tooltip), and clicking it opens the panel anchored above
+the line, exactly as the token-usage pills open theirs: the summary cards, the
+per-day ledger with editable rows, the credit (top-up) events and the settings.
 
 The peak indicator is the coloured chip in the session header:
 

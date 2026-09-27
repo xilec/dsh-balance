@@ -67,8 +67,16 @@ function reactStub() {
   return react
 }
 
+/**
+ * The stub below keeps hook state in one flat array, so every traversal of a tree
+ * has to start from index zero: it stands in for a render pass of the top-level
+ * component, exactly as a reconciler would call it.
+ */
+let currentReact = null
+
 /** Render an element tree (calling function components) down to its text. */
 function textOf(node) {
+  currentReact?.beginRender()
   if (node === null || node === undefined || node === false || node === true) return ''
   if (typeof node === 'string' || typeof node === 'number') return String(node)
   if (Array.isArray(node)) return node.map(textOf).join(' ')
@@ -78,6 +86,7 @@ function textOf(node) {
 
 /** Every element whose props satisfy one predicate. */
 function find(node, predicate, out = []) {
+  if (out.length === 0) currentReact?.beginRender()
   if (node === null || node === undefined) return out
   if (Array.isArray(node)) {
     for (const child of node) find(child, predicate, out)
@@ -100,6 +109,7 @@ async function loadClient() {
   await import(`../client/client.js?test=${Math.random()}`)
   assert.equal(registrations.length, 1)
   const react = reactStub()
+  currentReact = react
   const exported = registrations[0].factory((specifier) => {
     if (specifier === 'react') return react
     throw new Error(`unexpected require(${specifier})`)
@@ -256,15 +266,22 @@ test('the readout renders the compact balance and spend line', async () => {
   try {
     const props = { t: fakeT, sessionId: 'session-7', useProjection: () => undefined }
     react.beginRender()
-    assert.match(textOf(react.createElement(Readout, props)), /b:—/)
+    const loading = react.createElement(Readout, props)
+    const line = (element) => textOf(element).replace(/\s*\/\s*/g, '/').replace(/\s+/g, ' ').trim()
+    assert.equal(line(loading), '— — —')
     await new Promise((resolve) => setTimeout(resolve, 10))
     react.beginRender()
-    const rendered = textOf(react.createElement(Readout, props))
-    assert.match(rendered, /b:\$19\.52/)
-    assert.match(rendered, /1d:\$0\.39/)
-    assert.match(rendered, /1w:\$2\.29/)
-    assert.match(rendered, /1m:\$10\.43/)
-    assert.match(rendered, /s:\$0\.33/)
+    const tree = react.createElement(Readout, props)
+    // Balance, the three window totals and the session estimate, with no labels:
+    // the pill shares one line with the turn counters and the token pills.
+    assert.equal(line(tree), '$19.52 $0.39/$2.29/$10.43 $0.33')
+    const pill = find(tree, (element) => element.type === 'button' && element.props?.className === 'dshb_pill')[0]
+    assert.ok(pill !== undefined, 'the readout is a pill button, like the token usage pills')
+    // The legend is the only place the labels live, since the line itself has none.
+    assert.match(pill.props.title, /tip\.balance/)
+    assert.match(pill.props.title, /tip\.spend1d\/tip\.spend1w\/tip\.spend1m/)
+    assert.match(pill.props.title, /tip\.session/)
+    assert.equal(pill.props['aria-expanded'], false)
   } finally {
     react.stop()
     restore()
@@ -287,7 +304,10 @@ test('the session projection outranks the payload copy of the session cost', asy
     textOf(react.createElement(Readout, props))
     await new Promise((resolve) => setTimeout(resolve, 10))
     react.beginRender()
-    assert.match(textOf(react.createElement(Readout, props)), /s:\$0\.91/)
+    assert.equal(
+      textOf(react.createElement(Readout, props)).replace(/\s*\/\s*/g, '/').replace(/\s+/g, ' ').trim(),
+      '$19.52 $0.39/$2.29/$10.43 $0.91',
+    )
   } finally {
     react.stop()
     restore()
@@ -409,7 +429,7 @@ test('the route helpers prefer the projection and fall back to the catalog defau
 test('the panel puts this session on the first row and the week below it', async () => {
   const { exported, react } = await loadClient()
   react.beginRender()
-  const tree = react.createElement(exported.__internals.Card, {
+  const tree = react.createElement(exported.__internals.Popover, {
     t: (key) => key,
     state: { status: 'ok', payload, error: null, at: Date.now() },
     projection: { cost: 0.33, currency: 'USD' },
@@ -425,25 +445,33 @@ test('the panel puts this session on the first row and the week below it', async
   assert.equal(rule.props.href, 'https://api-docs.deepseek.com/quick_start/pricing', 'the rules link points at the English page')
 })
 
-test('the tooltip hint opens the panel', async () => {
+test('the pill opens the anchored panel, and the catch layer closes it', async () => {
   const { exported, react } = await loadClient()
-  let opened = 0
-  react.beginRender()
-  const tree = react.createElement(exported.__internals.Tooltip, {
-    t: (key) => key,
-    state: { status: 'ok', payload, error: null, at: Date.now() },
-    projection: { cost: 0.33, currency: 'USD' },
-    onOpen: () => {
-      opened += 1
-    },
-  })
-  const text = textOf(tree)
-  assert.match(text, /tip\.balance/)
-  assert.match(text, /tip\.spend1d/)
-  const link = find(tree, (element) => element.type === 'button' && element.props?.className === 'dshb_link')[0]
-  assert.ok(link !== undefined, 'the hint is a link')
-  link.props.onClick()
-  assert.equal(opened, 1)
+  const ctx = clientContext()
+  exported.apply(ctx)
+  const Readout = ctx.registered.find((entry) => entry.options.id === 'dsh-balance').component
+  const restore = stubFetch()
+  try {
+    const props = { t: fakeT, sessionId: 'session-7', useProjection: () => undefined }
+    react.beginRender()
+    textOf(react.createElement(Readout, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    let tree = react.createElement(Readout, props)
+    assert.equal(find(tree, (element) => element.props?.role === 'dialog').length, 0, 'the panel starts closed')
+
+    const pill = find(tree, (element) => element.type === 'button' && element.props?.className === 'dshb_pill')[0]
+    pill.props.onClick()
+    react.beginRender()
+    tree = react.createElement(Readout, props)
+    const dialog = find(tree, (element) => element.props?.role === 'dialog')
+    assert.equal(dialog.length, 1, 'clicking the pill opens the panel')
+    assert.equal(find(tree, (element) => element.props?.className === 'dshb_catch').length, 1, 'an outside-click layer is mounted')
+    assert.equal(pill.props['aria-expanded'] === false, true, 'the toggle state is exposed to assistive tech')
+  } finally {
+    react.stop()
+    restore()
+  }
 })
 
 test('the settings tab posts the fields it edits', async () => {
