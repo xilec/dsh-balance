@@ -2,24 +2,36 @@
 
 A DeepSeek Harness (`dsh`) plugin that shows **what the account actually spent**,
 measured from balance differences, next to **what the current session cost**,
-estimated from tokens.
+estimated from tokens — plus a **peak-tariff indicator** that shares the same
+pricing rule.
 
-A chip in the bottom-left corner of the shell (right of the sidebar) shows the
-account balance and the spend of the last day, week and month. Clicking it opens
-the per-day ledger — every day editable — plus the credit (top-up) events and the
+```
+b:$19.52 · 1d:$0.39 · 1w:$2.29 · 1m:$10.43 · s:$0.33       5 turns · 12 steps
+```
+
+The line above sits in the composer dock immediately left of the shipped turn
+counters, in the same size and colour as the token pills beside it. Hovering it
+explains every figure; clicking it (or the link in the tooltip) opens the panel
+with the per-day ledger — every day editable — the credit (top-up) events and the
 sampling settings.
 
+The peak indicator is the coloured chip in the session header:
+
 ```
-🟢 Balance $19.67 · $0.42 1d · $2.80 1w · $11.05 1m · $0.31 session
+Off-peak · peak in 2d 15h
 ```
+
+It shows the tariff in force, counts down to the next change, and expands into
+the day's windows in your time zone, the published UTC windows, the holiday note
+and the source of the rule.
 
 ## Why balance differences
 
-DeepSeek exposes exactly one money-related endpoint, `GET /user/balance`; there
-is no usage or billing API. Token counting can therefore only ever be an
-*estimate* — it depends on your copy of the price table, on the model actually
-served, and on the tariff in force at the instant of each request. The balance,
-by contrast, is what was really deducted:
+DeepSeek exposes exactly one money-related endpoint, `GET /user/balance`; there is
+no usage or billing API. Token counting can therefore only ever be an *estimate* —
+it depends on your copy of the price table, on the model actually served, and on
+the tariff in force at the instant of each request. The balance, by contrast, is
+what was really deducted:
 
 ```
 spend(t0..t1) = balance(t0) − balance(t1) + credits(t0..t1)
@@ -49,6 +61,10 @@ cannot be attributed to a session, a model, or a project.
   was taken, so a session that ran across a peak boundary, on a weekend, or on a
   holiday is not repriced wholesale by whatever tariff happens to be current when
   you look at it. The 2026-09-10 Flash price cut is applied by the same rule.
+* **One rule for both indicators.** The readout, the peak chip, the panel, the
+  session estimate and the balance accounting all read `src/pricing.js`; the
+  browser half receives the Host's transition schedule and only renders it, so a
+  display can never disagree with what was billed.
 * **Legacy model ids.** `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp` and
   `deepseek-v4.1-flash` are billed at Flash rates; `deepseek-v4-pro` at Pro rates.
 * **Account currency.** `currency` in the config is a preference: if the account
@@ -65,10 +81,6 @@ cannot be attributed to a session, a model, or a project.
 ```nix
 {
   inputs.dsh-balance.url = "github:xilec/dsh-balance";
-
-  # The package itself is dependency-free; dsh plugins run with the harness's own
-  # node_modules, so the row is wired like every other plugin:
-  # a store path plus a node_modules symlink to the dsh kernel.
 }
 ```
 
@@ -99,11 +111,9 @@ in
 }
 ```
 
-The composition row is read while the Host runs, but a plugin's *code* is imported
-once: after changing the row or the plugin, quit `dsh` **completely** (closing the
-window or reloading the page does not restart the Host process) and start it again.
-A browser-half change only needs a reload, and that reload should bypass the cache
-(<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd>).
+The package itself needs no build step and no `node_modules` of its own: dsh
+plugins resolve platform packages from the harness, so the row points at a store
+path and the symlink supplies the rest.
 
 ### As a dsh plugin
 
@@ -114,19 +124,20 @@ dsh plugin --profile web add dsh-balance
 ## Configuration
 
 Every field can be set from the composition row or from the Settings tab in the
-panel; the panel writes its changes back to `$DSH_HOME/dsh-balance/state.json`.
+panel; the panel writes its changes back to `$DSH_HOME/dsh-balance/state.json`,
+and a value written there outranks the row for that key only.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `apiKey` / `apiKeyRef` | — / `DEEPSEEK_API_KEY` | Explicit key, or the credential (or environment variable) to resolve |
 | `baseUrl` | `https://api.deepseek.com` | API base |
 | `refreshIntervalMs` | `300000` | How often the Host samples the balance |
-| `clientPollIntervalMs` | `15000` | How often the chip re-reads the Host cache |
+| `clientPollIntervalMs` | `15000` | How often the readout re-reads the Host cache |
 | `currency` | `USD` | Ledger currency preference |
 | `dayZone` | `local` | Day-boundary zone: `local` or an IANA name |
 | `historyDays` | `30` | Day rows kept and rolled up |
 | `keepDays` | `120` | Full-resolution sample retention |
-| `warningThreshold` / `dangerThreshold` | `10` / `5` | Chip colouring |
+| `warningThreshold` / `dangerThreshold` | `10` / `5` | Balance colouring |
 | `holidays` | 2026 list | Chinese public holidays (Beijing dates) |
 | `priceUnknownModels` / `fallbackPrices` | `false` / — | Price models outside the built-in table |
 
@@ -151,25 +162,38 @@ the day overrides, the settings and the last client contact.
 * **Sessions before 2026-08-23** are priced by the earliest table in
   `src/pricing.js`, which is an approximation: the price list has changed several
   times and old tables are not published.
+* **The holiday list is per year.** `holidays` ships the published 2026 dates; a
+  new year needs a new list, otherwise holidays are billed as ordinary weekdays in
+  the *estimate* (the balance ledger is unaffected).
 
-## Layout
+## Development
 
 ```
-src/pricing.js        the tariff rule and the rate tables (pure)
+src/pricing.js        the tariff rule, phases and zone labels (pure)
 src/history.js        samples → intervals → day ledger → 1d/1w/1m (pure)
 src/session-cost.js   the sessionProjections unit (tokens priced per event time)
 src/store.js          samples.ndjson and state.json on disk
 src/index.js          the Host plugin: sampler loop, HTTP routes
-client/client.js      the browser half: the chip, the tooltip, the panel
-test/                 node --test suite (55 cases, no build step)
+client/client.js      the browser half: the readout, the peak chip, the panel
+test/                 node --test suite (76 cases, no build step)
 ```
 
-`npm test` runs the suite; `nix flake check` runs the same suite with the dsh
-kernel's `node_modules` linked in.
+```sh
+npm test          # the whole suite
+nix flake check   # the same suite inside Nix
+```
+
+Locally `node_modules` is a symlink to the dsh kernel's `node_modules` (that is
+how a plugin resolves platform packages at runtime); the `devDependencies` in
+`package.json` exist for CI, which has no kernel checkout and installs the same
+packages from npm. `npm ci` therefore belongs to CI, not to a development tree.
+
+GitHub Actions runs the suite and builds the flake package on every push and pull
+request.
 
 ## Sources
 
-* Pricing rule and rates — <https://api-docs.deepseek.com/zh-cn/quick_start/pricing>
+* Pricing rule and rates — <https://api-docs.deepseek.com/quick_start/pricing>
   (verified 2026-09-27)
 * Chinese public holidays 2026 — 国务院办公厅关于2026年部分节假日安排的通知 (2025-11-04)
 

@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The workflows only read the repository.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests (npm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          # Node version is taken from `engines.node` (">=22") in package.json,
+          # so CI and the flake/consumer never drift apart.
+          node-version-file: package.json
+          cache: npm
+
+      # --ignore-scripts: the suite only needs the three platform packages
+      # (zod, @deepseek-ai/schemastery, @deepseek-ai/dsh-home-paths) to resolve
+      # the bare imports in src/*.js. We do not run lifecycle scripts at all,
+      # which keeps the job fast and removes an arbitrary-code-execution path
+      # from third-party install hooks.
+      #
+      # Locally node_modules is a symlink to the dsh kernel's node_modules
+      # (nix store), not a real install: dsh plugins resolve platform packages
+      # from the harness, so the symlink is what makes `npm test` work on a dev
+      # machine. In CI there is no kernel checkout, so the same packages are
+      # installed from npm instead; the lockfile pins them to the versions the
+      # kernel currently ships.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run tests
+        run: npm test
+
+  package:
+    name: Flake package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # install-nix-action enables flakes and the nix-command experimental
+      # features on the runner.
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+
+      # The `default` package is a plain runCommand that copies package.json,
+      # src/ and client/ into the store: nothing is compiled and the kernel is
+      # never built. The deepseek-harness flake input is only fetched as a
+      # source tree (its overlay is used by `checks`, not by `packages`), so
+      # this step stays cheap on a hosted runner. If it ever stops being cheap,
+      # add `--option substituters https://cache.nixos.org` to let binary
+      # substitution cover any build inputs.
+      - name: Build the plugin package
+        run: nix build .#default --no-link --print-out-paths

@@ -19,7 +19,11 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "ci": "npm ci --ignore-scripts && npm test"
+  },
+  "engines": {
+    "node": ">=22"
   },
   "dsh": {
     "bundle": {
@@ -32,9 +36,9 @@
       ]
     }
   },
-  "dependencies": {
-    "@deepseek-ai/dsh-home-paths": "*",
-    "@deepseek-ai/schemastery": "*",
-    "zod": "*"
+  "devDependencies": {
+    "@deepseek-ai/dsh-home-paths": "0.1.7-rc.2",
+    "@deepseek-ai/schemastery": "3.18.4",
+    "zod": "4.4.3"
   }
 }
