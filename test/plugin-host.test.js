@@ -167,7 +167,8 @@ test('an override replaces one day and survives a reload', async () => {
     // A fresh plugin instance reads the override back from disk.
     const state = JSON.parse(await (await import('node:fs/promises')).readFile(join(home, 'dsh-balance', 'state.json'), 'utf8'))
     assert.equal(state.overrides[day].amount, 4.5)
-    assert.ok(state.overrides[day].at > 0, 'the correction instant is stored, so later samples keep counting')
+    assert.ok(state.overrides[day].at > 0, 'the correction instant is stored')
+    assert.equal(state.overrides[day].balance, 12.34, 'and the balance it was anchored to')
     assert.equal(JSON.parse(written.body).ledger.rows.at(-1).override, 4.5)
   })
 })

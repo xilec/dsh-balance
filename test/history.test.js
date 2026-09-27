@@ -70,34 +70,78 @@ test('a manual override replaces the sampled value for its day', () => {
   assert.equal(row.override, 2.5)
 })
 
-test('a manual base keeps filling with the samples that arrive after it', () => {
+test('a manual base keeps filling from the balance it was anchored to', () => {
   const samples = [
     sample('2026-09-24T08:00:00Z', 10),
     sample('2026-09-24T09:00:00Z', 9.6),
     sample('2026-09-24T10:00:00Z', 9.1),
     sample('2026-09-24T11:00:00Z', 8.9),
   ]
-  // The user corrects the day at 09:30 to 1.25: the drop that closed at 10:00 and
-  // the one at 11:00 are added to it, the earlier ones are not.
+  // The user corrects the day at 09:30 with the balance they saw (9.5) and a base of
+  // 1.25: what counts is the drop from that anchor to the newest sample.
   const ledger = buildLedger({
     samples,
-    overrides: { '2026-09-24': { amount: 1.25, at: at('2026-09-24T09:30:00Z') } },
+    overrides: { '2026-09-24': { amount: 1.25, at: at('2026-09-24T09:30:00Z'), balance: 9.5 } },
     zone: 'UTC',
     nowMs: at('2026-09-24T12:00:00Z'),
     days: 1,
   })
   const row = ledger.rows[0]
   assert.equal(row.override, 1.25)
-  assert.equal(row.measuredAfter, 0.7, '0.5 + 0.2 arrived after the correction')
-  assert.equal(row.spend, 1.95)
+  assert.equal(row.measuredAfter, 0.6, '9.5 − 8.9, one subtraction')
+  assert.equal(row.spend, 1.85)
   assert.equal(row.computed, 1.1, 'the sampled value is still reported as it stands')
-  assert.equal(ledger.totals.d1.amount, 1.95, 'the day total carries the corrected value')
+  assert.equal(ledger.totals.d1.amount, 1.85, 'the day total carries the corrected value')
+})
+
+test('a top-up after the correction does not eat into the corrected day', () => {
+  const samples = [
+    sample('2026-09-24T08:00:00Z', 10),
+    sample('2026-09-24T10:00:00Z', 9),   // 1.0 spent
+    sample('2026-09-24T11:00:00Z', 59),  // 50 topped up
+    sample('2026-09-24T12:00:00Z', 58.8), // 0.2 spent
+  ]
+  const ledger = buildLedger({
+    samples,
+    overrides: { '2026-09-24': { amount: 2, at: at('2026-09-24T09:00:00Z'), balance: 9.5 } },
+    zone: 'UTC',
+    nowMs: at('2026-09-24T13:00:00Z'),
+    days: 1,
+  })
+  // drop = 9.5 − 58.8 = −49.3, credits since = 50 → 0.7 added to the base.
+  assert.equal(ledger.rows[0].measuredAfter, 0.7)
+  assert.equal(ledger.rows[0].spend, 2.7)
+})
+
+test('a correction made after the day closed leaves the base alone', () => {
+  const ledger = buildLedger({
+    samples: [sample('2026-09-24T08:00:00Z', 10), sample('2026-09-24T09:00:00Z', 9)],
+    // Edited the next morning: the balance of that moment says nothing about the day.
+    overrides: { '2026-09-24': { amount: 3, at: at('2026-09-25T08:00:00Z'), balance: 7 } },
+    zone: 'UTC',
+    nowMs: at('2026-09-25T09:00:00Z'),
+    days: 2,
+  })
+  assert.equal(ledger.rows.find((row) => row.key === '2026-09-24').spend, 3)
+  assert.equal(ledger.rows.find((row) => row.key === '2026-09-24').measuredAfter, 0)
 })
 
 test('a bare override from an older state file stays frozen', () => {
   const ledger = buildLedger({
     samples: [sample('2026-09-24T08:00:00Z', 10), sample('2026-09-24T10:00:00Z', 9)],
     overrides: { '2026-09-24': 1.25 },
+    zone: 'UTC',
+    nowMs: at('2026-09-24T12:00:00Z'),
+    days: 1,
+  })
+  assert.equal(ledger.rows[0].spend, 1.25)
+  assert.equal(ledger.rows[0].measuredAfter, 0)
+})
+
+test('an override without an anchor stays frozen too', () => {
+  const ledger = buildLedger({
+    samples: [sample('2026-09-24T08:00:00Z', 10), sample('2026-09-24T10:00:00Z', 9)],
+    overrides: { '2026-09-24': { amount: 1.25, at: at('2026-09-24T09:00:00Z') } },
     zone: 'UTC',
     nowMs: at('2026-09-24T12:00:00Z'),
     days: 1,
@@ -113,12 +157,12 @@ test('an override on another day does not leak into this one', () => {
       sample('2026-09-24T08:00:00Z', 9),
       sample('2026-09-24T12:00:00Z', 8),
     ],
-    overrides: { '2026-09-24': { amount: 0.5, at: at('2026-09-24T10:00:00Z') } },
+    overrides: { '2026-09-24': { amount: 0.5, at: at('2026-09-24T10:00:00Z'), balance: 8.5 } },
     zone: 'UTC',
     nowMs: at('2026-09-24T13:00:00Z'),
     days: 2,
   })
-  assert.equal(ledger.rows[1].spend, 1.5, '0.5 base + the 1.0 that arrived after it')
+  assert.equal(ledger.rows[1].spend, 1, '0.5 base + the 0.5 drop from the anchor to the last sample')
   // The interval that closed at 08:00 straddles midnight and belongs to the later
   // day (which is why that row is marked coarse), so the earlier day stays empty.
   assert.equal(ledger.rows[0].spend, 0)

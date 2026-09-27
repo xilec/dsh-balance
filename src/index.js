@@ -553,9 +553,19 @@ export function apply(ctx, config) {
             sendJson(res, 400, { ok: false, error: 'amount must be a non-negative number or null' })
             return
           }
-          // The instant matters: the ledger adds only the samples that arrive after
-          // it, so a corrected day keeps filling instead of freezing.
-          overrides = { ...overrides, [date]: { amount: Math.round(amount * 1e6) / 1e6, at: Date.now() } }
+          // The anchor matters: the ledger measures the drop from this balance to
+          // the newest sample, so a corrected day keeps filling instead of freezing
+          // and a whole day costs one subtraction, not hundreds of additions.
+          const currency = effectiveCurrency()
+          const anchor = cache.balances.find((entry) => entry.currency === currency) ?? cache.balances[0] ?? null
+          overrides = {
+            ...overrides,
+            [date]: {
+              amount: Math.round(amount * 1e6) / 1e6,
+              at: Date.now(),
+              ...(anchor === null ? {} : { balance: anchor.total }),
+            },
+          }
         }
         if (!loaded) await ready
         await persist()

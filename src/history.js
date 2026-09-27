@@ -13,11 +13,15 @@
  * which for the usual sampling cadence (minutes) is exact; an interval spanning
  * days is marked `coarse`, and per-day overrides exist for exactly that case.
  *
- * A manual override carries both the amount the user typed and the instant they
- * typed it (`{ amount, at }`). It is a *base*, not a frozen value: only the samples
- * that arrived after that instant are added to it, so correcting today's figure
- * does not stop the rest of today from being counted. A bare number (the older
- * shape, still accepted) has no instant and therefore stays frozen.
+ * A manual override carries the amount the user typed, the instant they typed it and
+ * the balance at that instant (`{ amount, at, balance }`). It is a *base*, not a
+ * frozen value: the day is `base + (balanceAt − newestBalance) + creditsSince`, which
+ * is the same window formula as everywhere else, so the figure keeps filling while
+ * the day runs and settles on the last sample once it ends. Anchoring on a balance
+ * rather than summing the deltas that happen to arrive afterwards keeps the
+ * rounding error of a day to one subtraction instead of hundreds of them. An entry
+ * with no balance (or a bare number, the oldest shape) has nothing to measure
+ * against and stays frozen.
  *
  * Pure module: no imports, no clock, no IO. The caller supplies samples,
  * overrides and "now".
@@ -95,12 +99,17 @@ export function recentDayKeys(endKey, count) {
  * @returns `{ base, at }`, or null when the entry is unusable.
  */
 function overrideEntry(value) {
-  if (typeof value === 'number') return Number.isFinite(value) ? { base: value, at: null } : null
+  if (typeof value === 'number') return Number.isFinite(value) ? { base: value, at: null, balance: null } : null
   if (value === null || typeof value !== 'object') return null
   const base = Number(value.amount)
   if (!Number.isFinite(base)) return null
   const at = Number(value.at)
-  return { base, at: Number.isFinite(at) ? at : null }
+  const balance = Number(value.balance)
+  return {
+    base,
+    at: Number.isFinite(at) ? at : null,
+    balance: Number.isFinite(balance) ? balance : null,
+  }
 }
 
 /** Keep only the samples of one currency, sorted ascending by time. */
@@ -182,20 +191,36 @@ export function buildLedger(options) {
     if (fromKey !== toKey) coarseKeys.add(target)
   }
 
-  /** Spend of the intervals that closed after an instant, on one day. */
-  const measuredAfter = (key, at) => {
-    if (at === null) return 0
-    return round6(intervals.reduce((total, interval) => {
-      if (interval.spend <= 0) return total
-      if (interval.to <= at) return total
-      return dayKeyOf(interval.to, zone) === key ? total + interval.spend : total
-    }, 0))
+  /**
+   * What the day spent since a manual base was entered.
+   *
+   * The base stores the account balance of the moment it was entered, so the added
+   * part is the drop from that balance to the newest sample of the same day, plus
+   * the credits that arrived in between (a top-up raises the balance back and must
+   * not look like negative spend). One subtraction, one credit sum — no per-interval
+   * rounding to accumulate.
+   *
+   * @param key - the day being valued.
+   * @param entry - the parsed override `{ base, at, balance }`.
+   * @returns the amount to add to the base, or 0 when there is no anchor to add from.
+   */
+  const addedSince = (key, entry) => {
+    if (entry === null || entry.at === null || entry.balance === null) return 0
+    const samples = series.filter((sample) => dayKeyOf(sample.t, zone) === key)
+    const newest = samples[samples.length - 1]
+    // A correction made after that day's last sample has nothing left to measure:
+    // the base is the user's final word for the day.
+    if (newest === undefined || entry.at > newest.t) return 0
+    const creditsSince = credits.reduce((total, credit) => (
+      credit.t > entry.at && dayKeyOf(credit.t, zone) === key ? total + credit.amount : total
+    ), 0)
+    return Math.max(0, round6(entry.balance - newest.total + creditsSince))
   }
 
   const rows = keys.map((key) => {
     const entry = overrideEntry(overrides[key])
     const computed = sampled.get(key) ?? 0
-    const added = entry === null ? 0 : measuredAfter(key, entry.at)
+    const added = addedSince(key, entry)
     return {
       key,
       spend: entry === null ? computed : round6(entry.base + added),
