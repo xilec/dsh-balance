@@ -180,6 +180,10 @@ export function apply(ctx, config) {
       ])
       samples = stored
       if (state.overrides !== null && typeof state.overrides === 'object') overrides = state.overrides
+      if (anchorMissingOverrides()) {
+        await persist()
+        log('anchored the overrides that predate the balance anchor')
+      }
       if (state.client !== null && typeof state.client === 'object') clientHello = { ...clientHello, ...state.client }
       const prefs = state.prefs ?? {}
       for (const [key, check] of Object.entries(MUTABLE_SETTINGS)) {
@@ -196,6 +200,54 @@ export function apply(ctx, config) {
     }
   }
   const ready = load()
+
+  /**
+   * Give an override written before anchoring existed the balance of its instant.
+   *
+   * The first anchored release stored `{ amount, at }` and measured the added spend
+   * by summing the intervals that followed — which is why the entry has no balance.
+   * The sample log still holds the balance of that moment, so filling it in keeps
+   * the day filling instead of freezing it, and a later edit would do the same by
+   * hand.
+   *
+   * @returns whether anything changed, so the caller can persist the upgrade.
+   */
+  const anchorMissingOverrides = () => {
+    let changed = false
+    const next = {}
+    for (const [date, value] of Object.entries(overrides)) {
+      if (value === null || typeof value !== 'object' || value.balance !== undefined) {
+        next[date] = value
+        continue
+      }
+      const at = Number(value.at)
+      if (!Number.isFinite(at)) {
+        next[date] = value
+        continue
+      }
+      const sample = sampleAtOrBefore(at)
+      if (sample === null) {
+        next[date] = value
+        continue
+      }
+      next[date] = { ...value, balance: sample.total }
+      changed = true
+    }
+    if (changed) overrides = next
+    return changed
+  }
+
+  /** The newest sample at or before an instant, preferring the account currency. */
+  const sampleAtOrBefore = (at) => {
+    let fallback = null
+    for (let index = samples.length - 1; index >= 0; index -= 1) {
+      const sample = samples[index]
+      if (sample.t > at) continue
+      if (fallback === null) fallback = sample
+      if (sample.currency === runtime.currency) return sample
+    }
+    return fallback
+  }
 
   const resolveKey = async () => {
     if (runtime.apiKey !== '') return runtime.apiKey

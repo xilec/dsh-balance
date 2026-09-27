@@ -317,6 +317,46 @@ test('a fresh start reads the composition row', async () => {
   })
 })
 
+test('an override from the previous release gets its balance anchor back', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const ctx = hostContext()
+  try {
+    const module = await import(`../src/index.js?anchor=${encodeURIComponent(home)}`)
+    const { mkdir, readFile, writeFile } = await import('node:fs/promises')
+    await mkdir(join(home, 'dsh-balance'), { recursive: true })
+    // Realistic instants: the log is thinned to one sample per hour beyond the
+    // retention window, so samples from the epoch would not survive the read.
+    const now = Date.now()
+    const hour = 3600_000
+    const dayKey = new Date(now).toLocaleDateString('sv-SE')
+    // The shape the first anchored release wrote: an instant, no balance — which
+    // would leave today's cell frozen.
+    await writeFile(join(home, 'dsh-balance', 'samples.ndjson'), [
+      JSON.stringify({ t: now - 3 * hour, currency: 'CNY', total: 10, granted: 0, toppedUp: 10 }),
+      JSON.stringify({ t: now - 2 * hour, currency: 'CNY', total: 9.5, granted: 0, toppedUp: 9.5 }),
+      JSON.stringify({ t: now - hour, currency: 'CNY', total: 9.2, granted: 0, toppedUp: 9.2 }),
+    ].join('\n') + '\n', 'utf8')
+    await writeFile(join(home, 'dsh-balance', 'state.json'), JSON.stringify({
+      version: 1,
+      // Corrected exactly at the second sample, so that sample's balance is the anchor.
+      overrides: { [dayKey]: { amount: 1.25, at: now - 2 * hour } },
+    }), 'utf8')
+
+    module.apply(ctx, module.Config({ apiKey: 'test-key', currency: 'CNY' }))
+    await new Promise((resolve) => setTimeout(resolve, 60))
+
+    const state = JSON.parse(await readFile(join(home, 'dsh-balance', 'state.json'), 'utf8'))
+    assert.equal(state.overrides[dayKey].balance, 9.5, 'the balance of the correction moment is restored')
+  } finally {
+    ctx.dispose()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
 test('a failing fetch keeps the last balance and reports the error', async () => {
   await withPlugin(async ({ ctx }) => {
     await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
