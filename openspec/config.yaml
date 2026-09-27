@@ -1,0 +1,51 @@
+schema: spec-driven
+
+# Project context injected into every OpenSpec planning step.
+# OpenSpec never overwrites this field, so project-specific guidance
+# belongs here rather than in the generated skill files.
+context: |
+  Language: English
+  All artifacts must be written in English, including structural headings.
+
+  Project: dsh-balance — a DSH (DeepSeek Harness) plugin. It shows DeepSeek
+  account balance history and spend (1d/1w/1m, measured from balance
+  differences rather than token counts) in the dsh shell, with a per-day
+  ledger and a per-session cost estimate.
+
+  Layout:
+    src/              host-side plugin code (ESM, Node >= 22)
+    client/           browser-side client plugin (web platform)
+    test/             node:test suites, run with `npm test`
+    cordis.patch.yml  DSH composition patch contributed by the plugin
+
+  Constraints:
+  - Plain JavaScript ESM, no TypeScript. No new runtime dependency without a
+    recorded reason in design.md.
+  - Spend is derived from balance differences; token counts are not a source
+    of truth for cost.
+  - Host-side and client-side code talk through the documented dsh plugin
+    surfaces (slots, require entries, HTTP routes) — check the existing
+    plugin API documentation before inventing a new one.
+  - `npm run lint` (knip + jscpd) and `npm test` stay green for every change.
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing
