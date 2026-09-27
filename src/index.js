@@ -22,7 +22,7 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { buildLedger } from './history.js'
 import {
   OFF_PEAK_RATIO, PUBLIC_HOLIDAYS_2026, RULE_SOURCE_URL, RULE_VERIFIED_ON,
-  nextChange, peakState, priceAt,
+  nextChange, peakSchedule, peakState, phaseAt, priceAt, utcWindowsLabel, windowsOfLocalDay,
 } from './pricing.js'
 import { SESSION_COST_KEY, makeSessionCostProjection } from './session-cost.js'
 import { appendSample, readSamplesCompacting, readState, writeState } from './store.js'
@@ -296,19 +296,49 @@ export function apply(ctx, config) {
     }
   }, 'dsh-balance: balance sampling loop')
 
-  /** Live tariff and the next change, for the tooltip. */
-  const peakPayload = () => {
+  /**
+   * Live tariff, the next transitions, and the panel's day labels.
+   *
+   * The browser half renders the countdown itself from `schedule` (absolute
+   * instants, so a one-second tick needs no polling), and receives `windows` already
+   * converted into the reader's zone — the rule and the zone arithmetic stay on the
+   * Host, where the same module also prices the sessions.
+   */
+  const peakPayload = (zone) => {
     const now = Date.now()
-    const state = peakState(now, runtime.holidays)
-    const change = nextChange(now, runtime.holidays)
+    const state = phaseAt(now, runtime.holidays)
     return {
       peak: state.peak,
+      phase: state.phase,
       reason: state.reason,
+      untilMs: state.untilMs,
+      changeAt: state.changeAtMs,
+      changeToPeak: state.changeToPeak,
+      nextPeakAt: state.nextPeakAtMs,
+      schedule: peakSchedule(now, runtime.holidays),
       offPeakRatio: OFF_PEAK_RATIO,
-      changeAt: change?.atMs ?? null,
-      changeToPeak: change?.toPeak ?? null,
-      changeReason: change?.reason ?? null,
-      rule: { sourceUrl: RULE_SOURCE_URL, verifiedOn: RULE_VERIFIED_ON, holidays: runtime.holidays },
+      zone,
+      windows: {
+        today: windowsOfLocalDay(now, runtime.holidays, zone, 0),
+        tomorrow: windowsOfLocalDay(now, runtime.holidays, zone, 1),
+      },
+      rule: {
+        sourceUrl: RULE_SOURCE_URL,
+        verifiedOn: RULE_VERIFIED_ON,
+        holidays: runtime.holidays,
+        utcWindows: utcWindowsLabel(),
+      },
+    }
+  }
+
+  /** A zone the browser asked for, or the Host's own when it cannot be used. */
+  const requestZone = (value) => {
+    if (typeof value !== 'string' || value === '' || value === 'local') return 'local'
+    try {
+      new Intl.DateTimeFormat('en-GB', { timeZone: value }).format(new Date())
+      return value
+    } catch {
+      return 'local'
     }
   }
 
@@ -406,11 +436,11 @@ export function apply(ctx, config) {
     keepDays: runtime.keepDays,
   })
 
-  const buildPayload = (sessionId) => ({
+  const buildPayload = (sessionId, zone = 'local') => ({
     host: { version: VERSION, now: Date.now(), dir, samples: samples.length, loaded },
     balance: balancePayload(),
     ledger: ledgerPayload(),
-    peak: peakPayload(),
+    peak: peakPayload(zone),
     prices: pricePayload(),
     fallbackPrices: runtime.priceUnknownModels ? runtime.fallbackPrices : null,
     sampling: {
@@ -447,7 +477,10 @@ export function apply(ctx, config) {
         }
         if (!loaded) await ready
         const url = new URL(req.url ?? '/dsh-balance', 'http://127.0.0.1')
-        const payload = buildPayload(url.searchParams.get('sessionId') ?? '')
+        const payload = buildPayload(
+          url.searchParams.get('sessionId') ?? '',
+          requestZone(url.searchParams.get('zone')),
+        )
         if (req.method === 'HEAD') {
           res.writeHead(200, { 'Cache-Control': 'no-store' })
           res.end()

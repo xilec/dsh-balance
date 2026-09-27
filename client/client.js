@@ -1,14 +1,17 @@
 /**
  * dsh-balance — browser half.
  *
- * Registers one chip into the shell overlay, anchored at the bottom-left of the
- * content area (just right of the sidebar): account balance plus spend over
- * 1 day / 1 week / 1 month, read from balance differences, plus this session's
- * token-based estimate beside them.
+ * Three additive surfaces, all fed by `/dsh-balance`:
  *
- * Everything comes from the Host through `/dsh-balance`; this half never talks to
- * DeepSeek. Clicking the chip opens a card with the per-day ledger (each day
- * editable), the credit (top-up) events, and the sampling settings.
+ * 1. A compact readout in `conversation.composer.dock` at `order: -10`, so it is
+ *    drawn immediately left of the shipped `stats` entry ("N turns · M steps") and
+ *    reads as part of that line: `b:$19.52 · 1d:$0.39 · 1w:$2.29 · 1m:$10.43 · s:$0.33`.
+ *    Hovering explains it, clicking opens the panel.
+ * 2. The peak-tariff chip in the session header (and a floating copy for a session
+ *    whose header is hidden), driven by the Host's rule — the same module that prices
+ *    sessions, so holidays and the weekend discount are accounted for consistently.
+ * 3. The panel: the account cards, the per-day ledger with manual corrections, the
+ *    credit events and the sampling settings.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-balance',
@@ -21,6 +24,12 @@ window.__ModuleLoader__.load({
     const VERSION = '0.1.0'
     const NS = 'dsh-balance'
 
+    /** Provider whose requests the published pricing rule bills. */
+    const DEEPSEEK_PROVIDER = 'deepseek-official'
+
+    /** How long before a peak window opens the chip switches to `soon`. */
+    const WARN_LEAD_MS = 30 * 60 * 1000
+
     //#region styles
     const CSS_ID = 'dsh-balance/styles.css'
     if (typeof document !== 'undefined' && document.querySelector(`style[data-plugin-css="${CSS_ID}"]`) === null) {
@@ -28,35 +37,30 @@ window.__ModuleLoader__.load({
       tag.dataset.plugin = 'dsh-balance'
       tag.dataset.pluginCss = CSS_ID
       tag.textContent = [
-        '.dshb_anchor{position:absolute;bottom:10px;left:var(--dshb-left,12px);display:inline-flex;',
-        'flex-direction:column;align-items:flex-start;z-index:21}',
-        '.dshb_root{position:relative;display:inline-flex;align-items:center;gap:8px;',
-        'padding:4px 10px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.25));',
-        'background:var(--dsw-alias-bg-layer-1,var(--dsw-hovercard-bg,rgba(255,255,255,.9)));',
-        'color:var(--dsw-alias-label-primary);font-size:12px;line-height:18px;',
-        'box-shadow:var(--dsw-shadow-lv2,0 2px 10px rgba(0,0,0,.12));cursor:pointer;user-select:none;',
-        'backdrop-filter:blur(12px);white-space:nowrap}',
-        '.dshb_root:hover{border-color:var(--dsw-alias-border-l3,rgba(128,128,128,.4))}',
-        '.dshb_dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto}',
-        '.dshb_dot_success{background:var(--dsw-alias-state-success-primary,#10b981)}',
-        '.dshb_dot_warning{background:var(--dsw-alias-state-warn-primary,#f59e0b)}',
-        '.dshb_dot_danger{background:var(--dsw-alias-state-error-primary,#ef4444)}',
-        '.dshb_dot_idle{background:var(--dsw-alias-border-l3,rgba(128,128,128,.5))}',
-        '.dshb_balance{font-weight:600}',
-        '.dshb_sep{color:var(--dsw-alias-separator-primary,rgba(128,128,128,.4))}',
-        '.dshb_metric{color:var(--dsw-alias-label-secondary,inherit)}',
-        '.dshb_metric b{font-weight:600;color:var(--dsw-alias-label-primary)}',
-        '.dshb_metric_muted{opacity:.65}',
-        '.dshb_tip{position:absolute;bottom:calc(100% + 8px);left:0;z-index:30;min-width:280px;max-width:min(420px,92vw);',
+        // The readout copies the shipped stats pills: same size, same tertiary
+        // colour, same hover wash, dot separators between the metrics.
+        '.dshb_readout{box-sizing:border-box;min-width:0;max-width:100%;font-size:calc(var(--dsh-content-font-size-secondary,13px) - 1px);',
+        'line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px));display:flex;align-items:center;justify-content:center}',
+        '.dshb_pill{box-sizing:border-box;max-width:100%;color:var(--dsw-alias-label-tertiary);font:inherit;',
+        'font-variant-numeric:tabular-nums;line-height:inherit;white-space:nowrap;background:0 0;border:none;border-radius:999px;',
+        'align-items:center;gap:6px;padding:1px 8px;display:inline-flex;cursor:pointer;overflow:hidden;text-overflow:ellipsis}',
+        '.dshb_pill:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}',
+        '.dshb_metric_muted{opacity:.55}',
+        '.dshb_sep{background:var(--dsw-alias-label-caption);border-radius:1px;flex:none;width:2px;height:2px;margin:0 8px}',
+        '.dshb_anchor{position:relative;display:inline-flex;min-width:0}',
+        '.dshb_tip{position:absolute;bottom:calc(100% + 8px);left:0;z-index:31;min-width:300px;max-width:min(440px,92vw);',
         'padding:10px 12px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.25));',
-        'background:var(--dsw-alias-bg-layer-1,var(--dsw-hovercard-bg,#fff));color:var(--dsw-alias-label-primary);',
+        'background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1,#fff));color:var(--dsw-alias-label-secondary);',
         'font-size:12px;line-height:1.6;box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,.18));',
-        'display:flex;flex-direction:column;gap:4px;cursor:default;white-space:normal}',
-        '.dshb_tip_head{display:flex;align-items:center;justify-content:space-between;gap:12px;font-weight:600}',
+        'display:flex;flex-direction:column;gap:4px;text-align:left;white-space:normal}',
+        '.dshb_tip_head{display:flex;align-items:center;justify-content:space-between;gap:12px;font-weight:600;color:var(--dsw-alias-label-primary)}',
         '.dshb_tip_row{display:flex;justify-content:space-between;gap:12px}',
-        '.dshb_tip_row span:last-child{color:var(--dsw-alias-label-secondary,inherit)}',
-        '.dshb_tip_note{color:var(--dsw-alias-label-tertiary,inherit);font-size:11px}',
+        '.dshb_tip_row span:last-child{color:var(--dsw-alias-label-tertiary)}',
+        '.dshb_tip_note{color:var(--dsw-alias-label-tertiary);font-size:11px}',
         '.dshb_tip_flag{color:var(--dsw-alias-state-warn-primary,#f59e0b)}',
+        '.dshb_link{color:var(--dsw-alias-label-link,var(--dsw-alias-state-info-primary,#3b82f6));cursor:pointer;',
+        'text-decoration:none;background:none;border:none;padding:0;font:inherit;text-align:left}',
+        '.dshb_link:hover{text-decoration:underline}',
         '.dshb_backdrop{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;',
         'padding:24px;background:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.45))}',
         '.dshb_modal{width:min(720px,96vw);max-height:min(78vh,760px);display:flex;flex-direction:column;',
@@ -66,21 +70,21 @@ window.__ModuleLoader__.load({
         '.dshb_modal_head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:14px 16px;',
         'border-bottom:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18))}',
         '.dshb_modal_title{font-size:14px;font-weight:600}',
-        '.dshb_modal_sub{font-size:11.5px;color:var(--dsw-alias-label-tertiary,inherit)}',
+        '.dshb_modal_sub{font-size:11.5px;color:var(--dsw-alias-label-tertiary)}',
         '.dshb_close{border:0;background:transparent;color:inherit;font-size:18px;line-height:1;cursor:pointer;padding:4px}',
         '.dshb_tabs{display:flex;gap:4px;padding:10px 16px 0}',
-        '.dshb_tab{border:1px solid transparent;background:transparent;color:var(--dsw-alias-label-secondary,inherit);',
+        '.dshb_tab{border:1px solid transparent;background:transparent;color:var(--dsw-alias-label-secondary);',
         'font:inherit;font-size:12px;padding:4px 10px;border-radius:999px;cursor:pointer}',
         '.dshb_tab[data-active="true"]{background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.12));',
         'border-color:var(--dsw-alias-border-l2,rgba(128,128,128,.25));color:var(--dsw-alias-label-primary)}',
         '.dshb_body{padding:12px 16px 16px;overflow:auto;display:flex;flex-direction:column;gap:12px}',
         '.dshb_cards{display:flex;gap:10px;flex-wrap:wrap}',
         '.dshb_card{flex:1 1 150px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:10px;padding:10px 12px}',
-        '.dshb_card_label{font-size:11px;color:var(--dsw-alias-label-tertiary,inherit)}',
+        '.dshb_card_label{font-size:11px;color:var(--dsw-alias-label-tertiary)}',
         '.dshb_card_value{font-size:18px;font-weight:600;margin-top:2px}',
-        '.dshb_card_hint{font-size:11px;color:var(--dsw-alias-label-tertiary,inherit);margin-top:2px}',
+        '.dshb_card_hint{font-size:11px;color:var(--dsw-alias-label-tertiary);margin-top:2px}',
         '.dshb_table{width:100%;border-collapse:collapse;font-size:12px}',
-        '.dshb_table th{text-align:left;font-weight:500;color:var(--dsw-alias-label-tertiary,inherit);',
+        '.dshb_table th{text-align:left;font-weight:500;color:var(--dsw-alias-label-tertiary);',
         'padding:6px 6px;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));position:sticky;top:0;',
         'background:var(--dsw-alias-bg-layer-1,var(--dsw-hovercard-bg,#fff))}',
         '.dshb_table td{padding:4px 6px;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.1))}',
@@ -89,21 +93,40 @@ window.__ModuleLoader__.load({
         '.dshb_input{width:92px;text-align:right;font:inherit;font-size:12px;padding:2px 6px;border-radius:6px;',
         'border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.35));background:var(--dsw-alias-bg-base,transparent);',
         'color:inherit;font-variant-numeric:tabular-nums}',
-        '.dshb_row_flags{display:flex;gap:6px;align-items:center;color:var(--dsw-alias-label-tertiary,inherit);font-size:11px}',
+        '.dshb_row_flags{display:flex;gap:6px;align-items:center;color:var(--dsw-alias-label-tertiary);font-size:11px}',
         '.dshb_btn{border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.35));background:transparent;color:inherit;',
         'font:inherit;font-size:11.5px;padding:2px 8px;border-radius:6px;cursor:pointer}',
         '.dshb_btn:disabled{opacity:.5;cursor:default}',
         '.dshb_btn_primary{background:var(--dsw-alias-state-success-primary,#10b981);border-color:transparent;color:#fff}',
         '.dshb_settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}',
         '.dshb_field{display:flex;flex-direction:column;gap:3px;font-size:12px}',
-        '.dshb_field span{color:var(--dsw-alias-label-tertiary,inherit);font-size:11px}',
+        '.dshb_field span{color:var(--dsw-alias-label-tertiary);font-size:11px}',
         '.dshb_field input{border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.35));border-radius:6px;',
         'padding:4px 8px;background:var(--dsw-alias-bg-base,transparent);color:inherit;font:inherit;font-size:12px}',
         '.dshb_footer{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:11.5px;',
-        'color:var(--dsw-alias-label-tertiary,inherit)}',
+        'color:var(--dsw-alias-label-tertiary)}',
         '.dshb_credits{display:flex;flex-direction:column;gap:4px;font-size:12px}',
         '.dshb_credit{display:flex;justify-content:space-between;gap:12px}',
         '.dshb_error{color:var(--dsw-alias-state-error-primary,#ef4444)}',
+        // The peak chip keeps the look of the standalone peaks plugin.
+        '.dshb_peak{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;height:24px;',
+        'padding:0 10px 2px;border:none;border-radius:12px;background:transparent;color:var(--dsw-alias-label-primary);',
+        'font:inherit;font-size:12px;line-height:1;white-space:nowrap;cursor:pointer}',
+        '.dshb_peak_peak{background:#7d2626;color:#fff}',
+        '.dshb_peak_soon{background:#7a5a06;color:#fff}',
+        '.dshb_peak_off-peak{background:#1d6b45;color:#fff}',
+        '.dshb_peak_peak:hover{background:#8e2c2c}',
+        '.dshb_peak_soon:hover{background:#8f6a08}',
+        '.dshb_peak_off-peak:hover{background:#237a50}',
+        '.dshb_catch{position:fixed;inset:0;z-index:60}',
+        '.dshb_panel{position:absolute;z-index:61;display:flex;flex-direction:column;gap:3px;width:max-content;',
+        'max-width:min(440px,88vw);padding:10px 12px;border:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.25));',
+        'border-radius:10px;background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1,#fff));',
+        'box-shadow:0 6px 24px rgba(0,0,0,.16);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.5;text-align:left}',
+        '.dshb_panel_below{top:calc(100% + 6px);left:0}',
+        '.dshb_panel_above{bottom:calc(100% + 6px);right:0}',
+        '.dshb_panel_title{color:var(--dsw-alias-label-primary);font-weight:600}',
+        '.dshb_float{position:absolute;right:18px;bottom:6px;z-index:1}',
       ].join('')
       document.head.appendChild(tag)
     }
@@ -112,13 +135,9 @@ window.__ModuleLoader__.load({
     //#region copy
     const copy = {
       en: {
-        'chip.balance': 'Balance',
-        'chip.session': 'session',
-        'chip.unknown': 'no data',
-        'chip.reason.peak': 'peak rates',
-        'chip.reason.off-peak': 'off-peak rates',
-        'chip.reason.weekend': 'weekend, off-peak all day',
-        'chip.reason.holiday': 'Chinese public holiday, off-peak all day',
+        'readout.balance': 'b',
+        'readout.session': 's',
+        'readout.aria': 'DeepSeek balance and spend',
         'tip.title': 'Account and spend',
         'tip.balance': 'Balance',
         'tip.toppedUp': 'Topped up',
@@ -134,9 +153,14 @@ window.__ModuleLoader__.load({
         'tip.fetched': 'Balance read',
         'tip.credits': 'Credits in history',
         'tip.partial': 'partial: sampling started later',
-        'tip.coarse': 'some days are marked coarse — the app was closed across a day boundary',
+        'tip.coarse': 'some days are coarse — the app was closed across a day boundary',
         'tip.unpriced': 'not priced: {models}',
-        'tip.hint': 'Click for the per-day ledger, credits and sampling settings',
+        'tip.open': 'Click for the per-day ledger, credits and sampling settings',
+        'reason.peak': 'peak rates',
+        'reason.soon': 'peak rates start soon',
+        'reason.off-peak': 'off-peak rates',
+        'reason.weekend': 'weekend, off-peak all day',
+        'reason.holiday': 'Chinese public holiday, off-peak all day',
         'tip.error.api-key-missing': 'no API key found (DEEPSEEK_API_KEY)',
         'tip.stale': 'showing the last successful read',
         'card.title': 'DeepSeek balance and spend',
@@ -146,9 +170,9 @@ window.__ModuleLoader__.load({
         'tab.settings': 'Settings',
         'card.balance': 'Balance',
         'card.today': 'Today',
+        'card.session': 'This session',
         'card.week': '7 days',
         'card.month': '30 days',
-        'card.session': 'This session',
         'card.unavailable': 'balance unavailable',
         'days.date': 'Day',
         'days.sampled': 'From samples',
@@ -157,7 +181,6 @@ window.__ModuleLoader__.load({
         'days.coarse': 'coarse',
         'days.open': 'in progress',
         'days.reset': 'reset',
-        'days.save': 'save',
         'credits.empty': 'no credits recorded yet',
         'credits.note': 'a rising balance is a top-up, a refund, or a correction',
         'settings.currency': 'Currency',
@@ -170,7 +193,7 @@ window.__ModuleLoader__.load({
         'settings.apply': 'Apply',
         'settings.saved': 'saved',
         'settings.failed': 'rejected: {error}',
-        'settings.note': 'The host samples the balance on its own schedule — the chip only reads its cached payload.',
+        'settings.note': 'The Host samples the balance on its own schedule — the chip only reads its cached payload.',
         'footer.rule': 'Rates and tariff rule',
         'footer.ruleLink': 'official page',
         'footer.host': 'host {version}',
@@ -178,15 +201,31 @@ window.__ModuleLoader__.load({
         'common.close': 'Close',
         'common.refresh': 'Refresh now',
         'common.never': 'never',
+        'peak.chip.peak': 'Peak · ends in {remaining}',
+        'peak.chip.soon': 'Peak soon · {remaining}',
+        'peak.chip.off': 'Off-peak · peak in {remaining}',
+        'peak.title': 'DeepSeek peak hours',
+        'peak.aria': 'DeepSeek peak pricing: {text}',
+        'peak.state.peak': 'Now: peak pricing (×2)',
+        'peak.state.off': 'Now: off-peak pricing (×0.5)',
+        'peak.reason.weekend': 'Weekend pricing: off-peak all day',
+        'peak.reason.holiday': 'Chinese public holiday: off-peak all day',
+        'peak.today': 'Today ({zone}): {windows}',
+        'peak.tomorrow': 'Tomorrow ({zone}): {windows}',
+        'peak.allDay': 'off-peak all day',
+        'peak.utc': 'Peak hours: {windows} UTC, Mon–Fri',
+        'peak.offPeakNote': 'Weekends and Chinese public holidays are off-peak all day.',
+        'peak.price': 'Off-peak rates are half of peak rates.',
+        'peak.nextPeakEnds': 'Next change: peak ends {day} at {time} (in {remaining})',
+        'peak.nextPeakStarts': 'Next change: peak starts {day} at {time} (in {remaining})',
+        'peak.dayToday': 'today',
+        'peak.dayTomorrow': 'tomorrow',
+        'peak.source': 'Source: {url} · verified {date}',
       },
       ru: {
-        'chip.balance': 'Баланс',
-        'chip.session': 'сессия',
-        'chip.unknown': 'нет данных',
-        'chip.reason.peak': 'пиковый тариф',
-        'chip.reason.off-peak': 'льготный тариф',
-        'chip.reason.weekend': 'выходные — весь день льготный тариф',
-        'chip.reason.holiday': 'госпраздник КНР — весь день льготный тариф',
+        'readout.balance': 'б',
+        'readout.session': 'с',
+        'readout.aria': 'Баланс и расход DeepSeek',
         'tip.title': 'Баланс и расход',
         'tip.balance': 'Баланс',
         'tip.toppedUp': 'Пополнено',
@@ -204,7 +243,12 @@ window.__ModuleLoader__.load({
         'tip.partial': 'частично: сэмплирование началось позже',
         'tip.coarse': 'часть дней помечена как грубые — приложение было закрыто через границу суток',
         'tip.unpriced': 'без цены: {models}',
-        'tip.hint': 'Клик — таблица по дням, пополнения и настройки опроса',
+        'tip.open': 'Клик — таблица по дням, пополнения и настройки опроса',
+        'reason.peak': 'пиковый тариф',
+        'reason.soon': 'скоро пиковый тариф',
+        'reason.off-peak': 'льготный тариф',
+        'reason.weekend': 'выходные — весь день льготный тариф',
+        'reason.holiday': 'госпраздник КНР — весь день льготный тариф',
         'tip.error.api-key-missing': 'не найден ключ API (DEEPSEEK_API_KEY)',
         'tip.stale': 'показано последнее успешное чтение',
         'card.title': 'Баланс и расход DeepSeek',
@@ -214,9 +258,9 @@ window.__ModuleLoader__.load({
         'tab.settings': 'Настройки',
         'card.balance': 'Баланс',
         'card.today': 'Сегодня',
+        'card.session': 'Эта сессия',
         'card.week': '7 дней',
         'card.month': '30 дней',
-        'card.session': 'Эта сессия',
         'card.unavailable': 'баланс недоступен',
         'days.date': 'День',
         'days.sampled': 'Из сэмплов',
@@ -225,7 +269,6 @@ window.__ModuleLoader__.load({
         'days.coarse': 'грубо',
         'days.open': 'идёт',
         'days.reset': 'сброс',
-        'days.save': 'ок',
         'credits.empty': 'пополнений пока нет',
         'credits.note': 'рост баланса — это пополнение, возврат или правка',
         'settings.currency': 'Валюта',
@@ -246,6 +289,26 @@ window.__ModuleLoader__.load({
         'common.close': 'Закрыть',
         'common.refresh': 'Обновить',
         'common.never': 'никогда',
+        'peak.chip.peak': 'Пик · закончится через {remaining}',
+        'peak.chip.soon': 'Скоро пик · {remaining}',
+        'peak.chip.off': 'Льготный · пик через {remaining}',
+        'peak.title': 'Пиковые часы DeepSeek',
+        'peak.aria': 'Пиковые тарифы DeepSeek: {text}',
+        'peak.state.peak': 'Сейчас: пиковый тариф (×2)',
+        'peak.state.off': 'Сейчас: льготный тариф (×0.5)',
+        'peak.reason.weekend': 'Тариф выходного дня: весь день льготный',
+        'peak.reason.holiday': 'Госпраздник КНР: весь день льготный',
+        'peak.today': 'Сегодня ({zone}): {windows}',
+        'peak.tomorrow': 'Завтра ({zone}): {windows}',
+        'peak.allDay': 'весь день льготный',
+        'peak.utc': 'Пиковые часы: {windows} UTC, Пн–Пт',
+        'peak.offPeakNote': 'Выходные и госпраздники КНР — весь день льготный тариф.',
+        'peak.price': 'Льготный тариф — половина пикового.',
+        'peak.nextPeakEnds': 'Смена: пик закончится {day} в {time} (через {remaining})',
+        'peak.nextPeakStarts': 'Смена: пик начнётся {day} в {time} (через {remaining})',
+        'peak.dayToday': 'сегодня',
+        'peak.dayTomorrow': 'завтра',
+        'peak.source': 'Источник: {url} · проверено {date}',
       },
     }
     //#endregion
@@ -263,11 +326,6 @@ window.__ModuleLoader__.load({
       return `${symbol(currency)}${fixed}`
     }
 
-    function compactMoney(value, currency) {
-      if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
-      return money(value, currency, Math.abs(value) >= 10 ? 1 : 2)
-    }
-
     function duration(ms) {
       if (!Number.isFinite(ms) || ms < 0) return '—'
       const minutes = Math.floor(ms / 60000)
@@ -275,6 +333,19 @@ window.__ModuleLoader__.load({
       const hours = Math.floor(minutes / 60)
       if (hours < 48) return `${hours}h ${minutes % 60}m`
       return `${Math.floor(hours / 24)}d ${hours % 24}h`
+    }
+
+    /** The countdown format the peaks chip uses: `45s`, `12m 30s`, `1h 23m`, `2d 15h`. */
+    function formatRemaining(ms) {
+      const total = Math.max(0, Math.floor((Number.isFinite(ms) ? ms : 0) / 1000))
+      const days = Math.floor(total / 86400)
+      const hours = Math.floor((total % 86400) / 3600)
+      const minutes = Math.floor((total % 3600) / 60)
+      const seconds = total % 60
+      if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`
+      if (hours > 0) return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`
+      if (minutes > 0) return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`
+      return `${seconds}s`
     }
 
     function clock(ts) {
@@ -287,12 +358,126 @@ window.__ModuleLoader__.load({
       const [y, m, d] = key.split('-')
       return `${d}.${m}`
     }
+
+    function statusLevel(balance, thresholds) {
+      if (balance === null || thresholds === undefined) return 'idle'
+      if (balance <= thresholds.danger) return 'danger'
+      if (balance <= thresholds.warning) return 'warning'
+      return 'success'
+    }
+    //#endregion
+
+    //#region peak state
+    /**
+     * The tariff state at `nowMs`, derived from the Host's transition schedule.
+     *
+     * The Host owns the rule (it is the same module that prices sessions); the
+     * schedule carries absolute instants, so the chip can tick every second between
+     * polls without asking anyone.
+     *
+     * @param schedule - `[{ atMs, toPeak, reason }]` from the payload, in order.
+     * @param asOfMs - instant the payload was read.
+     * @param asOfPeak - whether that instant was peak.
+     * @param nowMs - instant to describe.
+     * @returns `{ peak, phase, untilMs, changeAtMs, changeToPeak }`.
+     */
+    function phaseFromSchedule(schedule, asOfMs, asOfPeak, nowMs) {
+      let peak = asOfPeak === true
+      let next = null
+      for (const transition of schedule ?? []) {
+        if (typeof transition?.atMs !== 'number') continue
+        if (transition.atMs <= asOfMs) continue
+        if (transition.atMs <= nowMs) {
+          peak = transition.toPeak === true
+          continue
+        }
+        next = transition
+        break
+      }
+      const untilMs = next === null ? null : next.atMs - nowMs
+      const phase = peak
+        ? 'peak'
+        : (next !== null && next.toPeak === true && untilMs <= WARN_LEAD_MS ? 'soon' : 'off-peak')
+      return {
+        peak,
+        phase,
+        untilMs,
+        changeAtMs: next === null ? null : next.atMs,
+        changeToPeak: next === null ? null : next.toPeak === true,
+      }
+    }
+
+    /** The route one `modelSelection` leaf describes. */
+    function routeOfSelection(selection) {
+      if (selection === null || typeof selection !== 'object') return null
+      const provider = selection.provider
+      const model = selection.model
+      if (typeof provider !== 'string' || typeof model !== 'string') return null
+      return { provider, model }
+    }
+
+    /** The route recorded by the `modelSelection` projection, if any. */
+    function routeFromModelSelection(value) {
+      if (value === null || typeof value !== 'object') return null
+      return routeOfSelection(value.next) ?? routeOfSelection(value.lastUsed)
+    }
+
+    /** The route a session with no recorded selection will use, from the catalog default. */
+    function routeFromCatalogDefault(snapshot) {
+      const catalog = snapshot?.value
+      if (catalog === null || typeof catalog !== 'object') return null
+      return routeOfSelection(catalog.default)
+    }
+
+    /**
+     * The route the next request will use.
+     *
+     * An absent projection means the runtime never told us which model the session
+     * uses, and the indicator stays hidden rather than quoting a price for a route it
+     * cannot see.
+     */
+    function effectiveRoute(projection, catalogSnapshot) {
+      const recorded = routeFromModelSelection(projection)
+      if (recorded !== null) return recorded
+      if (projection === undefined || projection === null) return null
+      return routeFromCatalogDefault(catalogSnapshot)
+    }
+
+    /** Whether the published rule bills this provider at all. */
+    function isPeakRuleRoute(provider) {
+      return provider === DEEPSEEK_PROVIDER
+    }
     //#endregion
 
     //#region store
     const DEFAULT_POLL_MS = 15000
+    const clamp = (value, min, max) => Math.min(Math.max(value, min), max)
 
-    /** Single shared poller: one reader per page, whichever chip is mounted. */
+    function browserZone() {
+      try {
+        const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
+        return typeof zone === 'string' && zone.length > 0 ? zone : 'local'
+      } catch {
+        return 'local'
+      }
+    }
+
+    function settingsOf(payload) {
+      return {
+        currency: payload?.balance?.currencyPreference ?? payload?.balance?.currency ?? 'USD',
+        dayZone: payload?.ledger?.zone ?? 'local',
+        refreshIntervalMs: payload?.sampling?.refreshIntervalMs ?? 300000,
+        clientPollIntervalMs: payload?.sampling?.clientPollIntervalMs ?? DEFAULT_POLL_MS,
+        warningThreshold: payload?.balance?.thresholds?.warning ?? 10,
+        dangerThreshold: payload?.balance?.thresholds?.danger ?? 5,
+        historyDays: payload?.ledger?.rows?.length ?? 30,
+      }
+    }
+
+    /**
+     * One shared poller: a single reader per page whatever number of surfaces the
+     * plugin adds, with the reader's zone and session id attached.
+     */
     function createStore() {
       let snapshot = { status: 'loading', payload: null, error: null, at: 0 }
       let pollMs = DEFAULT_POLL_MS
@@ -303,6 +488,7 @@ window.__ModuleLoader__.load({
       let currentSessionId = ''
       let refetchRequested = false
       const listeners = new Set()
+      const zone = browserZone()
 
       const notify = () => {
         for (const listener of [...listeners]) listener()
@@ -324,10 +510,12 @@ window.__ModuleLoader__.load({
         const requestedSession = currentSessionId
         inflight = (async () => {
           try {
-            const url = requestedSession === ''
-              ? '/dsh-balance'
-              : `/dsh-balance?sessionId=${encodeURIComponent(requestedSession)}`
-            const response = await fetch(url, { cache: 'no-store', headers: { accept: 'application/json' } })
+            const params = new URLSearchParams({ zone })
+            if (requestedSession !== '') params.set('sessionId', requestedSession)
+            const response = await fetch(`/dsh-balance?${params.toString()}`, {
+              cache: 'no-store',
+              headers: { accept: 'application/json' },
+            })
             if (!response.ok) throw new Error(`HTTP ${response.status}`)
             const payload = await response.json()
             pollMs = clamp(payload?.sampling?.clientPollIntervalMs ?? pollMs, 2000, 3600000)
@@ -368,7 +556,7 @@ window.__ModuleLoader__.load({
             schedule()
             return
           }
-          void read('timer').then(schedule, schedule)
+          void read().then(schedule, schedule)
         }, pollMs)
       }
 
@@ -387,9 +575,7 @@ window.__ModuleLoader__.load({
         sayHello,
         subscribe(listener) {
           listeners.add(listener)
-          if (subscribers === 0) {
-            void read('first').then(schedule, schedule)
-          }
+          if (subscribers === 0) void read().then(schedule, schedule)
           subscribers += 1
           return () => {
             listeners.delete(listener)
@@ -405,35 +591,21 @@ window.__ModuleLoader__.load({
           const next = typeof id === 'string' ? id : ''
           if (next === currentSessionId) return
           currentSessionId = next
-          void read('session').then(schedule, schedule)
+          void read().then(schedule, schedule)
         },
-        refresh: () => read('manual'),
+        refresh: () => read(),
         async setOverride(date, amount) {
           const result = await post('/dsh-balance/overrides', { date, amount })
-          await read('after-override')
+          await read()
           return result
         },
         async saveSettings(values) {
           const result = await post('/dsh-balance/settings', values)
           pollMs = clamp(result?.sampling?.clientPollIntervalMs ?? pollMs, 2000, 3600000)
-          await read('after-settings')
+          await read()
           return result
         },
-        forceRefresh: () => post('/dsh-balance/refresh', {}).then(() => read('after-refresh')),
-      }
-    }
-
-    const clamp = (value, min, max) => Math.min(Math.max(value, min), max)
-
-    function settingsOf(payload) {
-      return {
-        currency: payload?.balance?.currencyPreference ?? payload?.balance?.currency ?? 'USD',
-        dayZone: payload?.ledger?.zone ?? 'local',
-        refreshIntervalMs: payload?.sampling?.refreshIntervalMs ?? 300000,
-        clientPollIntervalMs: payload?.sampling?.clientPollIntervalMs ?? DEFAULT_POLL_MS,
-        warningThreshold: payload?.balance?.thresholds?.warning ?? 10,
-        dangerThreshold: payload?.balance?.thresholds?.danger ?? 5,
-        historyDays: payload?.ledger?.rows?.length ?? 30,
+        forceRefresh: () => post('/dsh-balance/refresh', {}).then(() => read()),
       }
     }
 
@@ -441,119 +613,186 @@ window.__ModuleLoader__.load({
 
     const useStore = () => react.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
 
-    /**
-     * The session the user is looking at.
-     *
-     * `shell.overlay` is a root-scope slot, so it gets root hooks but no
-     * `sessionId`; the canonical root-scope way to find the session the main view
-     * retains is the `useSessions` selector hook.
-     */
-    function useCurrentSessionId(useSessions) {
-      return useSessions === undefined
-        ? ''
-        : useSessions((state) => {
-          const rows = Object.values(state?.byId ?? {})
-          return rows.find((row) => (row?.retainedBy?.mainView ?? 0) > 0)?.id ?? ''
-        })
+    /** A clock that ticks while a component is mounted, for countdowns. */
+    function useNow(intervalMs) {
+      const [now, setNow] = react.useState(() => Date.now())
+      react.useEffect(() => {
+        const timer = setInterval(() => setNow(Date.now()), intervalMs)
+        return () => clearInterval(timer)
+      }, [intervalMs])
+      return now
     }
     //#endregion
 
     //#region components
     const h = react.createElement
 
-    function statusLevel(balance, thresholds) {
-      if (balance === null || thresholds === undefined) return 'idle'
-      if (balance <= thresholds.danger) return 'danger'
-      if (balance <= thresholds.warning) return 'warning'
-      return 'success'
-    }
-
-    function Chip(props) {
+    /**
+     * The compact readout in the composer dock, left of the shipped stats entry.
+     *
+     * The format is deliberately terse — `b:`, `1d`, `1w`, `1m`, `s:` — because it
+     * shares one line with the turn counters and the token pills.
+     */
+    function Readout(props) {
       const { t } = props
       const state = useStore()
-      const sessionId = useCurrentSessionId(props.useSessions)
+      // The session projection updates as the turn streams; the payload's copy is the
+      // fallback when the projection unit is not registered.
+      const projection = typeof props.useProjection === 'function' ? props.useProjection('dshBalanceCost') : undefined
       const [open, setOpen] = react.useState(false)
       const [hover, setHover] = react.useState(false)
       const payload = state.payload
       const balance = payload?.balance ?? null
       const primary = balance?.primary ?? null
       const ledger = payload?.ledger ?? null
-      const level = statusLevel(primary?.total ?? null, balance?.thresholds)
       const currency = balance?.currency ?? 'USD'
-      const session = payload?.session ?? null
+      const level = statusLevel(primary?.total ?? null, balance?.thresholds)
+      const sessionCost = projection?.cost ?? payload?.session?.cost ?? null
+      const sessionCurrency = projection?.currency ?? payload?.session?.currency ?? currency
 
       react.useEffect(() => {
-        store.setSessionId(sessionId)
-        // Reports a completed render, which a reachability probe alone cannot prove.
+        store.setSessionId(typeof props.sessionId === 'string' ? props.sessionId : '')
         store.sayHello('mount')
-      }, [sessionId])
+      }, [props.sessionId])
 
-      // The overlay layer spans the whole frame and publishes nothing about the
-      // sidebar, so the chip measures the sidebar column itself: it is the frame's
-      // first element child, and drag/collapse only resizes that column.
-      react.useEffect(() => {
-        if (typeof document === 'undefined') return undefined
-        const layer = document.querySelector('[data-shell-overlay]')
-        const frame = layer?.parentElement ?? null
-        if (layer === null || frame === null) return undefined
-        const sidebar = frame.firstElementChild
-        const measure = () => {
-          const right = sidebar === null ? 0 : sidebar.getBoundingClientRect().right
-          layer.style.setProperty('--dshb-left', `${Math.round(right > 0 ? right + 8 : 12)}px`)
-        }
-        measure()
-        const observer = new ResizeObserver(measure)
-        if (sidebar !== null) observer.observe(sidebar)
-        const mutations = new MutationObserver(measure)
-        mutations.observe(frame, { attributes: true, attributeFilter: ['style', 'data-sidebar-collapsed'] })
-        return () => {
-          observer.disconnect()
-          mutations.disconnect()
-        }
-      }, [])
-
-      const balanceText = primary === null
-        ? t('chip.unknown')
-        : `${t('chip.balance')} ${money(primary.total, currency)}`
-
+      // Two decimals everywhere: the day figures are cents, so rounding them to one
+      // decimal would hide most of the signal.
       const metric = (label, value, covered = true) => h('span', {
         className: `dshb_metric${covered ? '' : ' dshb_metric_muted'}`,
         key: label,
-      }, h('b', null, compactMoney(value, currency)), ` ${label}`)
+      }, `${label}:${value}`)
 
-      const chip = h('div', {
-        className: 'dshb_root',
-        role: 'button',
-        tabIndex: 0,
-        onClick: () => setOpen(true),
-        onKeyDown: (event) => {
-          if (event.key === 'Enter' || event.key === ' ') setOpen(true)
-        },
+      const metrics = [
+        metric(t('readout.balance'), primary === null ? '—' : money(primary.total, currency)),
+        h('span', { className: 'dshb_sep', key: 'sep1' }),
+        metric('1d', ledger === null ? '—' : money(ledger.totals.d1.amount, currency), ledger === null || ledger.totals.d1.covered),
+        h('span', { className: 'dshb_sep', key: 'sep2' }),
+        metric('1w', ledger === null ? '—' : money(ledger.totals.w1.amount, currency), ledger === null || ledger.totals.w1.covered),
+        h('span', { className: 'dshb_sep', key: 'sep3' }),
+        metric('1m', ledger === null ? '—' : money(ledger.totals.m1.amount, currency), ledger === null || ledger.totals.m1.covered),
+        h('span', { className: 'dshb_sep', key: 'sep4' }),
+        metric(t('readout.session'), sessionCost === null ? '—' : money(sessionCost, sessionCurrency)),
+      ]
+
+      return h('div', { className: 'dshb_readout' }, h('div', {
+        className: 'dshb_anchor',
+        'data-level': level,
         onMouseEnter: () => setHover(true),
         onMouseLeave: () => setHover(false),
-        title: t('tip.hint'),
       }, [
-        h('span', { className: `dshb_dot dshb_dot_${level}`, key: 'dot' }),
-        h('span', { className: 'dshb_balance', key: 'bal' }, balanceText),
-        ledger === null ? null : h('span', { className: 'dshb_sep', key: 's1' }, '·'),
-        ledger === null ? null : metric('1d', ledger.totals.d1.amount, ledger.totals.d1.covered),
-        ledger === null ? null : metric('1w', ledger.totals.w1.amount, ledger.totals.w1.covered),
-        ledger === null ? null : metric('1m', ledger.totals.m1.amount, ledger.totals.m1.covered),
-        session === null ? null : h('span', { className: 'dshb_sep', key: 's2' }, '·'),
-        session === null ? null : h('span', { className: 'dshb_metric', key: 'ses' },
-          h('b', null, money(session.cost, session.currency ?? currency)), ` ${t('chip.session')}`),
-      ])
-
-      return h('div', { className: 'dshb_anchor' }, [
-        hover && open === false ? h(Tooltip, { key: 'tip', t, state }) : null,
-        chip,
-        open ? h(Card, { key: 'card', t, state, onClose: () => setOpen(false) }) : null,
-      ])
+        hover && open === false
+          ? h(Tooltip, { key: 'tip', t, state, projection, onOpen: () => setOpen(true) })
+          : null,
+        h('button', {
+          key: 'pill',
+          type: 'button',
+          className: 'dshb_pill',
+          'aria-label': t('readout.aria'),
+          onClick: () => setOpen(true),
+        }, metrics),
+        open ? h(Card, { key: 'card', t, state, projection, onClose: () => setOpen(false) }) : null,
+      ]))
     }
 
-    function Tooltip({ t, state }) {
+    /** The peak-tariff chip: the session header, or a floating copy for a hidden header. */
+    function createPeakChip(deps) {
+      const { forNewSession, catalogSnapshot } = deps
+      return function PeakChip(props) {
+        const { t } = props
+        const state = useStore()
+        const nowMs = useNow(1000)
+        const [open, setOpen] = react.useState(false)
+        const prop = (name, ...args) => {
+          try {
+            return typeof props[name] === 'function' ? props[name](...args) : undefined
+          } catch {
+            return undefined
+          }
+        }
+        const isFreshSession = prop('useSession', (snapshot) => snapshot.blank && !snapshot.running && !snapshot.promptAttempted) === true
+        const projection = prop('useProjection', 'modelSelection')
+        const payload = state.payload
+        const route = effectiveRoute(projection, catalogSnapshot())
+        const local = payload?.peak === null || payload?.peak === undefined
+          ? null
+          : phaseFromSchedule(payload.peak.schedule, payload.host?.now ?? state.at, payload.peak.peak, nowMs)
+
+        if (isFreshSession !== forNewSession) return null
+        if (route === null || !isPeakRuleRoute(route.provider)) return null
+        if (local === null) return null
+
+        const remaining = local.untilMs === null ? '—' : formatRemaining(local.untilMs)
+        const text = local.phase === 'peak'
+          ? t('peak.chip.peak', { remaining })
+          : local.phase === 'soon'
+            ? t('peak.chip.soon', { remaining })
+            : t('peak.chip.off', { remaining })
+
+        const chip = h('button', {
+          type: 'button',
+          className: `dshb_peak dshb_peak_${local.phase}`,
+          'aria-expanded': open,
+          'aria-label': t('peak.aria', { text }),
+          onClick: () => setOpen((value) => !value),
+        }, text)
+
+        if (open === false) return forNewSession ? h('div', { className: 'dshb_float' }, chip) : chip
+        const panel = h('div', { className: `dshb_panel ${forNewSession ? 'dshb_panel_above' : 'dshb_panel_below'}` }, [
+          h('div', { className: 'dshb_panel_title', key: 'title' }, t('peak.title')),
+          ...peakLines(t, payload, route, local, nowMs).map((line, index) => h('div', { key: `line-${index}` }, line)),
+        ])
+        const stack = h('div', { className: 'dshb_anchor' }, [
+          chip,
+          h('div', { className: 'dshb_catch', key: 'catch', onClick: () => setOpen(false) }),
+          panel,
+        ])
+        return forNewSession ? h('div', { className: 'dshb_float' }, stack) : stack
+      }
+    }
+
+    /** Every line the peak panel shows, derived from the Host's rule payload. */
+    function peakLines(t, payload, route, local, nowMs) {
+      const peak = payload?.peak ?? {}
+      const windows = peak.windows ?? {}
+      const zone = peak.zone ?? 'local'
+      const changeAt = local.changeAtMs === null ? null : new Date(local.changeAtMs)
+      const todayKey = new Date(nowMs).toDateString()
+      const tomorrowKey = new Date(nowMs + 24 * 3600 * 1000).toDateString()
+      const dayWord = changeAt === null
+        ? ''
+        : changeAt.toDateString() === todayKey
+          ? t('peak.dayToday')
+          : changeAt.toDateString() === tomorrowKey
+            ? t('peak.dayTomorrow')
+            : changeAt.toLocaleDateString(undefined, { weekday: 'short' })
+      const lines = [
+        local.peak ? t('peak.state.peak') : t('peak.state.off'),
+        `${route.provider} · ${route.model}`,
+        t('peak.today', { zone, windows: (windows.today ?? []).join(', ') || t('peak.allDay') }),
+        t('peak.tomorrow', { zone, windows: (windows.tomorrow ?? []).join(', ') || t('peak.allDay') }),
+        t('peak.utc', { windows: peak.rule?.utcWindows ?? '' }),
+        t('peak.offPeakNote'),
+        t('peak.price'),
+      ]
+      if (changeAt !== null) {
+        lines.push(t(local.changeToPeak ? 'peak.nextPeakStarts' : 'peak.nextPeakEnds', {
+          day: dayWord,
+          time: changeAt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }),
+          remaining: formatRemaining(local.untilMs ?? 0),
+        }))
+      }
+      if (!local.peak && (peak.reason === 'holiday' || peak.reason === 'weekend')) {
+        lines.push(t(`peak.reason.${peak.reason}`))
+      }
+      lines.push(t('peak.source', { url: peak.rule?.sourceUrl ?? '', date: peak.rule?.verifiedOn ?? '' }))
+      return lines
+    }
+
+    function Tooltip({ t, state, projection, onOpen }) {
       const payload = state.payload
-      if (payload === null) return h('div', { className: 'dshb_tip' }, state.error ?? '…')
+      if (payload === null) {
+        return h('div', { className: 'dshb_tip' }, state.error ?? '…')
+      }
       const balance = payload.balance
       const ledger = payload.ledger
       const peak = payload.peak
@@ -568,7 +807,7 @@ window.__ModuleLoader__.load({
       rows.push(h('div', { className: 'dshb_tip_head', key: 'head' }, [
         h('span', { key: 't' }, t('tip.title')),
         h('span', { key: 'r', className: state.status === 'error' ? 'dshb_error' : 'dshb_tip_note' },
-          state.status === 'error' ? (state.error ?? '') : t(`chip.reason.${peak?.reason ?? 'off-peak'}`)),
+          state.status === 'error' ? (state.error ?? '') : t(`reason.${peak?.phase ?? 'off-peak'}`)),
       ]))
       if (primary !== null) {
         row(t('tip.balance'), money(primary.total, currency), 'bal')
@@ -582,32 +821,39 @@ window.__ModuleLoader__.load({
         row(t('tip.spend1w'), money(ledger.totals.w1.amount, currency), 'w1')
         row(t('tip.spend1m'), money(ledger.totals.m1.amount, currency), 'm1')
       }
-      if (payload.session !== null) row(t('tip.session'), money(payload.session.cost, payload.session.currency ?? currency), 'ses')
-      if (payload.session !== null && payload.session.unpriced?.length > 0) {
+      const sessionCost = projection?.cost ?? payload.session?.cost ?? null
+      if (sessionCost !== null) {
+        row(t('tip.session'), money(sessionCost, projection?.currency ?? payload.session?.currency ?? currency), 'ses')
+      }
+      if (payload.session !== null && payload.session?.unpriced?.length > 0) {
         rows.push(h('div', { className: 'dshb_tip_note dshb_tip_flag', key: 'unpriced' }, t('tip.unpriced', { models: payload.session.unpriced.join(', ') })))
       }
       if (peak?.changeAt !== null && peak?.changeAt !== undefined) {
-        row(t('tip.next'), `${clock(peak.changeAt)} → ${t(`chip.reason.${peak.changeReason ?? 'peak'}`)} (${duration(peak.changeAt - Date.now())})`, 'next')
+        row(t('tip.next'), `${clock(peak.changeAt)} · ${formatRemaining(peak.untilMs ?? 0)}`, 'next')
       }
       if (ledger !== null) {
         row(t('tip.samples'), `${ledger.sampleCount}`, 'samples')
         if (ledger.medianGapMs !== null) row(t('tip.cadence'), duration(ledger.medianGapMs), 'gap')
         if (!ledger.totals.m1.covered) rows.push(h('div', { className: 'dshb_tip_note dshb_tip_flag', key: 'partial' }, t('tip.partial')))
-        if (ledger.rows.some((r) => r.coarse)) rows.push(h('div', { className: 'dshb_tip_note dshb_tip_flag', key: 'coarse' }, t('tip.coarse')))
+        if (ledger.rows.some((entry) => entry.coarse)) rows.push(h('div', { className: 'dshb_tip_note dshb_tip_flag', key: 'coarse' }, t('tip.coarse')))
         row(t('tip.credits'), `${money(ledger.creditTotal, currency)} (${ledger.credits.length})`, 'credits')
       }
       row(t('tip.fetched'), balance?.fetchedAt ? `${clock(balance.fetchedAt)}${balance.stale ? ` · ${t('tip.stale')}` : ''}` : t('common.never'), 'fetched')
-      rows.push(h('div', { className: 'dshb_tip_note', key: 'hint' }, t('tip.hint')))
+      rows.push(h('button', { className: 'dshb_link', key: 'open', type: 'button', onClick: onOpen }, t('tip.open')))
       return h('div', { className: 'dshb_tip' }, rows)
     }
+    //#endregion
 
-    function Card({ t, state, onClose }) {
+    //#region panel
+    function Card({ t, state, projection, onClose }) {
       const [tab, setTab] = react.useState('days')
       const payload = state.payload
       const currency = payload?.balance?.currency ?? 'USD'
       const ledger = payload?.ledger ?? null
       const balance = payload?.balance ?? null
       const primary = balance?.primary ?? null
+      const sessionCost = projection?.cost ?? payload?.session?.cost ?? null
+      const sessionCurrency = projection?.currency ?? payload?.session?.currency ?? currency
 
       react.useEffect(() => {
         if (typeof document === 'undefined') return undefined
@@ -618,33 +864,25 @@ window.__ModuleLoader__.load({
         return () => document.removeEventListener('keydown', onKey)
       }, [onClose])
 
+      const card = (key, label, value, hint) => h('div', { className: 'dshb_card', key }, [
+        h('div', { className: 'dshb_card_label', key: 'l' }, label),
+        h('div', { className: 'dshb_card_value', key: 'v' }, value),
+        hint === undefined ? null : h('div', { className: 'dshb_card_hint', key: 'h' }, hint),
+      ])
+
+      // Balance, today and this session on the first row; the two rolling totals
+      // below them, month first, week after it.
       const cards = h('div', { className: 'dshb_cards', key: 'cards' }, [
-        h('div', { className: 'dshb_card', key: 'bal' }, [
-          h('div', { className: 'dshb_card_label', key: 'l' }, t('card.balance')),
-          h('div', { className: 'dshb_card_value', key: 'v' }, primary === null ? '—' : money(primary.total, currency)),
-          h('div', { className: 'dshb_card_hint', key: 'h' }, primary === null
+        card('bal', t('card.balance'),
+          primary === null ? '—' : money(primary.total, currency),
+          primary === null
             ? (balance?.error ?? t('card.unavailable'))
             : `${t('tip.toppedUp')} ${money(primary.toppedUp, currency)} · ${t('tip.granted')} ${money(primary.granted, currency)}`),
-        ]),
-        h('div', { className: 'dshb_card', key: 'd1' }, [
-          h('div', { className: 'dshb_card_label', key: 'l' }, t('card.today')),
-          h('div', { className: 'dshb_card_value', key: 'v' }, ledger === null ? '—' : money(ledger.totals.d1.amount, currency)),
-        ]),
-        h('div', { className: 'dshb_card', key: 'w1' }, [
-          h('div', { className: 'dshb_card_label', key: 'l' }, t('card.week')),
-          h('div', { className: 'dshb_card_value', key: 'v' }, ledger === null ? '—' : money(ledger.totals.w1.amount, currency)),
-        ]),
-        h('div', { className: 'dshb_card', key: 'm1' }, [
-          h('div', { className: 'dshb_card_label', key: 'l' }, t('card.month')),
-          h('div', { className: 'dshb_card_value', key: 'v' }, ledger === null ? '—' : money(ledger.totals.m1.amount, currency)),
-        ]),
-        h('div', { className: 'dshb_card', key: 'ses' }, [
-          h('div', { className: 'dshb_card_label', key: 'l' }, t('card.session')),
-          h('div', { className: 'dshb_card_value', key: 'v' }, payload?.session === null || payload?.session === undefined
-            ? '—'
-            : money(payload.session.cost, payload.session.currency ?? currency)),
-          h('div', { className: 'dshb_card_hint', key: 'h' }, payload?.peak === undefined ? '' : t(`chip.reason.${payload.peak.reason}`)),
-        ]),
+        card('d1', t('card.today'), ledger === null ? '—' : money(ledger.totals.d1.amount, currency)),
+        card('ses', t('card.session'), sessionCost === null ? '—' : money(sessionCost, sessionCurrency),
+          payload?.peak === undefined ? undefined : t(`reason.${payload.peak.phase ?? 'off-peak'}`)),
+        card('m1', t('card.month'), ledger === null ? '—' : money(ledger.totals.m1.amount, currency)),
+        card('w1', t('card.week'), ledger === null ? '—' : money(ledger.totals.w1.amount, currency)),
       ])
 
       const body = tab === 'days'
@@ -679,6 +917,7 @@ window.__ModuleLoader__.load({
             h('span', { key: 'rule' }, `${t('footer.rule')}: `),
             h('a', {
               key: 'link',
+              className: 'dshb_link',
               href: payload?.peak?.rule?.sourceUrl ?? 'https://api-docs.deepseek.com/quick_start/pricing',
               target: '_blank',
               rel: 'noreferrer',
@@ -748,10 +987,12 @@ window.__ModuleLoader__.load({
               onChange: (event) => setDrafts((current) => ({ ...current, [row.key]: event.target.value })),
               onKeyDown: (event) => {
                 if (event.key === 'Enter') void commit(row)
-                if (event.key === 'Escape') setDrafts((current) => {
-                  const { [row.key]: _dropped, ...rest } = current
-                  return rest
-                })
+                if (event.key === 'Escape') {
+                  setDrafts((current) => {
+                    const { [row.key]: _dropped, ...rest } = current
+                    return rest
+                  })
+                }
               },
               onBlur: () => {
                 if (Object.prototype.hasOwnProperty.call(drafts, row.key) && drafts[row.key] !== (row.override ?? '')) void commit(row)
@@ -860,12 +1101,33 @@ window.__ModuleLoader__.load({
 
     function apply(ctx) {
       ctx.effect(() => ctx.locale.register(NS, copy), 'dsh-balance: dictionaries')
-      ctx.slots.inject('shell.overlay', () => ctx.slots.register({
-        name: 'shell.overlay',
+
+      /** The model catalog snapshot, the same source the composer's picker reads. */
+      const catalogSnapshot = () => {
+        const directories = ctx.get('modelDirectories')
+        if (directories === undefined) return undefined
+        try {
+          return directories.catalog.store.getSnapshot()
+        } catch {
+          return undefined
+        }
+      }
+
+      // The readout is drawn before the shipped stats entry (`order: 0`), which puts
+      // it immediately left of the turn counters on the same composer line.
+      ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+        name: 'conversation.composer.dock',
         id: 'dsh-balance',
-        order: 50,
+        order: -10,
         locale: NS,
-      }, Chip))
+      }, Readout))
+
+      // The tariff chip keeps the surfaces of the standalone peaks plugin: the session
+      // header, plus a floating copy for a fresh session whose header is hidden.
+      const headerChip = { name: 'conversation.session.header.actions', id: 'dsh-balance-peak', order: -40, locale: NS }
+      const overlayChip = { name: 'conversation.input.overlay', id: 'dsh-balance-peak', order: 10, locale: NS }
+      ctx.slots.inject(headerChip.name, () => ctx.slots.register(headerChip, createPeakChip({ forNewSession: false, catalogSnapshot })))
+      ctx.slots.inject(overlayChip.name, () => ctx.slots.register(overlayChip, createPeakChip({ forNewSession: true, catalogSnapshot })))
 
       // Catch up on return to the tab; the poller itself skips hidden pages.
       ctx.effect(() => {
@@ -884,7 +1146,11 @@ window.__ModuleLoader__.load({
      * Internals for the test suite only. The module loader reads `apply`/`inject`
      * and ignores everything else, so this adds no public surface to the plugin.
      */
-    exports.__internals = { Chip, Tooltip, Card, DaysTable, Credits, Settings, createStore, money, duration, statusLevel }
+    exports.__internals = {
+      Readout, Card, DaysTable, Credits, Settings, Tooltip, createPeakChip, createStore,
+      money, duration, formatRemaining, statusLevel, phaseFromSchedule, effectiveRoute,
+      routeFromModelSelection, routeFromCatalogDefault, isPeakRuleRoute, settingsOf, peakLines,
+    }
     return module.exports
   },
 })

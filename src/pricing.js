@@ -25,7 +25,7 @@ const DAY_MS = 24 * HOUR_MS
 export const BJT_OFFSET_MS = 8 * HOUR_MS
 
 /** Where the rule and the rates below come from. */
-export const RULE_SOURCE_URL = 'https://api-docs.deepseek.com/zh-cn/quick_start/pricing'
+export const RULE_SOURCE_URL = 'https://api-docs.deepseek.com/quick_start/pricing'
 
 /** The day the rule and rates below were last checked against that page. */
 export const RULE_VERIFIED_ON = '2026-09-27'
@@ -157,34 +157,213 @@ export function bjtDayStartMs(tsMs) {
 }
 
 /**
+ * The published peak windows as UTC labels, derived from the Beijing rule so the
+ * copy cannot drift from the windows the plugin bills with.
+ *
+ * @returns for example `01:00–04:00 and 06:00–10:00`.
+ */
+export function utcWindowsLabel() {
+  const toUtc = (minuteOfDay) => {
+    const offsetMinutes = BJT_OFFSET_MS / MINUTE_MS
+    const utc = (((minuteOfDay - offsetMinutes) % 1440) + 1440) % 1440
+    const hours = String(Math.floor(utc / 60)).padStart(2, '0')
+    const minutes = String(utc % 60).padStart(2, '0')
+    return `${hours}:${minutes}`
+  }
+  return PEAK_WINDOWS_BJT_MINUTES.map(([from, to]) => `${toUtc(from)}–${toUtc(to)}`).join(' and ')
+}
+
+/** Phases of the indicator, in the order a day walks through them. */
+export const PHASE = Object.freeze({
+  PEAK: 'peak',
+  SOON: 'soon',
+  OFF_PEAK: 'off-peak',
+})
+
+/** How long before a peak window opens the indicator switches to {@link PHASE.SOON}. */
+export const WARN_LEAD_MS = 30 * MINUTE_MS
+
+/**
+ * Peak windows as absolute instants, clipped to a range.
+ *
+ * Windows are generated per Beijing day and skipped on weekends and Chinese public
+ * holidays, which is the whole rule: nothing else removes a window.
+ *
+ * @param fromMs - range start, inclusive.
+ * @param toMs - range end, exclusive.
+ * @param holidays - Chinese public holidays as `YYYY-MM-DD` Beijing-time dates.
+ * @returns `[{ startMs, endMs }]` ascending, each half-open.
+ */
+export function peakIntervalsBetween(fromMs, toMs, holidays = PUBLIC_HOLIDAYS_2026) {
+  const set = holidaySet(holidays)
+  const intervals = []
+  for (let day = bjtDayStartMs(fromMs) - DAY_MS; day <= toMs + DAY_MS; day += DAY_MS) {
+    const { dateKey, weekday } = bjtFields(day)
+    if (weekday === 0 || weekday === 6) continue
+    if (set.has(dateKey)) continue
+    for (const [from, to] of PEAK_WINDOWS_BJT_MINUTES) {
+      const startMs = day + from * MINUTE_MS
+      const endMs = day + to * MINUTE_MS
+      if (endMs <= fromMs || startMs >= toMs) continue
+      intervals.push({ startMs, endMs })
+    }
+  }
+  return intervals.sort((a, b) => a.startMs - b.startMs)
+}
+
+/**
+ * Peak-window boundaries as tariff transitions, in order.
+ *
+ * @param fromMs - range start, exclusive.
+ * @param toMs - range end, inclusive.
+ * @param holidays - Chinese public holidays.
+ * @param limit - maximum number of transitions to return.
+ * @returns `[{ atMs, toPeak, reason }]`.
+ */
+export function transitionsBetween(fromMs, toMs, holidays = PUBLIC_HOLIDAYS_2026, limit = 0) {
+  const transitions = []
+  for (const interval of peakIntervalsBetween(fromMs, toMs, holidays)) {
+    transitions.push({ atMs: interval.startMs, toPeak: true, reason: 'peak' })
+    transitions.push({ atMs: interval.endMs, toPeak: false, reason: 'off-peak' })
+  }
+  const ordered = transitions
+    .filter((transition) => transition.atMs > fromMs && transition.atMs <= toMs)
+    .sort((a, b) => a.atMs - b.atMs)
+  return limit > 0 ? ordered.slice(0, limit) : ordered
+}
+
+/** The transitions the shell needs to render its own countdown between polls. */
+export function peakSchedule(tsMs, holidays = PUBLIC_HOLIDAYS_2026, days = 4, limit = 16) {
+  return transitionsBetween(tsMs, tsMs + days * DAY_MS, holidays, limit)
+}
+
+/**
+ * The tariff state of one instant, with the next transition.
+ *
+ * @param tsMs - epoch milliseconds.
+ * @param holidays - Chinese public holidays.
+ * @returns `{ phase, peak, untilMs, changeAtMs, changeToPeak, nextPeakAtMs, reason }`,
+ * where `untilMs`/`changeAtMs` describe the next transition (null when none is in
+ * range) and `reason` explains the current state (weekend, holiday, peak, off-peak).
+ */
+export function phaseAt(tsMs, holidays = PUBLIC_HOLIDAYS_2026) {
+  const intervals = peakIntervalsBetween(tsMs - 2 * DAY_MS, tsMs + 10 * DAY_MS, holidays)
+  const active = intervals.find((interval) => tsMs >= interval.startMs && tsMs < interval.endMs) ?? null
+  const next = intervals.find((interval) => interval.startMs > tsMs) ?? null
+  const reason = peakState(tsMs, holidays).reason
+  if (active !== null) {
+    return {
+      phase: PHASE.PEAK,
+      peak: true,
+      untilMs: active.endMs - tsMs,
+      changeAtMs: active.endMs,
+      changeToPeak: false,
+      nextPeakAtMs: next === null ? null : next.startMs,
+      reason,
+    }
+  }
+  if (next === null) {
+    return { phase: PHASE.OFF_PEAK, peak: false, untilMs: null, changeAtMs: null, changeToPeak: null, nextPeakAtMs: null, reason }
+  }
+  const untilMs = next.startMs - tsMs
+  return {
+    phase: untilMs <= WARN_LEAD_MS ? PHASE.SOON : PHASE.OFF_PEAK,
+    peak: false,
+    untilMs,
+    changeAtMs: next.startMs,
+    changeToPeak: true,
+    nextPeakAtMs: next.startMs,
+    reason,
+  }
+}
+
+/**
+ * Human-readable duration: minutes normally, seconds inside the last minute, days
+ * when the wait runs past a day (the weekend gap is 2d 15h long).
+ *
+ * @param durationMs - non-negative duration.
+ * @returns for example `45s`, `12m 30s`, `1h 23m`, `2d 15h`.
+ */
+export function formatRemaining(durationMs) {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000))
+  const days = Math.floor(totalSeconds / 86400)
+  const hours = Math.floor((totalSeconds % 86400) / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`
+  if (hours > 0) return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`
+  if (minutes > 0) return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`
+  return `${seconds}s`
+}
+
+/** `HH:MM` of an instant in a zone; falls back to UTC when `Intl` cannot format it. */
+export function timeLabelInZone(tsMs, zone) {
+  if (zone !== undefined && zone !== null && zone !== 'local') {
+    try {
+      const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: zone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+      }).formatToParts(new Date(tsMs))
+      const hour = parts.find((part) => part.type === 'hour')?.value ?? '00'
+      const minute = parts.find((part) => part.type === 'minute')?.value ?? '00'
+      return `${hour}:${minute}`
+    } catch {
+      /* fall through to UTC */
+    }
+  }
+  const date = new Date(tsMs)
+  if (zone === 'local' || zone === undefined || zone === null) {
+    return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  }
+  return `${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')}`
+}
+
+/** Zone offset in milliseconds at one instant, or 0 when it cannot be resolved. */
+function zoneOffsetMs(tsMs, zone) {
+  if (zone === 'local' || zone === undefined || zone === null) return 0
+  try {
+    const name = new Intl.DateTimeFormat('en-US', { timeZone: zone, timeZoneName: 'longOffset' })
+      .formatToParts(new Date(tsMs))
+      .find((part) => part.type === 'timeZoneName')?.value ?? ''
+    const match = /GMT([+-])(\d{2}):(\d{2})/.exec(name)
+    if (match === null) return 0
+    return (match[1] === '-' ? -1 : 1) * (Number(match[2]) * 60 + Number(match[3])) * MINUTE_MS
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * Peak windows of one local calendar day, as `HH:MM–HH:MM` labels in that zone.
+ *
+ * @param tsMs - the instant that defines "today" in the zone.
+ * @param holidays - Chinese public holidays.
+ * @param zone - IANA zone name, or `local` for the host's own zone.
+ * @param dayOffset - 0 for today, 1 for tomorrow.
+ * @returns labels in window order; empty when that day has no peak window.
+ */
+export function windowsOfLocalDay(tsMs, holidays = PUBLIC_HOLIDAYS_2026, zone = 'local', dayOffset = 0) {
+  const offset = zoneOffsetMs(tsMs, zone)
+  const dayStart = Math.floor((tsMs + offset) / DAY_MS) * DAY_MS - offset + dayOffset * DAY_MS
+  const dayEnd = dayStart + DAY_MS
+  // A window belongs to the day its *start* falls in: one that opens at 23:00 and
+  // closes at 03:00 is listed under the earlier day, and the tail of a window that
+  // opened yesterday is not repeated here.
+  return peakIntervalsBetween(dayStart, dayEnd, holidays)
+    .filter((interval) => interval.startMs >= dayStart && interval.startMs < dayEnd)
+    .map((interval) => `${timeLabelInZone(interval.startMs, zone)}–${timeLabelInZone(interval.endMs, zone)}`)
+}
+
+/**
  * The next instant the tariff changes.
  *
- * Candidates are the two window edges of each of the next nine Beijing days plus
- * each Beijing midnight (weekends and holidays begin and end there), so a change
- * is found without scanning minute by minute.
- *
  * @param tsMs - epoch milliseconds to search forward from.
- * @param holidays - Chinese public holidays as `YYYY-MM-DD` Beijing-time dates.
- * @returns `{ atMs, toPeak, reason, inMs }`, or null when no change is found.
+ * @param holidays - Chinese public holidays.
+ * @returns `{ atMs, toPeak, reason, inMs }`, or null when no change is in range.
  */
 export function nextChange(tsMs, holidays = PUBLIC_HOLIDAYS_2026) {
-  const current = peakState(tsMs, holidays).peak
-  const dayStart = bjtDayStartMs(tsMs)
-  const candidates = []
-  for (let day = 0; day <= 9; day += 1) {
-    const base = dayStart + day * DAY_MS
-    for (const [from, to] of PEAK_WINDOWS_BJT_MINUTES) {
-      candidates.push(base + from * MINUTE_MS, base + to * MINUTE_MS)
-    }
-    candidates.push(base + DAY_MS)
-  }
-  const next = candidates
-    .filter((candidate) => candidate > tsMs)
-    .sort((a, b) => a - b)
-    .find((candidate) => peakState(candidate, holidays).peak !== current)
-  if (next === undefined) return null
-  const state = peakState(next, holidays)
-  return { atMs: next, toPeak: state.peak, reason: state.reason, inMs: next - tsMs }
+  const [change] = transitionsBetween(tsMs, tsMs + 9 * DAY_MS, holidays, 1)
+  if (change === undefined) return null
+  return { ...change, inMs: change.atMs - tsMs }
 }
 
 /**

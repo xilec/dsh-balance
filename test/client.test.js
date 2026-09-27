@@ -2,16 +2,17 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 /**
- * The browser half is a `window.__ModuleLoader__` registration, so this test
- * stands in for the client module loader and for React: it checks the module
- * shape, the slot registration, and that a real payload renders through the
- * component. Actual pixels are verified in the running shell.
+ * The browser half is a `window.__ModuleLoader__` registration, so this test stands
+ * in for the client module loader and for React: it checks the module shape, the slot
+ * registrations, the compact readout, the peak chip's state derivation and the panel.
+ * Actual pixels are verified in the running shell.
  */
 
-/** A React stub: enough for the hooks the chip uses, and effects run inline. */
+/** A React stub: enough for the hooks the plugin uses, with effects run inline. */
 function reactStub() {
   const state = { cursor: 0, slots: {} }
   const subscriptions = []
+  const cleanups = []
   const react = {
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
     memo: (component) => component,
@@ -19,11 +20,18 @@ function reactStub() {
     beginRender() {
       state.cursor = 0
     },
-    /** Tear down every store subscription a render opened, or the poller keeps the loop alive. */
+    /** Tear down every subscription and effect a render opened, or timers keep the loop alive. */
     stop() {
       while (subscriptions.length > 0) {
         try {
           subscriptions.pop()()
+        } catch {
+          /* already gone */
+        }
+      }
+      while (cleanups.length > 0) {
+        try {
+          cleanups.pop()()
         } catch {
           /* already gone */
         }
@@ -44,6 +52,7 @@ function reactStub() {
     useEffect(effect) {
       state.cursor += 1
       const disposer = effect()
+      if (typeof disposer === 'function') cleanups.push(disposer)
       return typeof disposer === 'function' ? disposer : () => {}
     },
     useSyncExternalStore(subscribe, getSnapshot) {
@@ -58,10 +67,20 @@ function reactStub() {
   return react
 }
 
-/** Find every element whose props match one predicate. */
+/** Render an element tree (calling function components) down to its text. */
+function textOf(node) {
+  if (node === null || node === undefined || node === false || node === true) return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(textOf).join(' ')
+  if (typeof node.type === 'function') return textOf(node.type({ ...node.props, children: node.children }))
+  return textOf(node.children ?? [])
+}
+
+/** Every element whose props satisfy one predicate. */
 function find(node, predicate, out = []) {
-  if (node === null || node === undefined || Array.isArray(node)) {
-    for (const child of node ?? []) find(child, predicate, out)
+  if (node === null || node === undefined) return out
+  if (Array.isArray(node)) {
+    for (const child of node) find(child, predicate, out)
     return out
   }
   if (typeof node === 'string' || typeof node === 'number') return out
@@ -72,15 +91,6 @@ function find(node, predicate, out = []) {
   if (predicate(node)) out.push(node)
   find(node.children, predicate, out)
   return out
-}
-
-/** Render an element tree (calling function components) down to its text. */
-function textOf(node) {
-  if (node === null || node === undefined || node === false || node === true) return ''
-  if (typeof node === 'string' || typeof node === 'number') return String(node)
-  if (Array.isArray(node)) return node.map(textOf).join(' ')
-  if (typeof node.type === 'function') return textOf(node.type({ ...node.props, children: node.children }))
-  return textOf(node.children ?? [])
 }
 
 /** Load the client module with a stubbed loader and React. */
@@ -97,16 +107,19 @@ async function loadClient() {
   return { registration: registrations[0], exported, react }
 }
 
-/** A Host context stub capturing the slot registration. */
+/** A Host context stub capturing slot registrations. */
 function clientContext() {
   const registered = []
+  const services = new Map()
   return {
     registered,
+    services,
     effect(fn) {
       const disposer = fn()
       return typeof disposer === 'function' ? disposer : () => {}
     },
     locale: { register: () => () => {} },
+    get: (key) => services.get(key),
     slots: {
       inject(name, callback) {
         callback()
@@ -120,59 +133,95 @@ function clientContext() {
   }
 }
 
+/** Readout labels as the dictionary renders them, so the line reads as it does in the shell. */
+const fakeT = (key) => ({ 'readout.balance': 'b', 'readout.session': 's' }[key] ?? key)
+
+const HOUR = 3600_000
+const MINUTE = 60_000
+/** A fixed instant so the payload below stays meaningful: Friday, off-peak. */
+const NOW = Date.parse('2026-09-18T10:00:00Z')
+
 /** One `/dsh-balance` payload. */
 const payload = {
-  host: { version: '0.1.0', now: Date.now(), dir: '/tmp', samples: 3, loaded: true },
+  host: { version: '0.1.0', now: NOW, dir: '/tmp', samples: 5, loaded: true },
   balance: {
     ok: true,
     error: null,
     stale: false,
-    fetchedAt: Date.now() - 60000,
+    fetchedAt: NOW - 60000,
     isAvailable: true,
-    balances: [{ currency: 'CNY', total: 12.34, granted: 0, toppedUp: 12.34 }],
-    primary: { currency: 'CNY', total: 12.34, granted: 0, toppedUp: 12.34 },
-    currency: 'CNY',
+    balances: [{ currency: 'USD', total: 19.52, granted: 0, toppedUp: 19.52 }],
+    primary: { currency: 'USD', total: 19.52, granted: 0, toppedUp: 19.52 },
+    currency: 'USD',
+    currencyPreference: 'USD',
     thresholds: { warning: 10, danger: 5 },
     currencyMissing: false,
   },
   ledger: {
-    zone: 'local',
-    currency: 'CNY',
-    todayKey: '2026-09-26',
+    zone: 'Europe/Moscow',
+    currency: 'USD',
+    todayKey: '2026-09-18',
     rows: [
-      { key: '2026-09-25', spend: 1.5, computed: 1.5, override: null, coarse: false, open: false },
-      { key: '2026-09-26', spend: 0.5, computed: 0.5, override: null, coarse: false, open: true },
+      { key: '2026-09-17', spend: 1.5, computed: 1.5, override: null, coarse: false, open: false },
+      { key: '2026-09-18', spend: 0.39, computed: 0.39, override: null, coarse: false, open: true },
     ],
-    credits: [{ t: Date.now() - 3600000, amount: 50, fromTotal: 10, toTotal: 60 }],
+    credits: [{ t: NOW - HOUR, amount: 50, fromTotal: 10, toTotal: 60, intervalFrom: NOW - 2 * HOUR }],
     creditTotal: 50,
     totals: {
-      d1: { amount: 0.5, covered: true },
-      w1: { amount: 2, covered: false },
-      m1: { amount: 2, covered: false },
+      d1: { amount: 0.39, covered: true },
+      w1: { amount: 2.29, covered: true },
+      m1: { amount: 10.43, covered: true },
     },
-    firstSampleMs: Date.now() - 86400000,
-    lastSampleMs: Date.now() - 60000,
-    sampleCount: 3,
+    firstSampleMs: NOW - 30 * 24 * HOUR,
+    lastSampleMs: NOW - MINUTE,
+    sampleCount: 5,
     medianGapMs: 300000,
   },
   peak: {
     peak: false,
-    reason: 'weekend',
-    offPeakRatio: 0.5,
-    changeAt: Date.now() + 3600000,
+    phase: 'off-peak',
+    reason: 'off-peak',
+    untilMs: 2 * 24 * HOUR + 15 * HOUR,
+    changeAt: Date.parse('2026-09-21T01:00:00Z'),
     changeToPeak: true,
-    changeReason: 'peak',
-    rule: { sourceUrl: 'https://api-docs.deepseek.com/zh-cn/quick_start/pricing', verifiedOn: '2026-09-27', holidays: [] },
+    nextPeakAt: Date.parse('2026-09-21T01:00:00Z'),
+    schedule: [
+      { atMs: Date.parse('2026-09-21T01:00:00Z'), toPeak: true, reason: 'peak' },
+      { atMs: Date.parse('2026-09-21T04:00:00Z'), toPeak: false, reason: 'off-peak' },
+      { atMs: Date.parse('2026-09-21T06:00:00Z'), toPeak: true, reason: 'peak' },
+      { atMs: Date.parse('2026-09-21T10:00:00Z'), toPeak: false, reason: 'off-peak' },
+    ],
+    offPeakRatio: 0.5,
+    zone: 'Europe/Moscow',
+    windows: { today: ['04:00–07:00', '09:00–13:00'], tomorrow: [] },
+    rule: {
+      sourceUrl: 'https://api-docs.deepseek.com/quick_start/pricing',
+      verifiedOn: '2026-09-27',
+      holidays: ['2026-10-01'],
+      utcWindows: '01:00–04:00 and 06:00–10:00',
+    },
   },
-  prices: {
-    current: { 'deepseek-flash': { cacheHit: 0.02, cacheMiss: 1, output: 4, peak: false, currency: 'CNY', class: 'flash' } },
-    peak: { 'deepseek-flash': { cacheHit: 0.04, cacheMiss: 2, output: 8, peak: true, currency: 'CNY', class: 'flash' } },
-    atPeak: Date.now(),
-  },
+  prices: { current: {}, peak: {}, atPeak: NOW, currency: 'USD' },
   fallbackPrices: null,
   sampling: { refreshIntervalMs: 300000, clientPollIntervalMs: 15000 },
-  client: { version: '0.1.0', at: Date.now(), count: 1 },
-  session: { cost: 0.42, currency: 'CNY', models: ['deepseek-flash'], costByModel: { 'deepseek-flash': 0.42 }, tokens: { uncachedInput: 1, cacheRead: 0, cacheWrite: 0, output: 1 }, unpriced: [], peakNow: false },
+  client: { version: '0.1.0', at: NOW, count: 1, reads: 1, mounts: 1 },
+  session: { cost: 0.33, currency: 'USD', models: ['deepseek-flash'], costByModel: { 'deepseek-flash': 0.33 }, tokens: { uncachedInput: 1, cacheRead: 0, cacheWrite: 0, output: 1 }, unpriced: [], peakNow: false },
+}
+
+/** A fetch stub that answers the read route and records the writes. */
+function stubFetch({ posts = [], calls = [] } = {}) {
+  const previous = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url: String(url), method: options?.method ?? 'GET', body: options?.body })
+    if (options?.method === 'POST') {
+      posts.push({ url: String(url), body: options.body === undefined ? undefined : JSON.parse(options.body) })
+      return { ok: true, status: 200, json: async () => ({ ok: true, sampling: payload.sampling }) }
+    }
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  return () => {
+    globalThis.fetch = previous
+  }
 }
 
 test('the client module registers one plugin with its services', async () => {
@@ -182,98 +231,225 @@ test('the client module registers one plugin with its services', async () => {
   assert.equal(typeof exported.apply, 'function')
 })
 
-test('apply registers the chip into the shell overlay with its dictionary', async () => {
+test('apply registers the readout before the stats entry, plus both peak surfaces', async () => {
   const { exported } = await loadClient()
   const ctx = clientContext()
   exported.apply(ctx)
-  assert.equal(ctx.registered.length, 1)
-  assert.equal(ctx.registered[0].options.name, 'shell.overlay')
-  assert.equal(ctx.registered[0].options.id, 'dsh-balance')
-  assert.equal(ctx.registered[0].options.locale, 'dsh-balance')
+  const readout = ctx.registered.find((entry) => entry.options.id === 'dsh-balance').options
+  assert.equal(readout.name, 'conversation.composer.dock')
+  assert.equal(readout.locale, 'dsh-balance')
+  assert.ok(readout.order < 0, 'a negative order draws it left of the shipped stats entry (order 0)')
+  const peaks = ctx.registered
+    .filter((entry) => entry.options.id === 'dsh-balance-peak')
+    .map((entry) => entry.options.name)
+    .sort()
+  assert.deepEqual(peaks, ['conversation.input.overlay', 'conversation.session.header.actions'])
+  assert.equal(ctx.registered.length, 3)
 })
 
-test('the chip renders the balance, the 1d/1w/1m metrics and the session cost', async () => {
+test('the readout renders the compact balance and spend line', async () => {
   const { exported, react } = await loadClient()
   const ctx = clientContext()
   exported.apply(ctx)
-  const Chip = ctx.registered[0].component
+  const Readout = ctx.registered[0].component
+  const restore = stubFetch()
+  try {
+    const props = { t: fakeT, sessionId: 'session-7', useProjection: () => undefined }
+    react.beginRender()
+    assert.match(textOf(react.createElement(Readout, props)), /b:—/)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    const rendered = textOf(react.createElement(Readout, props))
+    assert.match(rendered, /b:\$19\.52/)
+    assert.match(rendered, /1d:\$0\.39/)
+    assert.match(rendered, /1w:\$2\.29/)
+    assert.match(rendered, /1m:\$10\.43/)
+    assert.match(rendered, /s:\$0\.33/)
+  } finally {
+    react.stop()
+    restore()
+  }
+})
 
-  const previousFetch = globalThis.fetch
+test('the session projection outranks the payload copy of the session cost', async () => {
+  const { exported, react } = await loadClient()
+  const ctx = clientContext()
+  exported.apply(ctx)
+  const Readout = ctx.registered[0].component
+  const restore = stubFetch()
+  try {
+    const props = {
+      t: fakeT,
+      sessionId: 'session-7',
+      useProjection: (key) => (key === 'dshBalanceCost' ? { cost: 0.91, currency: 'USD' } : undefined),
+    }
+    react.beginRender()
+    textOf(react.createElement(Readout, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    assert.match(textOf(react.createElement(Readout, props)), /s:\$0\.91/)
+  } finally {
+    react.stop()
+    restore()
+  }
+})
+
+test('the readout asks the Host about the session and its zone', async () => {
+  const { exported, react } = await loadClient()
+  const ctx = clientContext()
+  exported.apply(ctx)
+  const Readout = ctx.registered[0].component
   const calls = []
-  globalThis.fetch = async (url, options) => {
-    calls.push({ url, method: options?.method ?? 'GET', body: options?.body })
-    if (String(url).startsWith('/dsh-balance/hello')) return { ok: true, status: 200, json: async () => ({ ok: true }) }
-    return { ok: true, status: 200, json: async () => payload }
-  }
+  const restore = stubFetch({ calls })
   try {
-    // First render starts the poller through useSyncExternalStore's subscribe.
     react.beginRender()
-    const loading = textOf(react.createElement(Chip, { t: (key) => key, useSessions: (select) => select({ byId: {} }) }))
-    assert.match(loading, /chip\.unknown/)
-    await new Promise((resolve) => setTimeout(resolve, 10))
-
-    react.beginRender()
-    const rendered = textOf(react.createElement(Chip, { t: (key) => key, useSessions: (select) => select({ byId: {} }) }))
-    assert.match(rendered, /12\.34/)
-    assert.match(rendered, /0\.50/, 'the day total renders')
-    assert.match(rendered, /chip\.session/)
-    assert.match(rendered, /0\.42/, 'the session cost renders')
-    assert.equal(calls.some((call) => call.url === '/dsh-balance'), true)
+    textOf(react.createElement(Readout, { t: fakeT, sessionId: 'session-7', useProjection: () => undefined }))
+    // The first read starts during the render, before the mount effect can hand the
+    // store its session id; the store must therefore read once more after that.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const reads = calls.filter((call) => call.url.startsWith('/dsh-balance?'))
+    assert.ok(reads.length >= 1, calls.map((call) => call.url).join(', '))
+    assert.equal(reads.some((call) => /sessionId=session-7/.test(call.url)), true, reads.map((call) => call.url).join(', '))
+    assert.equal(reads.every((call) => /zone=/.test(call.url)), true)
     assert.equal(calls.some((call) => call.url === '/dsh-balance/hello' && call.method === 'POST'), true)
-    assert.equal(calls.some((call) => String(call.body).includes('"phase":"mount"')), true, 'the chip reports a completed render')
+    assert.equal(calls.some((call) => String(call.body).includes('"phase":"mount"')), true)
   } finally {
     react.stop()
-    globalThis.fetch = previousFetch
+    restore()
   }
 })
 
-test('the chip asks the host about the session the main view retains', async () => {
+test('phaseFromSchedule walks the transitions the Host sent', async () => {
+  const { exported } = await loadClient()
+  const { phaseFromSchedule } = exported.__internals
+  const schedule = payload.peak.schedule
+  const off = phaseFromSchedule(schedule, NOW, false, NOW)
+  assert.equal(off.phase, 'off-peak')
+  assert.equal(off.changeToPeak, true)
+  assert.equal(off.untilMs, 2 * 24 * HOUR + 15 * HOUR)
+  const soon = phaseFromSchedule(schedule, NOW, false, Date.parse('2026-09-21T00:45:00Z'))
+  assert.equal(soon.phase, 'soon', 'the warning lead is half an hour')
+  assert.equal(soon.untilMs, 15 * MINUTE)
+  const peak = phaseFromSchedule(schedule, NOW, false, Date.parse('2026-09-21T02:00:00Z'))
+  assert.equal(peak.phase, 'peak')
+  assert.equal(peak.changeToPeak, false)
+  assert.equal(peak.untilMs, 2 * HOUR)
+  // Past the last transition the schedule decides: it ends off-peak, and no further
+  // change is known until the next poll.
+  const beyond = phaseFromSchedule(schedule, NOW, true, Date.parse('2026-10-01T00:00:00Z'))
+  assert.equal(beyond.phase, 'off-peak')
+  assert.equal(beyond.untilMs, null)
+  // With no transitions at all the anchor is all there is.
+  assert.equal(phaseFromSchedule([], NOW, true, NOW).phase, 'peak')
+  assert.equal(phaseFromSchedule([], NOW, false, NOW).phase, 'off-peak')
+  assert.equal(phaseFromSchedule(undefined, NOW, true, NOW).untilMs, null)
+})
+
+test('the peak chip renders its countdown and hides for a foreign provider', async () => {
   const { exported, react } = await loadClient()
-  const ctx = clientContext()
-  exported.apply(ctx)
-  const Chip = ctx.registered[0].component
-  const previousFetch = globalThis.fetch
-  const urls = []
-  globalThis.fetch = async (url) => {
-    urls.push(String(url))
-    return { ok: true, status: 200, json: async () => payload }
-  }
+  const catalogSnapshot = () => ({ value: { default: { provider: 'deepseek-official', model: 'deepseek-flash' } } })
+  const Chip = exported.__internals.createPeakChip({ forNewSession: false, catalogSnapshot })
+  const restore = stubFetch()
   try {
-    const select = (selector) => selector({ byId: { 'session-7': { id: 'session-7', retainedBy: { mainView: 1 } } } })
+    const props = {
+      t: (key) => key,
+      useSession: (select) => select({ blank: false, running: false, promptAttempted: false }),
+      useProjection: (key) => (key === 'modelSelection' ? { next: null, lastUsed: null } : undefined),
+    }
     react.beginRender()
-    void textOf(react.createElement(Chip, { t: (key) => key, useSessions: select }))
+    textOf(react.createElement(Chip, props))
     await new Promise((resolve) => setTimeout(resolve, 10))
-    assert.equal(urls.some((url) => url.includes('sessionId=session-7')), true, urls.join(', '))
+    react.beginRender()
+    assert.match(textOf(react.createElement(Chip, props)), /peak\.chip\.(off|soon|peak)/)
+
+    const foreign = exported.__internals.createPeakChip({
+      forNewSession: false,
+      catalogSnapshot: () => ({ value: { default: { provider: 'pi-ai', model: 'deepseek-flash' } } }),
+    })
+    react.beginRender()
+    assert.equal(textOf(react.createElement(foreign, props)), '')
+
+    const floating = exported.__internals.createPeakChip({ forNewSession: true, catalogSnapshot })
+    react.beginRender()
+    assert.equal(textOf(react.createElement(floating, props)), '', 'the floating copy skips a session with a header')
+    react.beginRender()
+    assert.match(textOf(react.createElement(floating, {
+      ...props,
+      useSession: (select) => select({ blank: true, running: false, promptAttempted: false }),
+    })), /peak\.chip/)
   } finally {
     react.stop()
-    globalThis.fetch = previousFetch
+    restore()
   }
 })
 
-test('the panel renders the balance cards, the day ledger and the tabs', async () => {
-  const { react, exported } = await loadClient()
+test('the route helpers prefer the projection and fall back to the catalog default', async () => {
+  const { exported } = await loadClient()
+  const { effectiveRoute, routeFromModelSelection, routeFromCatalogDefault, isPeakRuleRoute } = exported.__internals
+  assert.deepEqual(
+    routeFromModelSelection({ next: { provider: 'deepseek-official', model: 'deepseek-flash' }, lastUsed: null }),
+    { provider: 'deepseek-official', model: 'deepseek-flash' },
+  )
+  assert.deepEqual(routeFromModelSelection({ next: null, lastUsed: { provider: 'pi-ai', model: 'x' } }), { provider: 'pi-ai', model: 'x' })
+  assert.equal(routeFromModelSelection(undefined), null)
+  assert.deepEqual(
+    routeFromCatalogDefault({ value: { default: { provider: 'deepseek-official', model: 'deepseek-v4-pro' } } }),
+    { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+  )
+  assert.equal(routeFromCatalogDefault(undefined), null)
+  assert.deepEqual(
+    effectiveRoute({ next: null, lastUsed: null }, { value: { default: { provider: 'deepseek-official', model: 'deepseek-flash' } } }),
+    { provider: 'deepseek-official', model: 'deepseek-flash' },
+  )
+  assert.equal(effectiveRoute(undefined, { value: { default: { provider: 'deepseek-official' } } }), null, 'a missing projection is not guessed')
+  assert.equal(isPeakRuleRoute('deepseek-official'), true)
+  assert.equal(isPeakRuleRoute('pi-ai'), false)
+})
+
+test('the panel puts this session on the first row and the week below it', async () => {
+  const { exported, react } = await loadClient()
   react.beginRender()
-  const cardText = textOf(react.createElement(exported.__internals.Card, {
+  const tree = react.createElement(exported.__internals.Card, {
     t: (key) => key,
     state: { status: 'ok', payload, error: null, at: Date.now() },
+    projection: { cost: 0.33, currency: 'USD' },
     onClose: () => {},
-  }))
-  assert.match(cardText, /card\.title/)
-  assert.match(cardText, /12\.34/, 'the balance card renders')
-  assert.match(cardText, /tab\.days/)
-  assert.match(cardText, /25\.09/, 'the day rows render')
-  assert.match(cardText, /days\.open/, 'today is marked as still filling')
-  assert.match(cardText, /footer\.rule/)
+  })
+  const text = textOf(tree)
+  const order = ['card.balance', 'card.today', 'card.session', 'card.month', 'card.week'].map((key) => text.indexOf(key))
+  assert.equal(order.every((index) => index >= 0), true, text)
+  assert.deepEqual([...order].sort((a, b) => a - b), order, 'the cards render in the intended order')
+  assert.match(text, /card\.title/)
+  assert.match(text, /tab\.days/)
+  const rule = find(tree, (element) => element.type === 'a' && element.props?.className === 'dshb_link')[0]
+  assert.equal(rule.props.href, 'https://api-docs.deepseek.com/quick_start/pricing', 'the rules link points at the English page')
+})
+
+test('the tooltip hint opens the panel', async () => {
+  const { exported, react } = await loadClient()
+  let opened = 0
+  react.beginRender()
+  const tree = react.createElement(exported.__internals.Tooltip, {
+    t: (key) => key,
+    state: { status: 'ok', payload, error: null, at: Date.now() },
+    projection: { cost: 0.33, currency: 'USD' },
+    onOpen: () => {
+      opened += 1
+    },
+  })
+  const text = textOf(tree)
+  assert.match(text, /tip\.balance/)
+  assert.match(text, /tip\.spend1d/)
+  const link = find(tree, (element) => element.type === 'button' && element.props?.className === 'dshb_link')[0]
+  assert.ok(link !== undefined, 'the hint is a link')
+  link.props.onClick()
+  assert.equal(opened, 1)
 })
 
 test('the settings tab posts the fields it edits', async () => {
-  const { react, exported } = await loadClient()
-  const previousFetch = globalThis.fetch
+  const { exported, react } = await loadClient()
   const posts = []
-  globalThis.fetch = async (url, options) => {
-    if (options?.method === 'POST') posts.push({ url, body: JSON.parse(options.body) })
-    return { ok: true, status: 200, json: async () => ({ ok: true, changed: [], sampling: payload.sampling, ...payload }) }
-  }
+  const restore = stubFetch({ posts })
   try {
     react.beginRender()
     const tree = react.createElement(exported.__internals.Settings, {
@@ -284,37 +460,35 @@ test('the settings tab posts the fields it edits', async () => {
     const apply = find(tree, (element) => element.props?.className === 'dshb_btn dshb_btn_primary')[0]
     assert.ok(apply !== undefined, 'the apply button exists')
     await apply.props.onClick()
-    const settingsPosts = posts.filter((post) => post.url === '/dsh-balance/settings')
-    assert.equal(settingsPosts.length, 1)
-    assert.equal(typeof settingsPosts[0].body.currency, 'string')
-    assert.equal(typeof settingsPosts[0].body.refreshIntervalMs, 'number')
+    const settings = posts.filter((post) => post.url === '/dsh-balance/settings')
+    assert.equal(settings.length, 1)
+    assert.equal(typeof settings[0].body.currency, 'string')
+    assert.equal(typeof settings[0].body.refreshIntervalMs, 'number')
   } finally {
     react.stop()
-    globalThis.fetch = previousFetch
+    restore()
   }
 })
 
-test('a day row saves and clears a manual correction through the host', async () => {
-  const { react, exported } = await loadClient()
-  const { DaysTable } = exported.__internals
-  const previousFetch = globalThis.fetch
+test('a day row saves and clears a manual correction through the Host', async () => {
+  const { exported, react } = await loadClient()
   const posts = []
-  globalThis.fetch = async (url, options) => {
-    if (options?.method === 'POST') posts.push({ url, body: JSON.parse(options.body) })
-    return { ok: true, status: 200, json: async () => payload }
-  }
+  const restore = stubFetch({ posts })
   try {
-    const ledger = { ...payload.ledger, rows: [...payload.ledger.rows, { key: '2026-09-24', spend: 2, computed: 2, override: 2, coarse: true, open: false }] }
+    const ledger = {
+      ...payload.ledger,
+      rows: [...payload.ledger.rows, { key: '2026-09-16', spend: 2, computed: 2, override: 2, coarse: true, open: false }],
+    }
     react.beginRender()
-    const tree = react.createElement(DaysTable, { t: (key) => key, ledger, currency: 'USD' })
-    const text = textOf(tree)
-    assert.match(text, /days\.coarse/, 'a coarse day is flagged')
+    const tree = react.createElement(exported.__internals.DaysTable, { t: (key) => key, ledger, currency: 'USD' })
+    assert.match(textOf(tree), /days\.coarse/, 'a coarse day is flagged')
     const reset = find(tree, (element) => element.type === 'button' && element.props?.className === 'dshb_btn')[0]
     assert.ok(reset !== undefined, 'the reset button exists for an overridden day')
     await reset.props.onClick()
-    assert.deepEqual(posts.at(-1), { url: '/dsh-balance/overrides', body: { date: '2026-09-24', amount: null } })
+    const overrides = posts.filter((post) => post.url === '/dsh-balance/overrides')
+    assert.deepEqual(overrides.at(-1).body, { date: '2026-09-16', amount: null })
   } finally {
     react.stop()
-    globalThis.fetch = previousFetch
+    restore()
   }
 })
