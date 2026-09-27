@@ -450,8 +450,10 @@ test('the panel opens on the summary with the cards in order', async () => {
   assert.match(text, /tip\.samples/, 'the summary carries the statistics')
   const summaryTab = find(tree, (element) => element.type === 'button' && element.props?.['data-active'] === 'true')[0]
   assert.equal(textOf(summaryTab), 'tab.summary', 'the summary tab is active on open')
-  const rule = find(tree, (element) => element.type === 'a' && element.props?.className === 'dshb_link')[0]
-  assert.equal(rule.props.href, 'https://api-docs.deepseek.com/quick_start/pricing', 'the rules link points at the English page')
+  const links = find(tree, (element) => element.type === 'a' && element.props?.className === 'dshb_link')
+  assert.equal(links[0].props.href, 'https://api-docs.deepseek.com/quick_start/pricing', 'the rules link points at the English page')
+  assert.equal(links[1].props.href, 'https://platform.deepseek.com/usage', 'the platform usage page is linked too')
+  assert.equal(links[1].props.target, '_blank')
   // A Host started before the locale fix still reports the Chinese page; the panel
   // normalizes it rather than sending the reader there.
   const chinese = { ...payload, peak: { ...payload.peak, rule: { ...payload.peak.rule, sourceUrl: 'https://api-docs.deepseek.com/zh-cn/quick_start/pricing' } } }

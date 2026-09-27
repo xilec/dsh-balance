@@ -215,7 +215,8 @@ every push and pull request.
 ## Sources
 
 * Pricing rule and rates — <https://api-docs.deepseek.com/quick_start/pricing>
-  (verified 2026-09-27)
+  (verified 2026-09-27); the panel links it together with the platform's own
+  <https://platform.deepseek.com/usage> view
 * Chinese public holidays 2026 — 国务院办公厅关于2026年部分节假日安排的通知 (2025-11-04)
 
 ## License

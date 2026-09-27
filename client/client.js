@@ -27,6 +27,12 @@ window.__ModuleLoader__.load({
     /** Provider whose requests the published pricing rule bills. */
     const DEEPSEEK_PROVIDER = 'deepseek-official'
 
+    /**
+     * The platform's own usage view. Not part of the rule (the Host reports where
+     * the rule was verified), so it is a plain constant of the panel.
+     */
+    const USAGE_URL = 'https://platform.deepseek.com/usage'
+
     /** How long before a peak window opens the chip switches to `soon`. */
     const WARN_LEAD_MS = 30 * 60 * 1000
 
@@ -197,6 +203,7 @@ window.__ModuleLoader__.load({
         'settings.note': 'The Host samples the balance on its own schedule — the chip only reads its cached payload.',
         'footer.rule': 'Rates and tariff rule',
         'footer.ruleLink': 'official page',
+        'footer.usage': 'Platform usage',
         'footer.host': 'host {version}',
         'footer.client': 'client {version}',
         'common.close': 'Close',
@@ -285,6 +292,7 @@ window.__ModuleLoader__.load({
         'settings.note': 'Хост опрашивает баланс по своему расписанию — чип только читает его кэш.',
         'footer.rule': 'Тарифы и правило峰/谷',
         'footer.ruleLink': 'официальная страница',
+        'footer.usage': 'Расход на платформе',
         'footer.host': 'хост {version}',
         'footer.client': 'клиент {version}',
         'common.close': 'Закрыть',
@@ -886,6 +894,14 @@ window.__ModuleLoader__.load({
                 rel: 'noreferrer',
               }, t('footer.ruleLink')),
               h('span', { key: 'verified' }, ` · ${payload?.peak?.rule?.verifiedOn ?? ''}`),
+              h('span', { key: 'sep' }, ' · '),
+              h('a', {
+                key: 'usage',
+                className: 'dshb_link',
+                href: USAGE_URL,
+                target: '_blank',
+                rel: 'noreferrer',
+              }, t('footer.usage')),
             ]),
             h('div', { className: 'dshb_footer', key: 'r' }, [
               h('button', {
