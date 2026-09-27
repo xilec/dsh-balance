@@ -58,6 +58,8 @@ window.__ModuleLoader__.load({
         'background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1,#fff));color:var(--dsw-alias-label-secondary);',
         'font-size:12px;line-height:1.6;box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,.18));text-align:left;white-space:normal}',
         '.dshb_popover_head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:10px 12px 0}',
+        '.dshb_tabs{display:flex;gap:4px;padding:10px 12px 0}',
+        '.dshb_summary{display:flex;flex-direction:column;gap:10px}',
         '.dshb_popover_body{padding:10px 12px 12px;overflow:auto;display:flex;flex-direction:column;gap:10px}',
         '.dshb_popover_foot{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;',
         'border-top:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18))}',
@@ -77,7 +79,6 @@ window.__ModuleLoader__.load({
         '.dshb_card_label{font-size:11px;color:var(--dsw-alias-label-tertiary)}',
         '.dshb_card_value{font-size:16px;font-weight:600;margin-top:2px}',
         '.dshb_card_hint{font-size:11px;color:var(--dsw-alias-label-tertiary);margin-top:2px}',
-        '.dshb_tabs{display:flex;gap:4px}',
         '.dshb_tab{border:1px solid transparent;background:transparent;color:var(--dsw-alias-label-secondary);',
         'font:inherit;font-size:12px;padding:4px 10px;border-radius:999px;cursor:pointer}',
         '.dshb_tab[data-active="true"]{background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.12));',
@@ -807,10 +808,21 @@ window.__ModuleLoader__.load({
      */
     function Popover({ t, state, projection, onClose }) {
       const [tab, setTab] = react.useState('summary')
+      // The panel is as tall as the summary it opens on: a shorter tab is padded to
+      // that height instead of shrinking the panel under the pointer, and a taller
+      // one scrolls inside the same frame.
+      const summaryRef = react.useRef(null)
+      const [bodyMinHeight, setBodyMinHeight] = react.useState(null)
       const payload = state.payload
 
+      react.useEffect(() => {
+        if (tab !== 'summary' || bodyMinHeight !== null) return
+        const height = summaryRef.current?.offsetHeight
+        if (typeof height === 'number' && height > 0) setBodyMinHeight(height)
+      }, [tab, bodyMinHeight])
+
       const body = tab === 'summary'
-        ? h(Summary, { t, state, projection, key: 'summary' })
+        ? h('div', { className: 'dshb_summary', ref: summaryRef, key: 'summary' }, h(Summary, { t, state, projection }))
         : tab === 'days'
           ? h(DaysTable, { t, ledger: payload?.ledger ?? null, currency: payload?.balance?.currency ?? 'USD', key: 'days' })
           : tab === 'credits'
@@ -827,16 +839,18 @@ window.__ModuleLoader__.load({
             ]),
             h('button', { className: 'dshb_close', key: 'x', onClick: onClose, title: t('common.close') }, '×'),
           ]),
-          h('div', { className: 'dshb_popover_body', key: 'body' }, [
-            h('div', { className: 'dshb_tabs', key: 'tabs' }, ['summary', 'days', 'credits', 'settings'].map((id) =>
-              h('button', {
-                key: id,
-                className: 'dshb_tab',
-                'data-active': tab === id ? 'true' : 'false',
-                onClick: () => setTab(id),
-              }, t(`tab.${id}`)))),
-            body,
-          ]),
+          h('div', { className: 'dshb_tabs', key: 'tabs' }, ['summary', 'days', 'credits', 'settings'].map((id) =>
+            h('button', {
+              key: id,
+              className: 'dshb_tab',
+              'data-active': tab === id ? 'true' : 'false',
+              onClick: () => setTab(id),
+            }, t(`tab.${id}`)))),
+          h('div', {
+            className: 'dshb_popover_body',
+            key: 'body',
+            style: bodyMinHeight === null ? undefined : { minHeight: `${bodyMinHeight}px` },
+          }, body),
           h('div', { className: 'dshb_popover_foot', key: 'foot' }, [
             h('div', { className: 'dshb_footer', key: 'l' }, [
               h('span', { key: 'rule' }, `${t('footer.rule')}: `),
@@ -933,7 +947,7 @@ window.__ModuleLoader__.load({
       if (ledger !== null && !ledger.totals.m1.covered) flags.push(t('tip.partial'))
       if (ledger !== null && ledger.rows.some((entry) => entry.coarse)) flags.push(t('tip.coarse'))
 
-      return h('div', { className: 'dshb_body' }, [
+      return h('div', { className: 'dshb_summary' }, [
         cards,
         h('div', { className: 'dshb_rows', key: 'rows' }, rows),
         flags.length === 0 ? null : h('div', { className: 'dshb_flag', key: 'flags' }, flags.join(' · ')),

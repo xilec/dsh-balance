@@ -39,7 +39,9 @@ function reactStub() {
     },
     useRef(initial) {
       const index = state.cursor++
-      if (!(index in state.slots)) state.slots[index] = { current: initial ?? null }
+      // The plugin only takes a ref to measure an element, so the stub hands it a
+      // stand-in with a readable offsetHeight.
+      if (!(index in state.slots)) state.slots[index] = { current: initial ?? { offsetHeight: 321 } }
       return state.slots[index]
     },
     useState(initial) {
@@ -450,6 +452,26 @@ test('the panel opens on the summary with the cards in order', async () => {
   assert.equal(textOf(summaryTab), 'tab.summary', 'the summary tab is active on open')
   const rule = find(tree, (element) => element.type === 'a' && element.props?.className === 'dshb_link')[0]
   assert.equal(rule.props.href, 'https://api-docs.deepseek.com/quick_start/pricing', 'the rules link points at the English page')
+})
+
+test('the panel holds the summary height for every tab', async () => {
+  const { exported, react } = await loadClient()
+  react.beginRender()
+  const tree = react.createElement(exported.__internals.Popover, {
+    t: (key) => key,
+    state: { status: 'ok', payload, error: null, at: Date.now() },
+    projection: { cost: 0.33, currency: 'USD' },
+    onClose: () => {},
+  })
+  // The first pass mounts the summary and runs the measuring effect; the second
+  // reads the height it stored.
+  find(tree, (element) => element.props?.className === 'dshb_popover_body')
+  react.beginRender()
+  const body = find(tree, (element) => element.props?.className === 'dshb_popover_body')[0]
+  assert.ok(body !== undefined, 'the panel has a scrolling body')
+  assert.equal(body.props.style.minHeight, '321px', 'the body is pinned to the measured summary height')
+  const tabs = find(tree, (element) => element.props?.className === 'dshb_tabs')[0]
+  assert.ok(tabs !== undefined, 'the tab row sits outside the scrolling body')
 })
 
 test('the summary tab spells out every figure the plugin holds', async () => {
