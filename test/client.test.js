@@ -465,13 +465,15 @@ test('the panel holds the summary height for every tab', async () => {
   })
   // The first pass mounts the summary and runs the measuring effect; the second
   // reads the height it stored.
-  find(tree, (element) => element.props?.className === 'dshb_popover_body')
+  find(tree, (element) => element.props?.className === 'dshb_popover')
   react.beginRender()
+  const panel = find(tree, (element) => element.props?.className === 'dshb_popover')[0]
+  assert.equal(panel.props.style.height, '321px', 'the panel keeps the measured summary height')
   const body = find(tree, (element) => element.props?.className === 'dshb_popover_body')[0]
-  assert.ok(body !== undefined, 'the panel has a scrolling body')
-  assert.equal(body.props.style.minHeight, '321px', 'the body is pinned to the measured summary height')
+  assert.ok(body !== undefined, 'the panel has a body')
+  assert.equal(body.props.style, undefined, 'the body itself is not sized: it fills the panel and scrolls')
   const tabs = find(tree, (element) => element.props?.className === 'dshb_tabs')[0]
-  assert.ok(tabs !== undefined, 'the tab row sits outside the scrolling body')
+  assert.ok(tabs !== undefined, 'the tab row sits outside the body')
 })
 
 test('the summary tab spells out every figure the plugin holds', async () => {

@@ -60,7 +60,10 @@ window.__ModuleLoader__.load({
         '.dshb_popover_head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:10px 12px 0}',
         '.dshb_tabs{display:flex;gap:4px;padding:10px 12px 0}',
         '.dshb_summary{display:flex;flex-direction:column;gap:10px}',
-        '.dshb_popover_body{padding:10px 12px 12px;overflow:auto;display:flex;flex-direction:column;gap:10px}',
+        // `min-height:0` is what lets the body scroll: a flex child defaults to
+        // `min-height:auto`, which is the content height and would stretch the panel.
+        '.dshb_popover_body{flex:1 1 auto;min-height:0;padding:10px 12px 12px;overflow:auto;display:flex;flex-direction:column;gap:10px}',
+        '.dshb_popover_head,.dshb_tabs,.dshb_popover_foot{flex:none}',
         '.dshb_popover_foot{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;',
         'border-top:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18))}',
         '.dshb_modal_title{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary)}',
@@ -808,21 +811,24 @@ window.__ModuleLoader__.load({
      */
     function Popover({ t, state, projection, onClose }) {
       const [tab, setTab] = react.useState('summary')
-      // The panel is as tall as the summary it opens on: a shorter tab is padded to
-      // that height instead of shrinking the panel under the pointer, and a taller
-      // one scrolls inside the same frame.
-      const summaryRef = react.useRef(null)
-      const [bodyMinHeight, setBodyMinHeight] = react.useState(null)
+      // The panel is exactly as tall as the summary it opens on: a shorter tab is
+      // padded to that height instead of shrinking the panel under the pointer, and a
+      // taller one scrolls inside the same frame. The height comes from the panel
+      // element itself, so the header, the tab row and the footer are all counted.
+      const panelRef = react.useRef(null)
+      const [panelHeight, setPanelHeight] = react.useState(null)
       const payload = state.payload
 
       react.useEffect(() => {
-        if (tab !== 'summary' || bodyMinHeight !== null) return
-        const height = summaryRef.current?.offsetHeight
-        if (typeof height === 'number' && height > 0) setBodyMinHeight(height)
-      }, [tab, bodyMinHeight])
+        // Waiting for the payload matters: a click before the first read would
+        // otherwise pin the panel to the height of an empty summary.
+        if (tab !== 'summary' || panelHeight !== null || payload === null) return
+        const height = panelRef.current?.offsetHeight
+        if (typeof height === 'number' && height > 0) setPanelHeight(height)
+      }, [tab, panelHeight, payload])
 
       const body = tab === 'summary'
-        ? h('div', { className: 'dshb_summary', ref: summaryRef, key: 'summary' }, h(Summary, { t, state, projection }))
+        ? h(Summary, { t, state, projection, key: 'summary' })
         : tab === 'days'
           ? h(DaysTable, { t, ledger: payload?.ledger ?? null, currency: payload?.balance?.currency ?? 'USD', key: 'days' })
           : tab === 'credits'
@@ -831,7 +837,15 @@ window.__ModuleLoader__.load({
 
       return [
         h('div', { className: 'dshb_catch', key: 'catch', onClick: onClose }),
-        h('div', { className: 'dshb_popover', key: 'popover', role: 'dialog', 'aria-label': t('card.title') }, [
+        h('div', {
+          className: 'dshb_popover',
+          key: 'popover',
+          ref: panelRef,
+          role: 'dialog',
+          'aria-label': t('card.title'),
+          // `max-height` in the stylesheet still wins in a short window.
+          style: panelHeight === null ? undefined : { height: `${panelHeight}px` },
+        }, [
           h('div', { className: 'dshb_popover_head', key: 'head' }, [
             h('div', { key: 'titles' }, [
               h('div', { className: 'dshb_modal_title', key: 't' }, t('card.title')),
@@ -846,11 +860,7 @@ window.__ModuleLoader__.load({
               'data-active': tab === id ? 'true' : 'false',
               onClick: () => setTab(id),
             }, t(`tab.${id}`)))),
-          h('div', {
-            className: 'dshb_popover_body',
-            key: 'body',
-            style: bodyMinHeight === null ? undefined : { minHeight: `${bodyMinHeight}px` },
-          }, body),
+          h('div', { className: 'dshb_popover_body', key: 'body' }, body),
           h('div', { className: 'dshb_popover_foot', key: 'foot' }, [
             h('div', { className: 'dshb_footer', key: 'l' }, [
               h('span', { key: 'rule' }, `${t('footer.rule')}: `),
