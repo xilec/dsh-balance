@@ -1,0 +1,53 @@
+# Tasks
+
+Stage boundaries follow decision D38 and the five-stage plan in `design.md`: stage 1 is the
+smallest useful slice, each later stage is additive, and the change is archived after stage 5.
+
+## 1. Stage 1 — per-Step series and the Cost view
+
+- [ ] 1.1 Add the approved domain glossary `CONTEXT.md` (currently untracked) to the branch; verify with `git status --short` that it is tracked and that its terms match the ones used in the artifacts
+- [ ] 1.2 Extend the `dshBalanceCost` projection state to version 2: one node per `(turn, step)` holding every usage report (model, time, buckets, evicted-by-retry), the calls, and the flags, as an append-only chunked list; verify `node --test test/session-cost.test.js` covers a model switch inside a Step, a retry, an in-progress node, an Unpriced model, and the Σ invariant (node costs sum to the total before rounding)
+- [ ] 1.3 Derive the session total in `wire.view` from the series instead of the running counter, and add the summary fields (`seq`, Step count, currency, per-model totals, token totals, Unpriced models); verify `node --test test/session-cost.test.js test/plugin-host.test.js` proves the summary parses and carries no per-Step array, and that `seq` increases on a usage event
+- [ ] 1.4 Register `GET /dsh-balance/session-cost`, serving exactly one session's complete series in one response together with the rule material (rates with effective dates, absolute peak intervals over the series, holidays, rule source and verification date, currency, `seq`); verify a `test/plugin-host.test.js` case with the fake `ctx` asserting the full series in a single response, the rule fields present, and an explicit error for a session that is not the requested one
+- [ ] 1.5 Register the `Cost` view in `conversation.view` (`id`, `order: 20`, label `Cost`, lazy mount) and fetch the series from the route; verify the registration shape in `test/client.test.js` and that the tab appears for an open session in the running shell
+- [ ] 1.6 Draw the per-Step chart: canvas step line with markers and stems, DOM overlay for axes, peak/off-peak bands and Turn separators, time X axis, min/max decimation per pixel column, and clipping at `p95 × 10` of the visible range with a marker and an unclipping control; verify pure-function tests for the scale, decimation and clipping helpers exported through `exports.__internals`, plus a hand check in the shell with a long session
+- [ ] 1.7 Add the tooltip (Turn/Step, time and phase, model, buckets, cost, share, `t_start..t_end`) and the inspector (prompt preview from the projection, tool list, model, tokens, cost, `Load older` on demand only, no automatic loading); verify with `test/client.test.js` rendering cases and a hand check that a click opens the inspector
+- [ ] 1.8 Implement the three empty states (no Steps with usage / tokens but no rates / history read failed with retry); verify each state renders in `test/client.test.js` and one of them by hand in the shell
+- [ ] 1.9 Stage 1 acceptance: `npm test` green, `npx knip --no-config-hints` and `npx jscpd --min-tokens 60 --min-lines 10 --threshold 1 --reporters console --format javascript src client` without new findings, the composer chip and the Cost view show the same session total in the running shell, the result is recorded in this file, and the stage commit message is drafted for approval
+
+## 2. Stage 2 — Tariff projections, metrics and fallback rates
+
+- [ ] 2.1 Compute and expose `offPeak` and `peak` for every Step from the stored buckets, and extend the series response with the rate table and its effective dates so the client derives no phase of its own; verify `test/session-cost.test.js` asserts the three projections per Step and `test/pricing.test.js` covers rate selection at a boundary
+- [ ] 2.2 Add the Tariff projection selector to the view (chart, top-K and totals move together, the `fact` figure stays in the header) and the metric selector (cost, output tokens, cache read, cache write, total tokens); verify `test/client.test.js` compares the projection outputs of the chart data builder and a hand check that switching the metric does not change a money total
+- [ ] 2.3 Add the X-axis switch between time and Step index, numbering by `(Turn, Step)`; verify the axis helper's unit test and a hand check in the shell
+- [ ] 2.4 Make `Unpriced` Steps explicit end to end: chart mark, tooltip line, top-K row, token metrics untouched, a control to enter rates offered from the unpriced state; verify `test/client.test.js` for the marker and `test/session-cost.test.js` that an unpriced Step adds zero to money and its tokens to token totals
+- [ ] 2.5 Store fallback rates per model (cache miss/in, cache hit/read, output per 1M tokens, peak rates with off-peak at half, `cacheWrite` billed as `cacheMiss`): extend the plugin config, add the keys to `MUTABLE_SETTINGS` in `src/index.js`, extend the settings UI, and reprice the whole history on change behind a warning; verify a `test/plugin-host.test.js` case that the write goes through `POST /dsh-balance/settings`, and a `test/session-cost.test.js` case that a new rate reprices existing Steps and the derived total
+- [ ] 2.6 Persist the view choices (metric, X axis, Tariff projection, top-K mode) through the settings route and restore them on mount, leaving brush and zoom unstored; verify a `test/client.test.js` case that the stored choices come back from a payload and that no brush bounds are written
+- [ ] 2.7 Stage 2 acceptance: `npm test` green, `npx knip` and `npx jscpd` without new findings, projections/metrics verified by hand in the shell, the result recorded in this file, and the stage commit message drafted for approval
+
+## 3. Stage 3 — top-K, brush and the Trajectory jump
+
+- [ ] 3.1 Add top-10 Steps / top-10 Turns over the visible range, ranked by the selected metric, with self-explaining rows (Turn/Step, time and phase, model, tool name and short preview, bucket breakdown, cost, share); verify `test/client.test.js` for the ranking helper (metric change reorders, cost stays in every row) and a hand check that selecting a row selects the point
+- [ ] 3.2 Add wheel zoom, right-drag pan and interval brushing, recomputing top-K and totals for the visible range without persisting brush or zoom; verify the range helpers' unit tests and a hand check in the shell
+- [ ] 3.3 Add the "show in Trajectory" action through the view's `inspectCall(callId)` for a Step that holds tool calls, and the explicit "no focus target" copy for an assistant-only Step; verify with a stub `inspectCall` in `test/client.test.js` and by hand in the shell
+- [ ] 3.4 Stage 3 acceptance: `npm test` green, `npx knip` and `npx jscpd` without new findings, top-K, brush and the Trajectory jump verified by hand, the result recorded in this file, and the stage commit message drafted for approval
+
+## 4. Stage 4 — subagents and calibration
+
+- [ ] 4.1 Mark subagent spawns on the spawning Step from `subagentCatalog` (child id, label, mode, the child's own session estimate) and keep the child cost out of the session total; verify `test/client.test.js` that markers appear and the header total is unchanged
+- [ ] 4.2 Add the separate child-sessions route that walks the subagent tree (`subagents.listChildren` / `listDescendants`, child events through `sessionQuery`) and the explicit "include subagents" action with progress, per-child lines and the subtree cost attributed to the spawning Step, plus the "load full history" action for the subtree only; verify a `test/plugin-host.test.js` case that the main route still serves one session only while the child route follows the tree
+- [ ] 4.3 Add the calibration line when the session interval holds at least two balance samples, labelled as account-wide and including other activity, and omit it below two samples; verify the interval/sample helper's unit test and a hand check against the samples log
+- [ ] 4.4 Stage 4 acceptance: `npm test` green, `npx knip` and `npx jscpd` without new findings, markers, subtree expansion and the calibration line verified by hand, the result recorded in this file, and the stage commit message drafted for approval
+
+## 5. Stage 5 — linear history export
+
+- [ ] 5.1 Build the ordered NDJSON stream: a leading `meta` record (plugin version, session id/title, models, currency, the Tariff rule snapshot, the projection definitions, the detail level), every record carrying `i`, `type`, `session`, `depth`, `seq`, `t`, the event vocabulary of the spec, costs under all three projections in every `usage` record, `retry` records for evicted attempts, and subagent sessions merged by time inside spawn/settle records; verify a golden-file test in `test/session-cost.test.js` (or a new `test/export.test.js`) comparing the produced stream with a committed fixture
+- [ ] 5.2 Implement the two detail levels: `costs` by default with no message or tool text, `full` with message, tool and thinking text truncated at 2000 characters and flagged `truncated: true`, `thinking` only in `full`, and a warning shown before a `full` download; verify unit tests for the truncation and flag, and a hand check of the warning
+- [ ] 5.3 Download the stream in the browser under `dsh-balance-<session id first 8 chars>-<yyyymmdd-hhmm>.cost-history.ndjson`, writing nothing to the workspace or `$DSH_HOME`; verify the file-name builder's unit test and a real download in the shell
+- [ ] 5.4 Stage 5 acceptance: `npm test` green, `npx knip` and `npx jscpd` without new findings, a `costs` and a `full` export inspected by hand (record counts, one `usage` record, one subagent record), the result recorded in this file, and the stage commit message drafted for approval
+
+## 6. Release
+
+- [ ] 6.1 Run `openspec validate --all --json` and confirm the change validates before archiving
+- [ ] 6.2 Tick every completed item above, archive the change with `openspec archive session-cost-analysis --yes`, and verify `openspec/specs/session-cost-analysis/spec.md` now holds the capability with its Purpose
+- [ ] 6.3 Commit the archived change and the glossary, push the branch, open the PR, merge it with a merge commit, and update the local `main`; verify `git log --oneline -1 main` shows the merge and the working tree is clean apart from `tmp/`
