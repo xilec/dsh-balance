@@ -5,8 +5,8 @@
  *
  * 1. A compact readout in `conversation.composer.dock` at `order: -10`, so it is
  *    drawn immediately left of the shipped `stats` entry ("N turns · M steps") and
- *    reads as part of that line: `b:$19.52 · 1d:$0.39 · 1w:$2.29 · 1m:$10.43 · s:$0.33`.
- *    Hovering explains it, clicking opens the panel.
+ *    reads as part of that line: `$19.52 · $0.39/$2.29/$10.43 · $0.33`, with no
+ *    labels — hovering explains the figures, clicking opens the panel.
  * 2. The peak-tariff chip in the session header (and a floating copy for a session
  *    whose header is hidden), driven by the Host's rule — the same module that prices
  *    sessions, so holidays and the weekend discount are accounted for consistently.

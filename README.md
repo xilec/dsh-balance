@@ -145,7 +145,7 @@ and a value written there outranks the row for that key only.
 | `dayZone` | `local` | Day-boundary zone: `local` or an IANA name |
 | `historyDays` | `30` | Day rows kept and rolled up |
 | `keepDays` | `120` | Full-resolution sample retention |
-| `warningThreshold` / `dangerThreshold` | `10` / `5` | Balance colouring |
+| `warningThreshold` / `dangerThreshold` | `10` / `5` | Balance thresholds; stored and relayed, but no surface colours the balance by them — the peak chip's colour shows the tariff phase |
 | `holidays` | 2026 list | Chinese public holidays (Beijing dates) |
 | `priceUnknownModels` / `fallbackPrices` | `false` / — | Price models outside the built-in table |
 | `fallbackRates` | `{}` | Peak rates per 1M tokens keyed by model id, for a model the table does not price; they win over `fallbackPrices` and can be entered from the Cost view or the panel. Off-peak is half, a cache write is billed as a cache miss |
@@ -197,7 +197,7 @@ src/session-cost.js   the sessionProjections unit (tokens priced per event time)
 src/store.js          samples.ndjson and state.json on disk
 src/index.js          the Host plugin: sampler loop, HTTP routes
 client/client.js      the browser half: the readout, the peak chip, the panel
-test/                 node --test suite (136 cases, no build step)
+test/                 node --test suite (no build step)
 ```
 
 ```sh
