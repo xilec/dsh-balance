@@ -55,6 +55,6 @@ smallest useful slice, each later stage is additive, and the change is archived 
 
 ## 7. Release
 
-- [ ] 7.1 Run `openspec validate --all --json` and confirm the change validates before archiving
-- [ ] 7.2 Tick every completed item above, archive the change with `openspec archive session-cost-analysis --yes`, and verify `openspec/specs/session-cost-analysis/spec.md` now holds the capability with its Purpose
+- [x] 7.1 Run `openspec validate --all --json` and confirm the change validates before archiving — `{"totals":{"items":2,"passed":2,"failed":0}}` before the archive
+- [x] 7.2 Tick every completed item above, archive the change with `openspec archive session-cost-analysis --yes`, and verify `openspec/specs/session-cost-analysis/spec.md` now holds the capability with its Purpose — every item above is ticked, the change is archived, and the capability stays in `openspec/specs/session-cost-analysis/spec.md` with its Purpose, its 19 requirements and the scenarios of the delta
 - [ ] 7.3 Commit the archived change and the glossary, push the branch, open the PR, merge it with a merge commit, and update the local `main`; verify `git log --oneline -1 main` shows the merge and the working tree is clean apart from `tmp/`
