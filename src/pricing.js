@@ -401,6 +401,21 @@ export function ratesAt(tsMs) {
 }
 
 /**
+ * Effective-dated rate tables of one currency, oldest first.
+ *
+ * The Cost view ships the whole schedule to the client so a session that spans a
+ * price change is rendered against the rates that were in force, exactly as the
+ * Host priced it.
+ *
+ * @param currency - `CNY` or `USD`; anything else is read as `CNY`.
+ * @returns `[{ effectiveFrom, rates: { flash, pro } }]` in chronological order.
+ */
+export function rateSchedule(currency) {
+  const code = String(currency ?? 'CNY').toUpperCase() === 'USD' ? 'USD' : 'CNY'
+  return RATE_SCHEDULE.map((entry) => ({ effectiveFrom: entry.fromMs, rates: entry.rates[code] }))
+}
+
+/**
  * The price of one model at one instant.
  *
  * @param model - model id.

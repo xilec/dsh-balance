@@ -90,15 +90,32 @@ rationale. Alternatives that were considered and rejected are named.
   and the retry-eviction flag per usage report; the step cost under each projection is computed
   when the summary or the series is built, from the live Tariff rule snapshot. Alternative:
   store three costs per step — rejected, because a later rule or fallback-rate change would then
-  require rewriting history (D36) and the three projections could drift.
+  require rewriting history (D36) and the three projections could drift. The running aggregates
+  the wire view needs (bucket totals, the `fact` cost, per-model totals, the Unpriced models)
+  are maintained by the same fold, so a usage event produces the next client view in O(1);
+  building the whole series per event would make a 10⁴-Step session quadratic. The series route
+  prices its nodes from the series itself, so the two paths share one rule snapshot and one set
+  of raw buckets.
 - **D9 — `dshBalanceCost` becomes derived from the series** (Σ of step costs) so the chip, the
   panel card and the Cost view cannot diverge. Alternative: keep the running total and add the
   series beside it — rejected, exactly because the two can drift.
 - **D10 — A chart point is a `(turn, step)` node** holding its usage reports (model, time,
   buckets, evicted-by-retry). The node cost is the sum of its surviving reports. Alternative: a
-  point per usage report — rejected, because a Step that switches model or is retried would
-  appear as several points at nearly the same instant and the "finest granularity the provider
-  reports usage for" is the Step.
+  point per usage report — rejected, because a Step that is retried would appear as several
+  points at nearly the same instant and the "finest granularity the provider reports usage for"
+  is the Step. Verified against the harness's own `tokenUsage` unit
+  (`dsh-token-meter/lib/index.js:415-438`): a restated usage report for the same `(turn, step)`
+  replaces the earlier one, and only `llm/retry-started` closes that replacement slot. The
+  plugin mirrors that replacement rule, so a node holds one surviving report plus the reports a
+  retry evicted. Usage is read from `assistant/message` (its `usage`, or the last `usage` chunk
+  of its stream) and `assistant/attempt` (the last `usage` chunk); the removed branch for
+  `assistant/chunk` was not an event type in this harness version.
+- **D28a — The retry rule deliberately deviates from `tokenUsage`.** The harness's own unit
+  *adds* a retried attempt to its total (the failed attempt was billed), while this plugin drops
+  the evicted attempt — which is what the existing `dshBalanceCost` does today and what D28
+  fixes. The evicted report is still kept in the node for the tooltip's retry count and for the
+  export, so nothing becomes invisible; only the money metric follows the session estimate the
+  chip already shows.
 - **D5 — Count each Step once.** The session estimate is the sum of the same Step nodes;
   rounding happens only when a number is presented (the existing `round6` at the boundary), so
   Σ parts equals the whole before rounding.
@@ -169,9 +186,11 @@ rationale. Alternatives that were considered and rejected are named.
   the history read failed (with a retry action). Each is a distinct message rather than an empty
   plot.
 - **D20 — The node carries what a reader needs.** `turn`, `step`, `t_start`, `t_end`, the buckets
-  per model, the retry count, the calls (`name`, `callId`, a preview of at most 60 characters on
-  one line) and the flags (`interrupted`, `unpriced`, `unknownModel`). Full argument text appears
-  only in the export's `full` level.
+  per model, the retry count, the calls (`name`, `callId`, a preview of up to three lines and at
+  most 200 characters, with escaped newlines decoded) and the flags (`interrupted`, `unpriced`, `unknownModel`). Full argument text appears
+  only in the export's `full` level. The route also prices the buckets separately
+  (`costByBucket`), so the inspector can show where a Step's money went as a table without the
+  client touching the Tariff rule; the per-bucket figures add up to the Step's cost.
 - **D27 — The calibration line is conditional and honest.** It appears only when the session's
   interval holds at least two balance samples, and it is labelled as account-wide and including
   other activity; with fewer samples no line is offered, because a single sample cannot express a

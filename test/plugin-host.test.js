@@ -34,7 +34,7 @@ function response() {
 }
 
 /** A minimal Host context: effect, inject, get, and a route table. */
-function hostContext() {
+function hostContext(options = {}) {
   const routes = new Map()
   const projections = []
   const services = new Map([
@@ -52,9 +52,15 @@ function hostContext() {
       snapshot() {
         return { values: {} }
       },
+      stateOf(session, key) {
+        return options.projectionState?.(session, key)
+      },
     }],
-    ['sessions', { get: () => undefined }],
+    ['sessions', { get: (id) => options.sessionOf?.(id) }],
   ])
+  if (options.readSession !== undefined) {
+    services.set('sessionQuery', { readSession: (id) => options.readSession(id) })
+  }
   const effects = []
   return {
     routes,
@@ -91,14 +97,14 @@ const balanceBody = (total, extra = {}) => ({
   }],
 })
 
-async function withPlugin(run) {
+async function withPlugin(run, options = {}) {
   const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
   const previousHome = process.env.DSH_HOME
   const previousFetch = globalThis.fetch
   process.env.DSH_HOME = home
   let body = balanceBody(12.34)
   globalThis.fetch = async () => ({ ok: true, json: async () => body })
-  const ctx = hostContext()
+  const ctx = hostContext(options)
   try {
     const module = await import(`../src/index.js?home=${encodeURIComponent(home)}`)
     const config = module.Config({ apiKey: 'test-key' })
@@ -117,7 +123,7 @@ test('the plugin registers its routes and its projection unit', async () => {
   await withPlugin(async ({ ctx, module }) => {
     assert.deepEqual(
       [...ctx.routes.keys()].sort(),
-      ['/dsh-balance', '/dsh-balance/hello', '/dsh-balance/overrides', '/dsh-balance/refresh', '/dsh-balance/settings'],
+      ['/dsh-balance', '/dsh-balance/hello', '/dsh-balance/overrides', '/dsh-balance/refresh', '/dsh-balance/session-cost', '/dsh-balance/settings'],
     )
     assert.equal(ctx.projections.length, 1)
     assert.equal(ctx.projections[0].key, 'dshBalanceCost')
@@ -355,6 +361,114 @@ test('an override from the previous release gets its balance anchor back', async
     else process.env.DSH_HOME = previousHome
     await rm(home, { recursive: true, force: true })
   }
+})
+
+test('the session-cost route serves one session series with the rule it priced by', async () => {
+  const states = new Map()
+  const asked = []
+  const sessions = new Map([['session-1', { id: 'session-1' }]])
+  await withPlugin(async ({ ctx }) => {
+    // A balance first, so the account currency (CNY) is the one the series is priced in.
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    const unit = ctx.projections[0]
+    // 10:00 Beijing on a Thursday: inside a peak window.
+    const time = Date.UTC(2026, 8, 24, 2, 0)
+    const events = [
+      { type: 'step/start', seq: 1, time, data: { turn: 1, step: 1 } },
+      { type: 'request/header', seq: 2, time, data: { header: { config: { model: 'deepseek-flash' } } } },
+      { type: 'assistant/message', seq: 3, time, data: { turn: 1, step: 1, usage: { inputTokens: 1e6, outputTokens: 1e6 } } },
+    ]
+    states.set('session-1', events.reduce((state, event) => unit.apply(state, event), unit.init()))
+
+    const missing = response()
+    await ctx.routes.get('/dsh-balance/session-cost')(request('GET', '/dsh-balance/session-cost'), missing)
+    assert.equal(missing.status, 400)
+    assert.equal(asked.length, 0, 'a request without a session reads nothing')
+
+    const unknown = response()
+    await ctx.routes.get('/dsh-balance/session-cost')(request('GET', '/dsh-balance/session-cost?sessionId=session-9'), unknown)
+    assert.equal(JSON.parse(unknown.body).ok, false)
+    assert.equal(JSON.parse(unknown.body).error, 'unknown-session')
+    assert.deepEqual(asked, ['session-9'])
+
+    const res = response()
+    await ctx.routes.get('/dsh-balance/session-cost')(request('GET', '/dsh-balance/session-cost?sessionId=session-1'), res)
+    assert.equal(res.status, 200)
+    assert.deepEqual(asked, ['session-9', 'session-1'], 'one request, one session')
+    const payload = JSON.parse(res.body)
+    assert.equal(payload.ok, true)
+    assert.equal(payload.sessionId, 'session-1')
+    assert.equal(payload.currency, 'CNY')
+    assert.equal(payload.seq, 3)
+    assert.equal(payload.nodes.length, 1)
+    assert.equal(payload.nodes[0].cost, 10, '1M miss at 2 CNY plus 1M output at 8 CNY')
+    assert.equal(payload.nodes[0].ended, false)
+    assert.match(payload.rule.sourceUrl, /pricing/)
+    assert.equal(payload.rule.verifiedOn.length, 10)
+    assert.equal(payload.rule.rates.at(-1).rates.flash.cacheMiss, 2)
+    assert.ok(payload.peakIntervals.length >= 1, 'the peak window covering the series travels with it')
+  }, {
+    sessionOf: (id) => {
+      asked.push(id)
+      return sessions.get(id)
+    },
+    projectionState: (session, key) => (key === 'dshBalanceCost' ? states.get(session.id) : undefined),
+  })
+})
+
+test('a session this host does not own live is folded from its stored log', async () => {
+  const time = Date.UTC(2026, 8, 24, 2, 0)
+  const events = [
+    { type: 'step/start', seq: 1, time, data: { turn: 1, step: 1 } },
+    { type: 'request/header', seq: 2, time, data: { header: { config: { model: 'deepseek-flash' } } } },
+    { type: 'assistant/message', seq: 3, time, data: { turn: 1, step: 1, usage: { inputTokens: 1e6, outputTokens: 1e6 } } },
+    { type: 'step/end', seq: 4, time: time + 1000, data: { turn: 1, step: 1 } },
+  ]
+  await withPlugin(async ({ ctx }) => {
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    const res = response()
+    await ctx.routes.get('/dsh-balance/session-cost')(request('GET', '/dsh-balance/session-cost?sessionId=session-stored'), res)
+    const payload = JSON.parse(res.body)
+    assert.equal(payload.ok, true, res.body)
+    assert.equal(payload.sessionId, 'session-stored')
+    assert.equal(payload.currency, 'CNY')
+    assert.equal(payload.seq, 4)
+    assert.equal(payload.nodes.length, 1)
+    assert.equal(payload.nodes[0].cost, 10, 'the stored log is priced by the same rule')
+    assert.equal(payload.nodes[0].ended, true)
+  }, {
+    sessionOf: () => undefined,
+    readSession: async (id) => {
+      assert.equal(id, 'session-stored')
+      return { session: { id }, inheritedEventCount: 0, events }
+    },
+  })
+})
+
+test('a stored session that cannot be read is reported, not served empty', async () => {
+  await withPlugin(async ({ ctx }) => {
+    const res = response()
+    await ctx.routes.get('/dsh-balance/session-cost')(request('GET', '/dsh-balance/session-cost?sessionId=missing'), res)
+    const payload = JSON.parse(res.body)
+    assert.equal(payload.ok, false)
+    assert.equal(payload.error, 'unknown-session')
+    assert.match(payload.detail, /not found/)
+  }, {
+    sessionOf: () => undefined,
+    readSession: async () => {
+      throw new Error('session "missing" not found')
+    },
+  })
+})
+
+test('a session with no projection state reports it instead of an empty series', async () => {
+  await withPlugin(async ({ ctx }) => {
+    const res = response()
+    await ctx.routes.get('/dsh-balance/session-cost')(request('GET', '/dsh-balance/session-cost?sessionId=session-1'), res)
+    const payload = JSON.parse(res.body)
+    assert.equal(payload.ok, false)
+    assert.equal(payload.error, 'projection-unavailable')
+  }, { sessionOf: () => ({ id: 'session-1' }) })
 })
 
 test('a failing fetch keeps the last balance and reports the error', async () => {

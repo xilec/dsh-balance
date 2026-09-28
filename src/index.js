@@ -22,9 +22,10 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { buildLedger } from './history.js'
 import {
   OFF_PEAK_RATIO, PUBLIC_HOLIDAYS_2026, RULE_SOURCE_URL, RULE_VERIFIED_ON,
-  nextChange, peakSchedule, peakState, phaseAt, priceAt, utcWindowsLabel, windowsOfLocalDay,
+  nextChange, peakIntervalsBetween, peakSchedule, peakState, phaseAt, priceAt, rateSchedule,
+  utcWindowsLabel, windowsOfLocalDay,
 } from './pricing.js'
-import { SESSION_COST_KEY, makeSessionCostProjection } from './session-cost.js'
+import { SESSION_COST_KEY, makeSessionCostProjection, seriesPayload } from './session-cost.js'
 import { appendSample, readSamplesCompacting, readState, writeState } from './store.js'
 
 export const name = 'dsh-balance'
@@ -440,6 +441,81 @@ export function apply(ctx, config) {
   }
 
   /**
+   * The projection state of one session.
+   *
+   * A session this host owns answers from the live projection. A session that is
+   * only open for reading — the usual case in a browser instance that did not
+   * start the agent, where `sessions.get` knows nothing — is folded here from its
+   * stored log through the same unit, so both paths price with one rule.
+   *
+   * @param sessionId - the session whose state is read.
+   * @returns `{ state }`, or `{ error, detail? }` when it cannot be read.
+   */
+  const projectionStateOf = async (sessionId) => {
+    const projections = ctx.get('sessionProjections')
+    if (projections === undefined) return { error: 'projection-unavailable' }
+    try {
+      const live = ctx.get('sessions')?.get?.(sessionId)
+      if (live !== undefined && live !== null) {
+        const state = projections.stateOf(live, SESSION_COST_KEY)
+        return state === undefined ? { error: 'projection-unavailable' } : { state }
+      }
+      const query = ctx.get('sessionQuery')
+      if (query === undefined) return { error: 'unknown-session' }
+      const snapshot = await query.readSession(sessionId)
+      const state = snapshot.events.reduce((folded, event) => storedFold.apply(folded, event), storedFold.init())
+      return { state }
+    } catch (error) {
+      return { error: 'unknown-session', detail: message(error) }
+    }
+  }
+
+  /**
+   * The per-Step series of one session, priced and ready for the Cost view.
+   *
+   * This is the only route that reads the series, and it answers for exactly the
+   * session it was asked about: nothing here enumerates sessions or walks a
+   * subtree — subagent sessions get their own route (and their own explicit ask).
+   *
+   * @param sessionId - the session whose series is requested.
+   * @returns the payload, or `{ ok: false, error }` when the session or the
+   * projection is not available.
+   */
+  const seriesPayloadOf = async (sessionId) => {
+    const resolved = await projectionStateOf(sessionId)
+    if (resolved.error !== undefined) {
+      return { ok: false, error: resolved.error, ...(resolved.detail === undefined ? {} : { detail: resolved.detail }) }
+    }
+    try {
+      const state = resolved.state
+      const currency = effectiveCurrency()
+      const options = { currency, holidays: runtime.holidays, fallback: fallback() }
+      const nodes = seriesPayload(state, options)
+      const first = nodes[0]
+      const last = nodes[nodes.length - 1]
+      const fromMs = first === undefined ? Date.now() : first.tStart
+      const toMs = last === undefined ? fromMs + 1 : Math.max(last.tEnd, fromMs + 1)
+      return {
+        ok: true,
+        sessionId,
+        seq: state.seq,
+        currency,
+        nodes,
+        rule: {
+          sourceUrl: RULE_SOURCE_URL,
+          verifiedOn: RULE_VERIFIED_ON,
+          holidays: runtime.holidays,
+          rates: rateSchedule(currency),
+        },
+        peakIntervals: peakIntervalsBetween(fromMs, toMs, runtime.holidays),
+      }
+    } catch (error) {
+      warn(`cannot read the session series: ${message(error)}`)
+      return { ok: false, error: message(error) }
+    }
+  }
+
+  /**
    * Currency the account is actually billed in.
    *
    * `currency` in the config is a preference, not a promise: an account topped up
@@ -456,6 +532,12 @@ export function apply(ctx, config) {
 
   /** The live config the session-cost projection prices with. */
   const projectionConfig = () => ({ ...runtime, currency: effectiveCurrency() })
+
+  /**
+   * The same unit again, unregistered: the series route folds a stored session log
+   * with it when this host does not own the session live.
+   */
+  const storedFold = makeSessionCostProjection(projectionConfig)
 
   const balancePayload = () => {
     const currency = effectiveCurrency()
@@ -577,6 +659,26 @@ export function apply(ctx, config) {
       await refresh()
       sendJson(res, 200, buildPayload(''))
     }, { lenient: true })
+
+    webCtx.effect(() => webCtx.webServer.register({
+      kind: 'exact',
+      path: '/dsh-balance/session-cost',
+      async handler(req, res) {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          res.writeHead(405, { Allow: 'GET, HEAD' })
+          res.end()
+          return
+        }
+        const url = new URL(req.url ?? '/dsh-balance/session-cost', 'http://127.0.0.1')
+        const sessionId = url.searchParams.get('sessionId') ?? ''
+        if (sessionId === '') {
+          sendJson(res, 400, { ok: false, error: 'sessionId is required' })
+          return
+        }
+        if (!loaded) await ready
+        sendJson(res, 200, await seriesPayloadOf(sessionId))
+      },
+    }), 'dsh-balance: session cost route')
 
     postRoute('/dsh-balance/hello', 'dsh-balance: client hello route', async (body, res) => {
       const mount = body.phase === 'mount'

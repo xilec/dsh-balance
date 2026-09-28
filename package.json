@@ -40,6 +40,7 @@
     }
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-chunked-list": "0.1.7-rc.2",
     "@deepseek-ai/dsh-home-paths": "0.1.7-rc.2",
     "@deepseek-ai/schemastery": "3.18.4",
     "jscpd": "4.3.0",

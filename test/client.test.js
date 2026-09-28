@@ -130,7 +130,7 @@ function clientContext() {
       const disposer = fn()
       return typeof disposer === 'function' ? disposer : () => {}
     },
-    locale: { register: () => () => {} },
+    locale: { register: () => () => {}, bind: () => (key) => key },
     get: (key) => services.get(key),
     slots: {
       inject(name, callback) {
@@ -243,7 +243,7 @@ test('the client module registers one plugin with its services', async () => {
   assert.equal(typeof exported.apply, 'function')
 })
 
-test('apply registers the readout before the stats entry, plus both peak surfaces', async () => {
+test('apply registers the readout before the stats entry, both peak surfaces and the Cost view', async () => {
   const { exported } = await loadClient()
   const ctx = clientContext()
   exported.apply(ctx)
@@ -256,7 +256,12 @@ test('apply registers the readout before the stats entry, plus both peak surface
     .map((entry) => entry.options.name)
     .sort()
   assert.deepEqual(peaks, ['conversation.input.overlay', 'conversation.session.header.actions'])
-  assert.equal(ctx.registered.length, 3)
+  const cost = ctx.registered.find((entry) => entry.options.id === 'dsh-balance-cost').options
+  assert.equal(cost.name, 'conversation.view')
+  assert.equal(cost.order, 20, 'directly after Trajectory (order 10) and its own id, not Trajectory’s')
+  assert.equal(cost.locale, 'dsh-balance')
+  assert.equal(cost.label(), 'view.cost')
+  assert.equal(ctx.registered.length, 4)
 })
 
 test('the readout renders the compact balance and spend line', async () => {
@@ -560,8 +565,7 @@ test('the settings tab posts the fields it edits', async () => {
   }
 })
 
-test('a day row saves and clears a manual correction through the Host', async () => {
-  const { exported, react } = await loadClient()
+test('a day row saves and clears a manual correction through the Host', async () => {  const { exported, react } = await loadClient()
   const posts = []
   const restore = stubFetch({ posts })
   try {
@@ -586,4 +590,405 @@ test('a day row saves and clears a manual correction through the Host', async ()
     react.stop()
     restore()
   }
+})
+
+//#region cost view
+
+/** One Step record as the session-cost route serves it. */
+const costNode = (over = {}) => {
+  const buckets = { uncachedInput: 1e6, cacheRead: 0, cacheWrite: 0, output: 1e6, ...(over.buckets ?? {}) }
+  return {
+    turn: 1,
+    step: 1,
+    tStart: NOW - 2 * HOUR,
+    tEnd: NOW - 2 * HOUR + MINUTE,
+    ended: true,
+    hasUsage: true,
+    interrupted: false,
+    retries: 0,
+    evicted: [],
+    calls: [],
+    buckets,
+    byModel: { 'deepseek-flash': { buckets, cost: 10 } },
+    cost: 10,
+    costByBucket: { uncachedInput: 2, cacheRead: 0, cacheWrite: 0, output: 8, ...(over.costByBucket ?? {}) },
+    unpriced: false,
+    unknownModel: false,
+    ...over,
+  }
+}
+
+/** One `/dsh-balance/session-cost` payload. */
+const costPayload = (nodes, over = {}) => ({
+  ok: true,
+  sessionId: 'session-7',
+  seq: 5,
+  currency: 'CNY',
+  nodes,
+  rule: {
+    sourceUrl: 'https://api-docs.deepseek.com/quick_start/pricing',
+    verifiedOn: '2026-09-27',
+    holidays: [],
+    rates: [],
+  },
+  peakIntervals: [{ startMs: NOW - 2 * HOUR, endMs: NOW - 2 * HOUR + 30 * MINUTE }],
+  ...over,
+})
+
+/** A fetch stub answering the series route with the payload under test. */
+function stubCostFetch(answer, { calls = [] } = {}) {
+  const previous = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    if (String(url).startsWith('/dsh-balance/session-cost')) {
+      return { ok: true, status: 200, json: async () => (typeof answer === 'function' ? answer() : answer) }
+    }
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  return () => {
+    globalThis.fetch = previous
+  }
+}
+
+test('the chart marks peak windows, turn boundaries and the axis', async () => {
+  const { exported, react } = await loadClient()
+  const nodes = [
+    costNode(),
+    costNode({ turn: 1, step: 2, tStart: NOW - HOUR, tEnd: NOW - HOUR + MINUTE }),
+    costNode({ turn: 2, step: 1, tStart: NOW - 5 * MINUTE, tEnd: NOW }),
+  ]
+  const restore = stubCostFetch(costPayload(nodes))
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => ({ seq: 5, currency: 'CNY' }) }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    const tree = react.createElement(exported.__internals.CostView, props)
+    const text = textOf(tree)
+    assert.match(text, /¥30\.00/, 'the header leads with the session estimate')
+    assert.match(text, /cost\.steps/)
+    assert.match(text, /cost\.totalLabel/)
+    assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_canvas').length, 1)
+    assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_band').length, 1, 'one peak window is shaded')
+    assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_sep').length, 2, 'a separator per Turn')
+    assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_axis').length, 1)
+    assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_grid').length, 5, 'a reference line per tick')
+    assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_ylabel').length, 5, 'the vertical scale is labelled')
+    assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_yaxis').length, 1)
+  } finally {
+    react.stop()
+    restore()
+  }
+})
+
+test('the Cost view states its three empty and error states in place', async () => {
+  const { exported, react } = await loadClient()
+  const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => undefined }
+
+  const render = async (answer) => {
+    const restore = stubCostFetch(answer)
+    try {
+      react.beginRender()
+      textOf(react.createElement(exported.__internals.CostView, props))
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      react.beginRender()
+      return react.createElement(exported.__internals.CostView, props)
+    } finally {
+      restore()
+    }
+  }
+
+  const empty = await render(costPayload([]))
+  assert.match(textOf(empty), /cost\.empty\.steps/)
+  assert.equal(find(empty, (element) => element.props?.className === 'dshb_cost_canvas').length, 0, 'no blank plot is drawn')
+
+  const noUsage = await render(costPayload([costNode({ hasUsage: false, cost: 0, byModel: {} })]))
+  assert.match(textOf(noUsage), /cost\.empty\.steps/, 'a Step without usage is not a point on the chart')
+
+  const unpriced = await render(costPayload([costNode({ cost: 0, unpriced: true, unknownModel: true, byModel: { 'reseller-model': { buckets: { uncachedInput: 1e6, cacheRead: 0, cacheWrite: 0, output: 1e6 }, cost: 0 } } })]))
+  assert.match(textOf(unpriced), /cost\.empty\.rates/)
+
+  const failed = await render({ ok: false, error: 'unknown-session' })
+  const errorText = textOf(failed)
+  assert.match(errorText, /cost\.empty\.error/)
+  assert.match(errorText, /unknown-session/)
+  assert.match(errorText, /—/, 'a failed read leads with a dash, not a zero total')
+  assert.doesNotMatch(errorText, /¥0\.00/)
+  const retry = find(failed, (element) => element.type === 'button' && element.props?.className === 'dshb_btn')[0]
+  assert.ok(retry !== undefined, 'a failed read offers a retry')
+  const refetches = []
+  const second = stubCostFetch(costPayload([costNode()]), { calls: refetches })
+  try {
+    await retry.props.onClick()
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    assert.ok(refetches.some((url) => url.startsWith('/dsh-balance/session-cost')), 'the retry re-reads the series')
+  } finally {
+    second()
+  }
+  react.stop()
+})
+
+test('the chart data helpers decimate, clip and band without a DOM', async () => {
+  const { exported } = await loadClient()
+  const {
+    buildPlot, clipThreshold, decimatePoints, linearScale, metricOf, bandRanges, turnSeparators,
+    seriesWindow, seriesSummary, seriesState, plotTicks, shareOf, bucketLine,
+  } = exported.__internals
+
+  assert.equal(clipThreshold([0, 0, 0]), null, 'nothing positive means nothing to clip')
+  const steady = Array.from({ length: 20 }, () => 1)
+  assert.equal(clipThreshold([...steady, 1000]), 10, 'a spike above ten times the p95 is clipped')
+  assert.equal(clipThreshold([...steady, 5]), 10, 'a spike inside ten times the p95 is not')
+
+  const points = Array.from({ length: 10_000 }, (_, index) => ({ x: index / 100, y: index % 7 }))
+  const { bars, marks } = decimatePoints(points, 100)
+  assert.equal(bars.length, 100, 'one bar per pixel column, not one per Step')
+  assert.deepEqual({ min: bars[0].min, max: bars[0].max }, { min: 0, max: 6 }, 'the bar keeps the column extent')
+  assert.equal(marks.length, 100, 'the newest point of every column is the marker')
+
+  const scale = linearScale(0, 10, 0, 100)
+  assert.equal(scale(5), 50)
+  assert.equal(linearScale(3, 3, 0, 100)(3), 0, 'a flat domain collapses instead of dividing by zero')
+
+  const nodes = [
+    costNode(),
+    costNode({ turn: 1, step: 2, tStart: NOW - HOUR, tEnd: NOW - HOUR + MINUTE, cost: 1, buckets: { uncachedInput: 10, cacheRead: 0, cacheWrite: 0, output: 0 } }),
+    costNode({ turn: 2, step: 1, tStart: NOW - MINUTE, tEnd: NOW, cost: 100, unpriced: true }),
+  ]
+  assert.equal(metricOf(nodes[1], 'cost'), 1)
+  assert.equal(metricOf(nodes[1], 'tokens'), 10)
+  assert.equal(metricOf(nodes[0], 'output'), 1e6)
+  const { fromMs, toMs } = seriesWindow(nodes)
+  assert.equal(fromMs, nodes[0].tStart)
+  assert.equal(toMs, nodes[2].tEnd)
+
+  const plot = buildPlot(nodes, { width: 300, height: 100, clip: false })
+  assert.equal(plot.points.length, 3)
+  assert.deepEqual(plot.points.map((point) => point.x > 0), [false, true, true], 'time is the x axis by default')
+  assert.equal(plot.threshold, null, 'clipping off means no threshold')
+  assert.ok(plot.points.every((point) => point.y >= 0 && point.y <= 100), 'every point stays inside the plot')
+  assert.deepEqual(buildPlot(nodes, { width: 300, height: 100, axis: 'index' }).points.map((point) => point.x), [0, 150, 300])
+
+  // A long session with one outlier: the percentile has enough samples to sit low.
+  const long = [
+    ...Array.from({ length: 40 }, (_, index) => costNode({ turn: 1, step: index + 1, tStart: NOW - (40 - index) * MINUTE, tEnd: NOW - (39 - index) * MINUTE, cost: 1 })),
+    costNode({ turn: 2, step: 1, tStart: NOW, tEnd: NOW + MINUTE, cost: 1000 }),
+  ]
+  const clipped = buildPlot(long, { width: 300, height: 100, clip: true })
+  assert.equal(clipped.points.at(-1).clipped, true, 'the outlier is clipped')
+  assert.ok(clipped.threshold < 1000)
+  assert.equal(buildPlot(long, { width: 300, height: 100, clip: false }).points.at(-1).clipped, false)
+
+  const bands = bandRanges([{ startMs: fromMs - HOUR, endMs: fromMs + HOUR }], fromMs, toMs)
+  assert.equal(bands.length, 1)
+  assert.ok(bands[0].from === 0 && bands[0].to > 0 && bands[0].to < 1, 'a window is clipped to the range')
+  assert.deepEqual(bandRanges([{ startMs: fromMs - 2 * HOUR, endMs: fromMs - HOUR }], fromMs, toMs), [])
+  assert.deepEqual(turnSeparators(nodes, fromMs, toMs).map((separator) => separator.turn), [1, 2])
+  assert.equal(plotTicks(fromMs, toMs).length, 5)
+
+  const summary = seriesSummary(nodes)
+  assert.equal(summary.total, 111)
+  assert.equal(summary.steps, 3)
+  assert.deepEqual(summary.unpriced, ['deepseek-flash'], 'the model of an unpriced Step is named')
+  assert.equal(seriesState('ok', costPayload(nodes), nodes, summary), 'ok')
+  assert.equal(seriesState('ok', costPayload([]), [], seriesSummary([])), 'empty-steps')
+  assert.equal(seriesState('error', null, nodes, summary), 'error')
+  assert.equal(SeriesStateNoRates(seriesState, seriesSummary), 'empty-rates')
+  assert.equal(shareOf(5, 10), '50%')
+  assert.equal(shareOf(1, 0), '0%')
+  assert.match(bucketLine(nodes[0].buckets), /1000000 in/)
+})
+
+/** The no-rates state: tokens were reported, but no rate applies to them. */
+function SeriesStateNoRates(seriesState, seriesSummary) {
+  const node = costNode({ cost: 0, unpriced: true })
+  return seriesState('ok', costPayload([node]), [node], seriesSummary([node]))
+}
+
+test('the inspector explains a Step and offers the jump only for a tool call', async () => {
+  const { exported, react } = await loadClient()
+  const Inspector = exported.__internals.CostInspector
+  const props = {
+    t: (key) => key,
+    node: costNode(),
+    currency: 'CNY',
+    total: 10,
+    peakIntervals: costPayload([]).peakIntervals,
+  }
+  react.beginRender()
+  const tree = react.createElement(Inspector, props)
+  const text = textOf(tree)
+  assert.match(text, /cost\.inspector\.title/)
+  assert.match(text, /deepseek-flash/, 'the model is named on the title line')
+  assert.doesNotMatch(text, /cost\.inspector\.model/, 'the model no longer takes a row of its own')
+  assert.match(text, /cost\.column\.cost/, 'the cost column of the token table')
+  assert.match(text, /cost\.bucket\.in/)
+  assert.match(text, /cost\.bucket\.cacheWrite/)
+  // Transposed: one row per bucket, one column per figure.
+  const cells = find(tree, (element) => element.type === 'td').map((cell) => textOf(cell))
+  assert.deepEqual(cells.slice(0, 3), ['cost.bucket.in', '1000000', '¥2.00'])
+  assert.deepEqual(cells.slice(3, 6), ['cost.bucket.out', '1000000', '¥8.00'])
+  assert.deepEqual(cells.slice(6, 9), ['cost.bucket.cacheRead', '0', '¥0.00'])
+  assert.deepEqual(cells.slice(9, 12), ['cost.bucket.cacheWrite', '0', '¥0.00'])
+  assert.deepEqual(cells.slice(12, 15), ['cost.bucket.total', '2000000', '¥10.00'], 'the last row is the Step total')
+  assert.match(text, /cost\.inspector\.noCalls/)
+  assert.match(text, /cost\.inspector\.noFocus/, 'an assistant-only Step has no focus target')
+  assert.equal(find(tree, (element) => element.type === 'button' && element.children.join('') === 'cost.inspector.focus').length, 0)
+  assert.match(text, /cost\.inspector\.noPrompt/, 'the prompt is not loaded until the reader asks')
+  assert.equal(find(tree, (element) => element.type === 'button' && element.children.join('') === 'cost.inspector.loadOlder').length, 1)
+
+  const opened = []
+  const loaded = []
+  react.beginRender()
+  const withCall = react.createElement(Inspector, {
+    ...props,
+    node: costNode({ calls: [{ name: 'bash', callId: 'call-1', preview: 'ls -la' }] }),
+    inspectCall: (callId) => opened.push(callId),
+    loadOlder: async () => {
+      loaded.push(true)
+      return true
+    },
+  })
+  const focus = find(withCall, (element) => element.type === 'button' && element.children.join('') === 'cost.inspector.focus')[0]
+  assert.ok(focus !== undefined, 'a Step with a tool call offers the Trajectory jump')
+  focus.props.onClick()
+  assert.deepEqual(opened, ['call-1'])
+  const older = find(withCall, (element) => element.type === 'button' && element.children.join('') === 'cost.inspector.loadOlder')[0]
+  assert.ok(older !== undefined, 'the prompt is behind an explicit action')
+  await older.props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(loaded, [true])
+  react.stop()
+})
+
+//#endregion
+
+test('the tooltip stays inside the plot at every edge', async () => {
+  const { exported } = await loadClient()
+  const { tooltipPlacement } = exported.__internals
+  const box = { width: 300, height: 200, tipWidth: 160, tipHeight: 70 }
+
+  const left = tooltipPlacement({ x: 2, y: 100 }, box)
+  assert.equal(left.left, 88, 'a point at the left edge keeps half the tooltip inside')
+  assert.equal(left.transform, 'translate(-50%, -108%)')
+
+  const right = tooltipPlacement({ x: 298, y: 100 }, box)
+  assert.equal(right.left, 212, 'and the same at the right edge')
+  assert.ok(right.left + box.tipWidth / 2 <= box.width, 'the tooltip never pokes out')
+
+  const top = tooltipPlacement({ x: 150, y: 4 }, box)
+  assert.match(top.transform, /translate\(-50%, 14px\)/, 'with no room above, the tooltip drops below the point')
+  assert.equal(top.left, 150, 'a middle point stays centred')
+
+  const narrow = tooltipPlacement({ x: 40, y: 100 }, { width: 60, height: 100, tipWidth: 160, tipHeight: 70 })
+  assert.ok(narrow.left >= 0, 'a tooltip wider than the plot is still pinned inside it')
+  const empty = tooltipPlacement({ x: 0, y: 0 }, {})
+  assert.equal(empty.left, 98, 'a missing plot size falls back to the default tooltip width')
+})
+
+test('per-Step costs keep their decimals instead of rounding to 0.00', async () => {
+  const { exported, react } = await loadClient()
+  const { costDigits, costText } = exported.__internals
+  assert.equal(costDigits(0.318674), 2, 'a session total keeps the familiar two decimals')
+  assert.equal(costText(0.318674, 'USD'), '$0.32')
+  assert.equal(costText(0.0421, 'USD'), '$0.042', 'tens of cents show three')
+  assert.equal(costText(0.001234, 'USD'), '$0.0012', 'a step below a cent shows four')
+  assert.equal(costText(0.0000123, 'CNY'), '¥0.00001', 'and a really small one shows five')
+  assert.equal(costDigits(0), 2)
+  assert.equal(costDigits(Number.NaN), 2)
+  assert.equal(costText(null, 'USD'), '—', 'an absent figure stays a dash')
+
+  // The inspector is where a single Step's cost is read.
+  react.beginRender()
+  const tree = react.createElement(exported.__internals.CostInspector, {
+    t: (key) => key,
+    node: costNode({ cost: 0.001234, costByBucket: { uncachedInput: 0.001234, cacheRead: 0, cacheWrite: 0, output: 0 } }),
+    currency: 'USD',
+    total: 0.318674,
+    peakIntervals: [],
+  })
+  assert.match(textOf(tree), /\$0\.0012/, 'the inspector does not round a Step away')
+  react.stop()
+})
+
+
+test('the vertical scale is rounded, labelled and metric-aware', async () => {
+  const { exported } = await loadClient()
+  const { valueAxis, compactNumber, tickLabel } = exported.__internals
+
+  const axis = valueAxis(0.318674)
+  assert.equal(axis.max, 0.4, 'the scale rounds up to a readable step')
+  assert.equal(axis.ticks.length, 5)
+  assert.deepEqual(axis.ticks.map((tick) => tick.fraction), [0, 0.25, 0.5, 0.75, 1])
+  assert.deepEqual(axis.ticks.map((tick) => Number(tick.value.toFixed(6))), [0, 0.1, 0.2, 0.3, 0.4])
+  assert.ok(axis.max >= 0.318674, 'nothing is cut off by the rounding')
+
+  assert.equal(valueAxis(10).max, 10, 'an exact step is not inflated')
+  assert.equal(valueAxis(0.0132).max, 0.02)
+  assert.equal(valueAxis(0).max, 1, 'an empty series still has a scale')
+  assert.equal(valueAxis(Number.NaN).max, 1)
+
+  assert.equal(compactNumber(1_234_567), '1.2M')
+  assert.equal(compactNumber(12_340_000), '12M')
+  assert.equal(compactNumber(2345), '2.3k')
+  assert.equal(compactNumber(42), '42')
+  assert.equal(tickLabel(0.005, 'cost', 'USD'), '$0.0050', 'a money tick keeps its cents')
+  assert.equal(tickLabel(2000, 'tokens', 'USD'), '2.0k', 'a token tick is compact')
+})
+
+test('the tooltip names the model beside the Step, not on its own line', async () => {
+  const { exported } = await loadClient()
+  const { tooltipLines } = exported.__internals
+  const lines = tooltipLines(costNode({ cost: 0.0049, buckets: { uncachedInput: 156, cacheRead: 184960, cacheWrite: 0, output: 7224 } }), {
+    t: (key, params) => (key === 'cost.tip.turn' ? `Turn ${params.turn} · Step ${params.step}` : key),
+    currency: 'USD',
+    total: 0.35,
+    intervals: [],
+  })
+  assert.equal(lines.length, 4, 'the tooltip is four lines')
+  assert.equal(lines[0], 'Turn 1 · Step 1 · deepseek-flash', 'the model shares the Step line')
+  assert.match(lines[1], /^\d{2}:\d{2} · cost\.tip\.phase\.off-peak$/, 'the time and the tariff phase share one line')
+  assert.equal(lines[2], '156 in · 7224 out · 184960 cache read · 0 cache write', 'input and output first, then the caches')
+  assert.match(lines[3], /^\$0\.0049 · cost\.tip\.share$/)
+  assert.ok(!lines.some((line) => line === 'deepseek-flash'), 'the model never takes a line of its own')
+
+  const unnamed = tooltipLines(costNode({ byModel: {} }), { t: (key, params) => (key === 'cost.tip.turn' ? `Turn ${params.turn} · Step ${params.step}` : key) })
+  assert.equal(unnamed[0], 'Turn 1 · Step 1', 'a Step without a priced model keeps a clean head')
+})
+
+
+test('the cost column of the inspector adds up to its total', async () => {
+  const { exported, react } = await loadClient()
+  const { costColumnDigits, costCell } = exported.__internals
+  assert.equal(costColumnDigits([0.000175, 0.001101, 0, 0.002056, 0.003332]), 6, 'a sub-cent value forces the host resolution')
+  assert.equal(costColumnDigits([2, 8, 0, 0, 10]), 2, 'a column of whole cents keeps two decimals')
+  assert.equal(costCell(0.000175, 'USD', 6), '$0.000175')
+  assert.equal(costCell(0, 'USD', 6), '$0.000000', 'every cell of the column prints the same digits')
+  assert.equal(costCell(2, 'USD', 2), '$2.00')
+
+  const costByBucket = { uncachedInput: 0.000175, cacheRead: 0.001101, cacheWrite: 0, output: 0.002056 }
+  const total = 0.003332
+  react.beginRender()
+  const tree = react.createElement(exported.__internals.CostInspector, {
+    t: (key) => key,
+    node: costNode({ cost: total, costByBucket }),
+    currency: 'USD',
+    total: 0.42,
+    peakIntervals: [],
+  })
+  // Every row prints the same number of decimals, and the column adds up.
+  const rows = find(tree, (element) => element.type === 'tr').slice(1)
+  const money = rows.map((row) => textOf(find(row, (element) => element.type === 'td')[2]))
+  assert.deepEqual(money, ['$0.000175', '$0.002056', '$0.001101', '$0.000000', '$0.003332'], 'in, out, cache read, cache write, then the total')
+  const decimals = money.map((cell) => cell.split('.')[1].length)
+  assert.deepEqual([...new Set(decimals)], [6], 'the same number of digits after the point')
+  const numbers = money.map((cell) => Number(cell.replace('$', '')))
+  assert.equal(Number(numbers.slice(0, 4).reduce((sum, value) => sum + value, 0).toFixed(6)), numbers[4], 'the bucket costs add up to the printed total')
+  assert.equal(numbers[4], total)
+  assert.equal(textOf(rows[0]), 'cost.bucket.in 1000000 $0.000175', 'a row reads bucket, tokens, cost')
+  assert.equal(textOf(rows[4]).startsWith('cost.bucket.total 2000000'), true, 'the total row sums the tokens too')
+  react.stop()
 })

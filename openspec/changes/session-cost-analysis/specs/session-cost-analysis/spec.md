@@ -39,11 +39,12 @@ same nodes so that a Step is counted exactly once. Cost MUST be computed when th
 the series is built, from the Tariff rule snapshot, and rounding MUST happen only when the
 value is presented.
 
-#### Scenario: A Step switches model
+#### Scenario: A restated usage report
 
-- **WHEN** one `(Turn, Step)` node reports usage first for one model and then for another
-- **THEN** the node keeps both reports, each priced at its own event time, and the node cost
-  is their sum
+- **WHEN** a second usage report arrives for the same `(Turn, Step)` node without an
+  intervening retry
+- **THEN** it replaces the node's earlier report, and the node cost counts the newer report
+  only, each priced at its own event time
 
 #### Scenario: A retried attempt
 
@@ -113,8 +114,9 @@ by the request — and the route MUST NOT enumerate or read any other session.
 ### Requirement: Series and Tariff rule payload
 
 The series response SHALL be self-describing: each node carries `turn`, `step`, start and end
-time, the token buckets split per model, the retry count, its tool calls (name, call id, and a
-single-line argument preview of at most 60 characters) and its flags; the response also carries
+time, the token buckets split per model, the retry count, its tool calls (name, call id, and an
+argument preview of up to three lines and at most 200 characters, with escaped
+newlines decoded) and its flags; the response also carries
 the rates with their effective dates, the absolute peak intervals covering the series, the
 holidays, the Tariff rule source and verification date, the currency and the `seq` the series
 was built from.
