@@ -23,7 +23,7 @@ test('the projection is registered under its own key with client-visible fields'
   assert.equal(unit.key, SESSION_COST_KEY)
   assert.equal(typeof unit.stateSchema.parse, 'function')
   assert.equal(typeof unit.wire.viewSchema.parse, 'function')
-  assert.equal(unit.stateVersion, 4)
+  assert.equal(unit.stateVersion, 5)
 })
 
 test('a peak-window session is priced at peak rates', () => {
@@ -125,7 +125,13 @@ test('the series keeps one node per step, with its calls and its interval', () =
     { turn: 1, step: 1, tStart: time, tEnd: time + 2000, ended: true },
   )
   assert.equal(nodes[0].cost, 10)
-  assert.deepEqual(nodes[0].calls, [{ name: 'bash', callId: 'call-1', preview: '{"command":"ls -la\n--all"}' }])
+  assert.deepEqual(nodes[0].calls, [{
+    name: 'bash',
+    callId: 'call-1',
+    preview: '{"command":"ls -la\n--all"}',
+    time: time + 1000,
+    seq: 4,
+  }], 'the export can cite the call by instant and log sequence')
   assert.equal(unit.wire.view(state).steps, 1)
 })
 
@@ -140,6 +146,14 @@ test('a retry keeps the evicted attempt on the node but out of the money', () =>
   const [node] = seriesPayload(state, { currency: 'CNY' })
   assert.equal(node.retries, 1)
   assert.deepEqual(node.evicted.map((report) => report.buckets.uncachedInput), [1e6])
+  // The export shows what the lost attempt would have cost, priced by the Host like
+  // any other attempt, and never adds it to a total (D28).
+  assert.equal(node.reports[0].seq, 4, 'every report keeps the sequence and instant it came from')
+  assert.equal(node.reports[0].cost, 4, "the surviving attempt is the one that is billed")
+  assert.equal(node.evicted[0].cost, 2, 'the peak rate that was in force')
+  assert.equal(node.evicted[0].offPeak.cost, 1, 'and the off-peak counterfactual')
+  assert.equal(node.evicted[0].peak.cost, 2)
+  assert.ok(Number.isInteger(node.evicted[0].seq))
   assert.equal(node.cost, 4, 'the surviving attempt only')
   assert.equal(unit.wire.view(state).cost, 4)
   assert.equal(node.unpriced, false)

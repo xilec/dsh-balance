@@ -169,6 +169,13 @@ the day overrides, the settings and the last client contact.
   spawning Step and offers to read the subtree on a `Subagents` tab under the
   chart, but the child's cost is never folded into the session estimate: the
   header stays that one session's on both tabs.
+* **The history export is a file you keep.** The Cost view can assemble the
+  session's history as one ordered NDJSON stream and download it — `costs` by
+  default (usage, money, tool names and call ids), `full` on request (also the
+  message, tool and thinking text, each text field cut at 2000 characters and
+  flagged `truncated`), with the subtree folded in only when it is asked for.
+  Reading a subtree reads those sessions' logs; the file is written by the
+  browser, never into the workspace or `$DSH_HOME`.
 * **A top-up hides the spend inside the same sampling gap.** With 1–2 top-ups a
   month and a five-minute cadence this is negligible; the credit list shows every
   event so a suspicious day can be corrected.

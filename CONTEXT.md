@@ -82,3 +82,10 @@ _Avoid_: badge, subagent chip.
 A session together with every session below it. Its total is the sum of the child
 lines and of nothing else, so it never moves the session's own headline number.
 _Avoid_: whole tree, full history.
+
+**History export**:
+One ordered NDJSON stream of a session's own records — usage and money per report,
+retries, tool calls, and at the `full` level its words — with the subtree merged in
+only when it is asked for. Assembled by the view from the Host's priced routes and
+downloaded by the browser; never written into the workspace or `$DSH_HOME`.
+_Avoid_: dump, log export, session download.

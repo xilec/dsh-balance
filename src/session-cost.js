@@ -73,6 +73,8 @@ const reportSchema = z.object({
   model: z.string(),
   time: z.number(),
   buckets: bucketsSchema,
+  /** Log sequence of the event that reported it; the export orders and cites by it. */
+  seq: z.number().int().nonnegative().optional(),
 })
 
 /** One tool call inside a Step, with the short argument preview the view shows. */
@@ -80,6 +82,9 @@ const callSchema = z.object({
   name: z.string(),
   callId: z.string(),
   preview: z.string(),
+  /** Instant and log sequence of the call event; the export cites both. */
+  time: z.number().optional(),
+  seq: z.number().int().nonnegative().optional(),
 })
 
 /**
@@ -94,6 +99,8 @@ const spawnSchema = z.object({
   label: z.string(),
   createdAt: z.number(),
   time: z.number(),
+  /** Log sequence of the catalog fact; the export cites the spawn by it. */
+  seq: z.number().int().nonnegative().optional(),
 })
 
 /**
@@ -377,7 +384,7 @@ export function makeSessionCostProjection(getConfig) {
     const last = node.slotOpen && node.reports.length > 0 ? node.reports[node.reports.length - 1] : null
     if (last !== null && last.model === priced && sameBuckets(last.buckets, buckets)) return state
 
-    const report = { model: priced, time, buckets }
+    const report = { model: priced, time, buckets, seq: typeof event.seq === 'number' ? event.seq : 0 }
     let next = opened
     let reports = node.reports
     if (last !== null) {
@@ -425,7 +432,13 @@ export function makeSessionCostProjection(getConfig) {
       ...opened,
       pending: {
         ...node,
-        calls: [...node.calls, { name: String(name ?? ''), callId: String(callId ?? ''), preview: previewOf(args) }],
+        calls: [...node.calls, {
+          name: String(name ?? ''),
+          callId: String(callId ?? ''),
+          preview: previewOf(args),
+          time,
+          seq: typeof event.seq === 'number' ? event.seq : 0,
+        }],
       },
     }
   }
@@ -453,6 +466,7 @@ export function makeSessionCostProjection(getConfig) {
         label: typeof label === 'string' ? label : '',
         createdAt: typeof childCreatedAt === 'number' && Number.isFinite(childCreatedAt) ? childCreatedAt : time,
         time,
+        seq: typeof event.seq === 'number' ? event.seq : 0,
       }],
     }
   }
@@ -569,7 +583,7 @@ export function makeSessionCostProjection(getConfig) {
 
   return {
     key: SESSION_COST_KEY,
-    stateVersion: 4,
+    stateVersion: 5,
     stateSchema,
     init,
     apply,
@@ -634,6 +648,18 @@ export function seriesPayload(state, options = {}) {
   const nodes = seriesNodes(state)
   const spawns = attachSpawns(nodes, state.spawns ?? [])
   return nodes.map((node, index) => describeNode(node, { ...options, children: spawns[index] }))
+}
+
+/**
+ * Round the money of one priced report, the way a printed row is rounded (D5).
+ *
+ * @param buckets - the priced buckets of one report.
+ * @returns the same keys, each rounded.
+ */
+function roundBuckets(buckets) {
+  const rounded = {}
+  for (const key of BUCKET_KEYS) rounded[key] = round6(buckets[key])
+  return rounded
 }
 
 /**
@@ -723,6 +749,40 @@ function rateFor(report, options, fallback, phase) {
 
 function describeNode(node, options) {
   const resolve = typeof options.fallback === 'function' ? options.fallback : () => options.fallback
+  /**
+   * Price one report under the three projections.
+   *
+   * A live report and an attempt a retry evicted are priced the same way, so the
+   * export can show what the lost attempt would have cost without the client ever
+   * touching a rate (D28, D45).
+   */
+  const projectionsOf = (report) => {
+    const fallback = resolve(report.model)
+    const rate = rateFor(report, options, fallback, 'fact')
+    const costs = {}
+    for (const projection of TARIFF_PROJECTIONS) {
+      const priced = pricedReport(report, rateFor(report, options, fallback, projection))
+      costs[projection] = {
+        cost: round6(priced?.cost ?? 0),
+        costByBucket: priced === null ? zero() : roundBuckets(priced.buckets),
+      }
+    }
+    return { rate, costs }
+  }
+  /** One report as the export reads it: its own instant, sequence and money (D45). */
+  const pricedReportRecord = (report) => {
+    const { costs } = projectionsOf(report)
+    return {
+      model: report.model,
+      time: report.time,
+      buckets: report.buckets,
+      seq: report.seq ?? 0,
+      cost: costs.fact.cost,
+      costByBucket: costs.fact.costByBucket,
+      offPeak: { cost: costs.offPeak.cost, costByBucket: costs.offPeak.costByBucket },
+      peak: { cost: costs.peak.cost, costByBucket: costs.peak.costByBucket },
+    }
+  }
   const byModel = {}
   let buckets = zero()
   let unpriced = false
@@ -762,7 +822,8 @@ function describeNode(node, options) {
     hasUsage: node.hasUsage,
     interrupted: node.interrupted,
     retries: node.retries,
-    evicted: node.evicted.map((report) => ({ model: report.model, time: report.time, buckets: report.buckets })),
+    evicted: node.evicted.map(pricedReportRecord),
+    reports: node.reports.map(pricedReportRecord),
     calls: node.calls,
     /** Subagents spawned by this Step; empty on every other Step. */
     children: options.children ?? [],

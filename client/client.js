@@ -210,6 +210,8 @@ window.__ModuleLoader__.load({
         '.dshb_cost_turn_alt{background:rgba(128,128,128,.07)}',
         '.dshb_cost_turnLabel{position:absolute;top:0;left:3px;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-layer-1,rgba(0,0,0,0));',
         'font-size:9px;line-height:12px;padding:0 2px;border-radius:2px;white-space:nowrap}',
+        '.dshb_export{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;max-width:1120px}',
+        '.dshb_export_check{display:inline-flex;align-items:center;gap:4px;color:var(--dsw-alias-label-tertiary);font-size:11.5px}',
         '.dshb_cost_tabs{display:flex;gap:2px;width:100%;max-width:1120px;box-sizing:border-box;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.25))}',
         '.dshb_cost_tab{background:transparent;border:0;border-bottom:2px solid transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;font:var(--dsw-font-xxs-12);padding:3px 10px}',
         '.dshb_cost_tab:hover{color:var(--dsw-alias-label-primary)}',
@@ -367,6 +369,16 @@ window.__ModuleLoader__.load({
         'cost.session.copy': 'copy id',
         'cost.session.copied': 'copied',
         'cost.session.id': 'session {id}',
+        'cost.export.title': 'Export',
+        'cost.export.detail': 'detail',
+        'cost.export.detail.costs': 'costs',
+        'cost.export.detail.full': 'full',
+        'cost.export.subagents': 'include subagents',
+        'cost.export.download': 'Download NDJSON',
+        'cost.export.busy': 'Reading…',
+        'cost.export.done': 'downloaded',
+        'cost.export.failed': 'export failed: {error}',
+        'cost.export.warn': 'a full export carries message, tool and thinking text, cut at 2000 characters; it is a plain file you keep, not a trace sent anywhere',
         'cost.tab.session': 'Session',
         'cost.tab.subagents': 'Subagents ({count})',
         'cost.tab.subagentsCount': 'Subagents',
@@ -566,6 +578,16 @@ window.__ModuleLoader__.load({
         'cost.session.copy': 'копировать id',
         'cost.session.copied': 'скопировано',
         'cost.session.id': 'сессия {id}',
+        'cost.export.title': 'Экспорт',
+        'cost.export.detail': 'детализация',
+        'cost.export.detail.costs': 'затраты',
+        'cost.export.detail.full': 'полная',
+        'cost.export.subagents': 'включить субагентов',
+        'cost.export.download': 'Скачать NDJSON',
+        'cost.export.busy': 'Читаю…',
+        'cost.export.done': 'скачано',
+        'cost.export.failed': 'экспорт не удался: {error}',
+        'cost.export.warn': 'полный экспорт содержит текст сообщений, вызовов и рассуждений, обрезанный на 2000 символах; это обычный файл у вас, а не отправленная куда-то трасса',
         'cost.tab.session': 'Сессия',
         'cost.tab.subagents': 'Субагенты ({count})',
         'cost.tab.subagentsCount': 'Субагенты',
@@ -2147,6 +2169,240 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** The money precision every figure in the view and the export is printed at. */
+    function round6(value) {
+      return Math.round(value * 1e6) / 1e6
+    }
+
+    /** What one session's own Steps cost together, as the settle record reports it. */
+    function childCostOf(payload) {
+      return (payload?.nodes ?? []).reduce(
+        (total, node) => total + (typeof node.cost === 'number' ? node.cost : (node.reports ?? []).reduce((sum, report) => sum + (report.cost ?? 0), 0)),
+        0,
+      )
+    }
+
+    /** The two levels of detail the export offers, `costs` first: it is the default. */
+    const EXPORT_DETAILS = Object.freeze(['costs', 'full'])
+    /** Text longer than this is cut and flagged, at the `full` level only (D31). */
+    const EXPORT_TEXT_LIMIT = 2000
+    /** One text field as the export writes it: cut at the limit, and said so. */
+    function truncateText(value) {
+      const text = typeof value === 'string' ? value : ''
+      if (text.length <= EXPORT_TEXT_LIMIT) return { text, truncated: false }
+      return { text: text.slice(0, EXPORT_TEXT_LIMIT), truncated: true }
+    }
+
+    /**
+     * The download name of one export (D29).
+     *
+     * Local time, because the reader is the one reading the clock: the file is a
+     * note to themselves, not a record of an instant in a log.
+     */
+    function exportFileName(sessionId, at) {
+      const date = at instanceof Date ? at : new Date(at ?? Date.now())
+      const pad = (value) => String(value).padStart(2, '0')
+      const stamp = `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}`
+      // Every id the harness mints starts with "session-": the prefix says nothing
+      // about which session this is, so the name drops it before taking 8 characters.
+      const raw = typeof sessionId === 'string' && sessionId !== '' ? sessionId : 'unknown'
+      const id = raw.replace(/^session-/, '')
+      return `dsh-balance-${id.slice(0, 8)}-${stamp}.cost-history.ndjson`
+    }
+
+    /**
+     * Assemble the export stream (D45).
+     *
+     * The builder is a pure function of what the routes returned, so the whole
+     * stream is a unit test and the Host stays the only place that prices anything.
+     * Records are ordered by `t` and then `seq` — a merged parent/child stream is
+     * linear by construction and can be split again by `session` and `depth` — and
+     * `i` is stamped only after ordering, because it is the position in the file.
+     *
+     * @param input - the session, its series payload, its optional text records and
+     *   its optional children (`{ id, depth, payload, text }`), plus the detail level.
+     * @returns one NDJSON document, newline-terminated.
+     */
+    function costHistory({ sessionId, title, version, detail = 'costs', payload, text = [], children = [] }) {
+      const level = EXPORT_DETAILS.includes(detail) ? detail : 'costs'
+      const full = level === 'full'
+      const nodes = Array.isArray(payload?.nodes) ? payload.nodes : []
+      const currency = payload?.currency ?? ''
+      const records = []
+      const push = (record) => records.push(record)
+
+      /**
+       * Every record of one session, whether it is the exported one or a child.
+       *
+       * `seqOf` keeps the source sequence where the log gave one; the projection
+       * stamps it on reports and calls, and a synthesized record falls back to the
+       * Step it belongs to rather than inventing a number.
+       */
+      const addSession = (id, depth, series, words) => {
+        const own = Array.isArray(series?.nodes) ? series.nodes : []
+        const callsInText = new Set(words.filter((record) => record.type === 'tool_call').map((record) => record.callId))
+        for (const node of own) {
+          const at = (value) => (typeof value === 'number' ? value : node.tStart)
+          for (const report of node.reports ?? []) {
+            push({
+              type: 'usage',
+              session: id,
+              depth,
+              seq: report.seq ?? 0,
+              t: at(report.time),
+              turn: node.turn,
+              step: node.step,
+              model: report.model,
+              tokens: report.buckets,
+              cost: {
+                fact: report.cost ?? 0,
+                offPeak: report.offPeak?.cost ?? 0,
+                peak: report.peak?.cost ?? 0,
+              },
+            })
+          }
+          for (const lost of node.evicted ?? []) {
+            push({
+              type: 'retry',
+              session: id,
+              depth,
+              seq: lost.seq ?? 0,
+              t: at(lost.time),
+              turn: node.turn,
+              step: node.step,
+              model: lost.model,
+              tokens: lost.buckets,
+              cost: {
+                fact: lost.cost ?? 0,
+                offPeak: lost.offPeak?.cost ?? 0,
+                peak: lost.peak?.cost ?? 0,
+              },
+              billed: false,
+            })
+          }
+          // The call list of the projection carries the name, the id and the short
+          // preview; the `full` level takes the call from the log instead, where the
+          // whole argument string lives — one record per call, never both.
+          if (!full || callsInText.size === 0) {
+            for (const call of node.calls ?? []) {
+              push({
+                type: 'tool_call',
+                session: id,
+                depth,
+                seq: call.seq ?? 0,
+                t: at(call.time),
+                turn: node.turn,
+                step: node.step,
+                name: call.name,
+                callId: call.callId,
+              })
+            }
+          }
+        }
+        for (const word of words) {
+          const t = typeof word.t === 'number' ? word.t : null
+          const base = { session: id, depth, seq: word.seq ?? 0, t, turn: word.turn, step: word.step }
+          // The text field is named by what it holds — `text` for a message or a
+          // result, `arguments` for a call — and the cut is flagged beside it.
+          if (word.type === 'tool_call') {
+            const cut = truncateText(word.arguments)
+            push({ ...base, type: 'tool_call', name: word.name, callId: word.callId, arguments: cut.text, truncated: cut.truncated })
+          } else if (word.type === 'tool_result') {
+            const cut = truncateText(word.text)
+            push({ ...base, type: 'tool_result', callId: word.callId ?? '', isError: word.isError === true, text: cut.text, truncated: cut.truncated })
+          } else {
+            const cut = truncateText(word.text)
+            push({ ...base, type: word.type, text: cut.text, truncated: cut.truncated })
+          }
+        }
+      }
+
+      addSession(sessionId, 0, payload, full ? text : [])
+      const spawnTimes = new Map()
+      for (const node of nodes) {
+        for (const child of node.children ?? []) {
+          spawnTimes.set(child.id, {
+            t: typeof child.createdAt === 'number' ? child.createdAt : node.tStart,
+            turn: node.turn,
+            step: node.step,
+            mode: child.mode,
+            label: child.label,
+            seq: typeof child.seq === 'number' ? child.seq : null,
+          })
+        }
+      }
+      for (const child of children) {
+        const spawn = spawnTimes.get(child.id) ?? {
+          t: child.payload?.nodes?.[0]?.tStart ?? null,
+          turn: null,
+          step: null,
+          mode: child.mode ?? 'unknown',
+          label: child.label ?? '',
+          seq: null,
+        }
+        const own = Array.isArray(child.payload?.nodes) ? child.payload.nodes : []
+        const start = own[0]
+        const end = own[own.length - 1]
+        push({
+          type: 'subagent_spawn',
+          session: sessionId,
+          depth: Math.max(0, (child.depth ?? 1) - 1),
+          seq: spawn.seq,
+          t: spawn.t,
+          turn: spawn.turn,
+          step: spawn.step,
+          child: child.id,
+          mode: spawn.mode,
+          label: spawn.label,
+        })
+        addSession(child.id, child.depth ?? 1, child.payload, full ? (child.text ?? []) : [])
+        push({
+          type: 'subagent_settle',
+          session: sessionId,
+          depth: Math.max(0, (child.depth ?? 1) - 1),
+          // Synthesized by the builder: there is no log event to cite.
+          seq: null,
+          t: end?.tEnd ?? end?.tStart ?? spawn.t,
+          turn: end?.turn ?? null,
+          step: end?.step ?? null,
+          child: child.id,
+          // Money is printed at six decimals everywhere else; a settle that summed
+          // rounded rows must not add a float tail of its own.
+          cost: round6(child.payload ? childCostOf(child.payload) : 0),
+          currency,
+        })
+      }
+
+      const ordered = records
+        .map((record, index) => ({ record, index }))
+        .sort((a, b) => {
+          const at = a.record.t ?? Number.MAX_SAFE_INTEGER
+          const bt = b.record.t ?? Number.MAX_SAFE_INTEGER
+          if (at !== bt) return at - bt
+          if ((a.record.seq ?? 0) !== (b.record.seq ?? 0)) return (a.record.seq ?? 0) - (b.record.seq ?? 0)
+          return a.index - b.index
+        })
+        .map(({ record }) => record)
+
+      const meta = {
+        type: 'meta',
+        session: sessionId,
+        depth: 0,
+        seq: payload?.seq ?? 0,
+        t: nodes[0]?.tStart ?? null,
+        plugin: version ?? null,
+        title: title ?? '',
+        currency,
+        detail: level,
+        models: [...new Set(nodes.flatMap((node) => (node.reports ?? []).map((report) => report.model)))],
+        rule: payload?.rule ?? null,
+        projections: ['fact', 'offPeak', 'peak'],
+        subagents: children.length > 0,
+      }
+      const stream = [meta, ...ordered]
+      return `${stream.map((record, i) => JSON.stringify({ i, ...record })).join('\n')}\n`
+    }
+
     /**
      * Open another session on its Cost view.
      *
@@ -2200,6 +2456,55 @@ window.__ModuleLoader__.load({
       const payload = await response.json()
       if (payload?.ok === false) throw new Error(payload.error ?? 'subtree-failed')
       return payload
+    }
+
+    /**
+     * The series of any session, priced by the Host.
+     *
+     * The view reads its own session through its hook; the export needs a foreign
+     * session's series when the reader asked to include the subtree, and it is the
+     * same route and the same pricing (D25, D45).
+     */
+    async function readSeries(sessionId) {
+      const response = await fetch(`/dsh-balance/session-cost?sessionId=${encodeURIComponent(sessionId)}`, {
+        cache: 'no-store',
+        headers: { accept: 'application/json' },
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const payload = await response.json()
+      if (payload?.ok === false) throw new Error(payload.error ?? 'series-failed')
+      return payload
+    }
+
+    /** The words of one session, for the `full` level of the export (D46). */
+    async function readText(sessionId) {
+      const response = await fetch(`/dsh-balance/session-cost/text?sessionId=${encodeURIComponent(sessionId)}`, {
+        cache: 'no-store',
+        headers: { accept: 'application/json' },
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const payload = await response.json()
+      if (payload?.ok === false) throw new Error(payload.error ?? 'text-failed')
+      return Array.isArray(payload.records) ? payload.records : []
+    }
+
+    /**
+     * Hand the assembled stream to the browser as a download.
+     *
+     * Nothing is written to the workspace or the harness home: the file goes where
+     * the browser puts downloads, and the reader moves it (D11).
+     */
+    function saveTextFile(name, text) {
+      if (typeof document === 'undefined' || typeof Blob === 'undefined') return false
+      const url = URL.createObjectURL(new Blob([text], { type: 'application/x-ndjson' }))
+      const link = document.createElement('a')
+      link.href = url
+      link.download = name
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 0)
+      return true
     }
 
     /**
@@ -2336,6 +2641,9 @@ window.__ModuleLoader__.load({
        */
       const [subtree, setSubtree] = react.useState({ status: 'idle', lines: [], total: null, diagnostics: [], full: false, error: null })
       const [copied, setCopied] = react.useState(false)
+      const [exportDetail, setExportDetail] = react.useState('costs')
+      const [exportSubagents, setExportSubagents] = react.useState(false)
+      const [exportState, setExportState] = react.useState({ status: 'idle', error: null })
       const spawns = allNodes.reduce((count, node) => count + (Array.isArray(node.children) ? node.children.length : 0), 0)
       const groups = stepGroups(allNodes, subtree.lines)
       const currency = payload?.currency ?? live?.currency ?? 'USD'
@@ -2383,6 +2691,48 @@ window.__ModuleLoader__.load({
       const saveRates = async (next) => {
         await store.saveSettings({ fallbackRates: next })
         series.retry()
+      }
+
+      /**
+       * Assemble and download the history export.
+       *
+       * The stream is built here from what the routes return (D45): the session's
+       * own series, its words at the `full` level, and — when the reader asked for
+       * them — every session below it, read through the same routes the subtree
+       * panel uses. Nothing is written anywhere but the browser's download (D11).
+       */
+      const runExport = async () => {
+        setExportState({ status: 'busy', error: null })
+        try {
+          const detail = exportDetail
+          const full = detail === 'full'
+          const childLines = exportSubagents ? (await readSubtree(sessionId, true)).children ?? [] : []
+          const children = []
+          for (const line of childLines) {
+            const childPayload = await readSeries(line.id)
+            children.push({
+              id: line.id,
+              depth: line.depth,
+              label: line.label,
+              mode: line.mode,
+              payload: childPayload,
+              text: full ? await readText(line.id) : [],
+            })
+          }
+          const stream = costHistory({
+            sessionId,
+            title: payload?.title ?? '',
+            version: VERSION,
+            detail,
+            payload,
+            text: full ? await readText(sessionId) : [],
+            children,
+          })
+          saveTextFile(exportFileName(sessionId, new Date()), stream)
+          setExportState({ status: 'done', error: null })
+        } catch (error) {
+          setExportState({ status: 'error', error: error instanceof Error ? error.message : String(error) })
+        }
       }
 
       /**
@@ -2592,6 +2942,17 @@ window.__ModuleLoader__.load({
           onSelect: select,
         }),
         note,
+        h(CostExport, {
+          key: 'export',
+          t,
+          detail: exportDetail,
+          subagents: exportSubagents,
+          spawns,
+          state: exportState,
+          onDetail: setExportDetail,
+          onSubagents: setExportSubagents,
+          onRun: runExport,
+        }),
         // The tabs switch what the panes below the chart describe. The subtree is a
         // tab of its own, never a row of the session's total (D25), and the strip
         // only appears when the session actually spawned something.
@@ -2693,6 +3054,52 @@ window.__ModuleLoader__.load({
           className: option.value === value ? 'dshb_seg dshb_seg_on' : 'dshb_seg',
           onClick: () => onSelect(option.value),
         }, option.label)),
+      ])
+    }
+
+    /**
+     * The export line: the detail level, whether to fold in the subtree, and the
+     * download itself.
+     *
+     * The warning is not a dialog but a line that appears with the `full` level, so
+     * the reader sees what a `full` export carries before pressing the button that
+     * produces it (D31). Subagents are a separate choice because reading them reads
+     * other sessions (D23).
+     */
+    function CostExport({ t, detail, subagents, spawns, state, onDetail, onSubagents, onRun }) {
+      const busy = state.status === 'busy'
+      return h('div', { className: 'dshb_export' }, [
+        h('span', { className: 'dshb_cost_sub', key: 'title' }, t('cost.export.title')),
+        h(Segmented, {
+          key: 'detail',
+          label: t('cost.export.detail'),
+          value: detail,
+          onSelect: onDetail,
+          options: EXPORT_DETAILS.map((value) => ({ value, label: t(`cost.export.detail.${value}`) })),
+        }),
+        spawns > 0
+          ? h('label', { className: 'dshb_export_check', key: 'subagents' }, [
+            h('input', {
+              key: 'box',
+              type: 'checkbox',
+              checked: subagents,
+              onChange: (event) => onSubagents(event.target.checked === true),
+            }),
+            ' ',
+            t('cost.export.subagents'),
+          ])
+          : null,
+        h('button', {
+          key: 'run',
+          className: 'dshb_btn',
+          disabled: busy,
+          onClick: () => { void onRun() },
+        }, busy ? t('cost.export.busy') : t('cost.export.download')),
+        state.status === 'done' ? h('span', { className: 'dshb_cost_sub', key: 'done' }, t('cost.export.done')) : null,
+        state.status === 'error' ? h('span', { className: 'dshb_flag', key: 'failed' }, t('cost.export.failed', { error: state.error ?? '' })) : null,
+        detail === 'full'
+          ? h('span', { className: 'dshb_flag', key: 'warn' }, t('cost.export.warn'))
+          : null,
       ])
     }
 
@@ -3485,6 +3892,7 @@ window.__ModuleLoader__.load({
       costColumnDigits, costCell, indexTicks, projectionOf, Segmented, RateEntry, rateDraftOf,
       TopK, topRows, visibleSlice, sumBuckets, zoomWindow, panWindow, clampWindow, isFullWindow, turnSpans,
       arrowDelta, nextSelection, subtreeOf, stepGroups, Subagents, SubagentOpen, openSessionCost, preferCostView,
+      costHistory, exportFileName, truncateText, EXPORT_DETAILS, CostExport, saveTextFile, readSeries, readText,
       valueAxis, compactNumber, tickLabel, tooltipLines,
     }
     return module.exports

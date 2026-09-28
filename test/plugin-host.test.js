@@ -59,7 +59,11 @@ function hostContext(options = {}) {
     ['sessions', { get: (id) => options.sessionOf?.(id) }],
   ])
   if (options.readSession !== undefined) {
-    services.set('sessionQuery', { readSession: (id) => options.readSession(id) })
+    services.set('sessionQuery', {
+      readSession: (id) => options.readSession(id),
+      // A title is optional in the payload, so the stub offers only what a test asked for.
+      ...(options.readTitle === undefined ? {} : { readTitle: (id) => options.readTitle(id) }),
+    })
   }
   if (options.subagents !== undefined) services.set('subagents', options.subagents)
   const effects = []
@@ -124,7 +128,7 @@ test('the plugin registers its routes and its projection unit', async () => {
   await withPlugin(async ({ ctx, module }) => {
     assert.deepEqual(
       [...ctx.routes.keys()].sort(),
-      ['/dsh-balance', '/dsh-balance/hello', '/dsh-balance/overrides', '/dsh-balance/refresh', '/dsh-balance/session-cost', '/dsh-balance/session-cost/children', '/dsh-balance/settings'],
+      ['/dsh-balance', '/dsh-balance/hello', '/dsh-balance/overrides', '/dsh-balance/refresh', '/dsh-balance/session-cost', '/dsh-balance/session-cost/children', '/dsh-balance/session-cost/text', '/dsh-balance/settings'],
     )
     assert.equal(ctx.projections.length, 1)
     assert.equal(ctx.projections[0].key, 'dshBalanceCost')
@@ -412,6 +416,7 @@ test('the session-cost route serves one session series with the rule it priced b
     assert.equal(payload.rule.rates.at(-1).rates.flash.cacheMiss, 2)
     assert.ok(payload.rule.rates.every((entry) => Number.isFinite(entry.effectiveFrom)), 'every rate table carries its effective date')
     assert.ok(payload.peakIntervals.length >= 1, 'the peak window covering the series travels with it')
+    assert.equal(payload.title, 'Cost of the last week', 'the series names the session it belongs to')
     assert.deepEqual(payload.prefs, {}, 'and the saved view choices ride along, empty by default')
   }, {
     sessionOf: (id) => {
@@ -419,6 +424,12 @@ test('the session-cost route serves one session series with the rule it priced b
       return sessions.get(id)
     },
     projectionState: (session, key) => (key === 'dshBalanceCost' ? states.get(session.id) : undefined),
+    // The stored read knows one session and refuses the rest, like the real query.
+    readSession: async (id) => {
+      if (id !== 'session-1') throw new Error('no such session')
+      return { session: {}, inheritedEventCount: 0, events: [] }
+    },
+    readTitle: async (id) => (id === 'session-1' ? { title: 'Cost of the last week', eventSeq: 3 } : undefined),
   })
 })
 
@@ -699,5 +710,49 @@ test('a child folded from its stored log is billed for its own work only', async
   }, {
     sessionOf: () => undefined,
     readSession: async (id) => ({ session: { id }, inheritedEventCount: 4, events }),
+  })
+})
+
+test('the text route serves one session’s words and skips the inherited prefix', async () => {
+  const time = Date.UTC(2026, 8, 24, 3, 0)
+  const events = [
+    { seq: 1, time, type: 'user/message', data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'the parent’s question' }] } } },
+    { seq: 2, time: time + 1, type: 'step/start', data: { turn: 1, step: 1 } },
+    { seq: 3, time: time + 2, type: 'user/message', data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'the child’s own question' }] } } },
+    {
+      seq: 4,
+      time: time + 3,
+      type: 'assistant/message',
+      data: {
+        turn: 1, step: 1, message: { content: [{ type: 'reasoning', text: 'think' }, { type: 'text', text: 'answer' }] },
+      },
+    },
+  ]
+  await withPlugin(async ({ ctx }) => {
+    const missing = response()
+    await ctx.routes.get('/dsh-balance/session-cost/text')(request('GET', '/dsh-balance/session-cost/text'), missing)
+    assert.equal(missing.status, 400, 'the route refuses to guess a session')
+
+    const res = response()
+    await ctx.routes.get('/dsh-balance/session-cost/text')(request('GET', '/dsh-balance/session-cost/text?sessionId=child-1'), res)
+    const payload = JSON.parse(res.body)
+    assert.equal(payload.ok, true, res.body)
+    assert.deepEqual(payload.records.map((record) => [record.seq, record.type]), [
+      [3, 'user_message'],
+      [4, 'assistant_message'],
+      [4, 'assistant_thinking'],
+    ], 'the parent’s seeded turn is not quoted')
+    assert.equal(payload.records[0].text, 'the child’s own question')
+    assert.equal(payload.records[1].text, 'answer')
+
+    const unreadable = response()
+    await ctx.routes.get('/dsh-balance/session-cost/text')(request('GET', '/dsh-balance/session-cost/text?sessionId=gone'), unreadable)
+    assert.equal(JSON.parse(unreadable.body).ok, false, 'a log that cannot be read is an error, not an empty export')
+  }, {
+    sessionOf: () => undefined,
+    readSession: async (id) => {
+      if (id === 'gone') throw new Error('no such session')
+      return { session: { id }, inheritedEventCount: 2, events }
+    },
   })
 })

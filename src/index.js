@@ -20,6 +20,7 @@
 import Schema from '@deepseek-ai/schemastery'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { buildLedger, calibrationOf } from './history.js'
+import { textRecordsOf } from './export-text.js'
 import {
   OFF_PEAK_RATIO, PUBLIC_HOLIDAYS_2026, RULE_SOURCE_URL, RULE_VERIFIED_ON,
   nextChange, peakIntervalsBetween, peakSchedule, peakState, phaseAt, priceAt, rateSchedule,
@@ -581,11 +582,61 @@ export function apply(ctx, config) {
          * `null` when the samples cannot express it (D27).
          */
         calibration: calibrationOf({ samples, fromMs, toMs, currency }),
+        /**
+         * The session's own title, so the export can name what it is a history of.
+         * A session without one reports an empty title, never a fabricated one.
+         */
+        title: await sessionTitleOf(sessionId),
         /** The view choices this reader saved, so the view opens as they left it. */
         prefs: browserPrefs(),
       }
     } catch (error) {
       warn(`cannot read the session series: ${message(error)}`)
+      return { ok: false, error: message(error) }
+    }
+  }
+
+  /**
+   * The title of one session, or `''` when it has none.
+   *
+   * A title is a nicety of the series payload (the export names its subject with
+   * it), so a query service that is absent or cannot fold one is not an error: the
+   * figures stand on their own.
+   */
+  const sessionTitleOf = async (sessionId) => {
+    const query = ctx.get('sessionQuery')
+    if (query?.readTitle === undefined) return ''
+    try {
+      const snapshot = await query.readTitle(sessionId)
+      return typeof snapshot?.title === 'string' ? snapshot.title : ''
+    } catch {
+      return ''
+    }
+  }
+
+  /**
+   * The text of one session's log, for the export's `full` level.
+   *
+   * The cost projection holds usage and not messages (D20), so the words come from
+   * the log itself — read here, normalized, and never truncated: the client owns
+   * the 2000-character rule, which keeps one place responsible for the payload
+   * (D45, D46). Nothing is written anywhere; the client downloads what it gets.
+   *
+   * @param sessionId - the session whose text records are requested.
+   * @returns `{ ok, records }`, or an error when the log cannot be read.
+   */
+  const textPayloadOf = async (sessionId) => {
+    const query = ctx.get('sessionQuery')
+    if (query === undefined) return { ok: false, error: 'query-unavailable' }
+    try {
+      const snapshot = await query.readSession(sessionId)
+      return {
+        ok: true,
+        sessionId,
+        records: textRecordsOf(snapshot.events, snapshot.inheritedEventCount ?? 0),
+      }
+    } catch (error) {
+      warn(`cannot read the session text: ${message(error)}`)
       return { ok: false, error: message(error) }
     }
   }
@@ -895,6 +946,29 @@ export function apply(ctx, config) {
         }
       },
     }), 'dsh-balance: session cost children route')
+
+    // The text route. It exists for the export's `full` level alone (D46): the cost
+    // projection holds no messages, so the words come from the session log, and only
+    // when the reader asks for them.
+    webCtx.effect(() => webCtx.webServer.register({
+      kind: 'exact',
+      path: '/dsh-balance/session-cost/text',
+      async handler(req, res) {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          res.writeHead(405, { Allow: 'GET, HEAD' })
+          res.end()
+          return
+        }
+        const url = new URL(req.url ?? '/dsh-balance/session-cost/text', 'http://127.0.0.1')
+        const sessionId = url.searchParams.get('sessionId') ?? ''
+        if (sessionId === '') {
+          sendJson(res, 400, { ok: false, error: 'sessionId is required' })
+          return
+        }
+        if (!loaded) await ready
+        sendJson(res, 200, await textPayloadOf(sessionId))
+      },
+    }), 'dsh-balance: session cost text route')
 
     postRoute('/dsh-balance/hello', 'dsh-balance: client hello route', async (body, res) => {
       const mount = body.phase === 'mount'

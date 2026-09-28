@@ -2032,3 +2032,90 @@ test('a subagent group head carries an aggregate, never a copy of its only line'
   assert.equal(textOf(heads[2]).includes('¥0.00'), false, 'an unread group shows no figure at all')
   react.stop()
 })
+
+test('the export line offers the two levels, warns on full and folds subagents in on request', async () => {
+  const { exported, react } = await loadClient()
+  const nodes = [{
+    ...costNode(),
+    reports: [{ model: 'deepseek-flash', time: NOW, buckets: { uncachedInput: 1e6, cacheRead: 0, cacheWrite: 0, output: 0 }, seq: 5, cost: 2, offPeak: { cost: 1 }, peak: { cost: 2 } }],
+    children: [{ id: 'child-1', mode: 'one-shot', label: 'Read one page', createdAt: NOW, seq: 9 }],
+  }]
+  const asked = []
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const target = String(url)
+    asked.push(target)
+    if (target.includes('/session-cost/children')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, full: true, children: [{ id: 'child-1', depth: 1, mode: 'one-shot', label: 'Read one page', cost: 1 }], diagnostics: [], total: { cost: 1 } }) }
+    }
+    if (target.includes('/session-cost/text')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, records: [{ seq: 2, t: NOW - 60, turn: 1, step: 1, type: 'user_message', text: 'why' }] }) }
+    }
+    if (target.includes('/session-cost')) {
+      return { ok: true, status: 200, json: async () => costPayload(nodes) }
+    }
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  const saved = []
+  const previousDocument = globalThis.document
+  const previousCreate = URL.createObjectURL
+  const previousRevoke = URL.revokeObjectURL
+  globalThis.document = { body: { appendChild: () => {} }, createElement: () => ({ click() { saved.push({ name: this.download, blob: this.href }) }, remove() {} }) }
+  URL.createObjectURL = (blob) => {
+    saved.push({ blob })
+    return 'blob:test'
+  }
+  URL.revokeObjectURL = () => {}
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => ({ seq: 5, currency: 'CNY' }) }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    let tree = react.createElement(exported.__internals.CostView, props)
+    let text = textOf(tree)
+    assert.match(text, /cost\.export\.title/, 'the export line is on screen')
+    assert.match(text, /cost\.export\.detail\.costs/)
+    assert.doesNotMatch(text, /cost\.export\.warn/, 'the default level carries no text and needs no warning')
+    assert.match(text, /cost\.export\.subagents/, 'and the subtree is an explicit choice')
+
+    const full = find(tree, (element) => element.type === 'button' && textOf(element) === 'cost.export.detail.full')[0]
+    full.props.onClick()
+    react.beginRender()
+    tree = react.createElement(exported.__internals.CostView, props)
+    text = textOf(tree)
+    assert.match(text, /cost\.export\.warn/, 'the full level says what it carries before the download')
+
+    const box = find(tree, (element) => element.type === 'input' && element.props?.type === 'checkbox')[0]
+    assert.ok(box !== undefined)
+    box.props.onChange({ target: { checked: true } })
+    react.beginRender()
+    tree = react.createElement(exported.__internals.CostView, props)
+    const run = find(tree, (element) => element.type === 'button' && textOf(element) === 'cost.export.download')[0]
+    run.props.onClick()
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    react.beginRender()
+    tree = react.createElement(exported.__internals.CostView, props)
+    assert.match(textOf(tree), /cost\.export\.done/)
+
+    const file = saved.find((entry) => entry.blob !== undefined)
+    assert.ok(file !== undefined, 'the browser is handed the file')
+    assert.match(file.blob.type, /ndjson/)
+    const stream = await file.blob.text()
+    const records = stream.trimEnd().split('\n').map((line) => JSON.parse(line))
+    assert.equal(records[0].type, 'meta')
+    assert.equal(records[0].detail, 'full')
+    assert.ok(records.some((record) => record.type === 'user_message'), 'the words are in')
+    assert.ok(records.some((record) => record.type === 'subagent_spawn' && record.child === 'child-1'), 'the child was folded in')
+    assert.ok(records.some((record) => record.session === 'child-1'), 'with its own records')
+    assert.ok(asked.some((url) => url.includes('children?sessionId=session-7&full=1')), 'the whole subtree is read for the export')
+    assert.ok(asked.some((url) => url.includes('/session-cost/text?sessionId=child-1')), 'and a child’s words are read from the log')
+    react.stop()
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDocument === undefined) delete globalThis.document
+    else globalThis.document = previousDocument
+    URL.createObjectURL = previousCreate
+    URL.revokeObjectURL = previousRevoke
+  }
+})

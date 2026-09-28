@@ -301,7 +301,8 @@ rationale. Alternatives that were considered and rejected are named.
   owning every price. Ordering is by `t`, then by `seq`, with `meta` first, and `i` is stamped
   after ordering, so a merged parent/child stream is linear by construction and can be split again
   by `session`/`depth`. The vocabulary is fixed in the spec: `usage` per report (all three
-  projections), `retry` per evicted attempt, `tool_call`, the text records of the `full` level,
+  projections), `retry` per evicted attempt, `tool_call` (name and call id, plus the whole argument string at `full`), the text records of the
+  `full` level (`tool_result` also citing its call id and its failure flag),
   and `subagent_spawn`/`subagent_settle` around a child's records. Two facts had to reach the
   wire for this: the source sequence of a report, an evicted attempt and a tool call, and the
   priced buckets of an evicted attempt — hence `stateVersion: 5`, whose mismatch discards a
@@ -324,7 +325,7 @@ rationale. Alternatives that were considered and rejected are named.
   `dsh-session-reference` requires the user to mention the session, `/export` is a human
   command), which is exactly why "expand subtree" must read foreign sessions on the Host.
 - **D29 — Export file name.**
-  `dsh-balance-<session id first 8 chars>-<yyyymmdd-hhmm>.cost-history.ndjson`.
+  `dsh-balance-<first 8 chars of the session id, with a leading "session-" prefix dropped>-<yyyymmdd-hhmm>.cost-history.ndjson`.
 - **D31 — Two detail levels.** `costs` (default): no message or tool text. `full`: message, tool
   and thinking text, each text field truncated at 2000 characters and flagged `truncated: true`;
   `thinking` exists only at this level. The UI warns before downloading `full`.

@@ -384,7 +384,7 @@ steered through its stored preference.
 ### Requirement: Linear history export
 
 The view SHALL be able to export the session's history as one ordered NDJSON stream,
-`dsh-balance-<session id first 8 chars>-<yyyymmdd-hhmm>.cost-history.ndjson`, assembled by the
+`dsh-balance-<first 8 chars of the session id, with a leading "session-" prefix dropped>-<yyyymmdd-hhmm>.cost-history.ndjson`, assembled by the
 view and downloaded in the browser. The stream MUST begin with a `meta` record (plugin version,
 session id and title, models, currency, the Tariff rule snapshot with rates, holidays, rule
 source and date, the projection definitions, and the detail level) and every record MUST carry
@@ -402,9 +402,6 @@ MUST be merged into the same stream in time order and marked by spawn and settle
 `session` and `depth` allowing the streams to be split apart again. Text at the `full` level
 comes from the session log, because the projection holds usage and not messages.
 
-The export SHALL offer two detail levels: `costs` (default, no message or tool text) and `full`
-(message, tool and thinking text, each text field truncated at 2000 characters and flagged as
-truncated, with `thinking` present only at this level). The UI MUST warn before a `full` export.
 The plugin MUST NOT write the export anywhere on disk or in the workspace.
 
 #### Scenario: Default export
@@ -413,17 +410,23 @@ The plugin MUST NOT write the export anywhere on disk or in the workspace.
 - **THEN** a single NDJSON file with the described name is downloaded, containing the ordered
   record stream with costs and no message or tool text
 
-#### Scenario: Full export warns
-
-- **WHEN** the reader selects the `full` detail level
-- **THEN** a warning is shown before the download starts, and the resulting records carry text
-  truncated at 2000 characters with the truncation flagged
-
 #### Scenario: Subagents in one stream
 
 - **WHEN** the session has subagent sessions and they are included
 - **THEN** their records appear in the same stream at their own times, inside spawn and settle
   records, and nothing is written to the workspace or the harness home
+
+### Requirement: Export detail levels
+
+The export SHALL offer two detail levels: `costs` (default, no message or tool text) and `full`
+(message, tool and thinking text, each text field truncated at 2000 characters and flagged as
+truncated, with `thinking` present only at this level). The UI MUST warn before a `full` export.
+
+#### Scenario: Full export warns
+
+- **WHEN** the reader selects the `full` detail level
+- **THEN** a warning is shown before the download starts, and the resulting records carry text
+  truncated at 2000 characters with the truncation flagged
 
 ### Requirement: Empty and error states
 
