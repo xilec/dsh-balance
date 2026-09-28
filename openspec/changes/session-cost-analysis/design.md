@@ -153,13 +153,16 @@ rationale. Alternatives that were considered and rejected are named.
   `Load full history` survives only as the explicit action for a subagent subtree, where it
   means what it says: the first ask reads the direct children, and the action extends the walk
   to every session below rather than re-reading the same one.
-- **D13 — `loadOlder()` is called only on demand.** The chart needs the projection's step data,
-  not the conversation; older conversation events are loaded only when a point is clicked (for
-  the inspector's prompt preview or for the Trajectory jump). This is a deliberate deviation from
-  the issue's suggestion to page history in through the slot, and it is what keeps the first
-  render instant.
-- **D32 — No automatic prompt loading.** The inspector shows the prompt preview the projection
-  already has; otherwise it says "events not loaded" and offers an explicit `Load older` action.
+- **D13 — The session's words are read only on demand.** The chart needs the projection's step
+  data, not the conversation, and nothing pages history in through the slot: the first render
+  stays instant and a long session is never re-read behind the reader's back.
+- **D32 — The prompt comes from the words, not the projection.** The projection carries usage
+  and no messages, so the inspector's "the prompt is not loaded" state is real rather than
+  cosmetic: `Load older` reads the session's words once through the existing
+  `/dsh-balance/session-cost/text` route and keeps only the user messages in page memory
+  (`promptForNode`). The preview shown is the newest user message at or before the Step's own
+  start — the message that Step answered — and a Step before the first message honestly reports
+  that there is none.
 
 ### Rendering
 
@@ -360,8 +363,9 @@ Client `Slots` provider) and the shipped bundles while writing this design:
   exactly the "no focus target" case the inspector states for an assistant-only Step.
 - `loadOlder` is not handed to a view automatically: Trajectory builds its own loader in
   `inject` on top of the session binding
-  (`ctx.sessions.binding(sessionId).session.loadOlder()`, same file). The Cost view does the
-  same, and only on demand (D13, D32).
+  (`ctx.sessions.binding(sessionId).session.loadOlder()`, same file). The Cost view does not
+  page the conversation in at all — its prompt preview reads the session's words through the
+  plugin's own text route, once, on demand (D13, D32).
 - The projection unit contract is
   `{ key, stateVersion, stateSchema, init(header, inheritedEventCount), apply(state, event),
   wire: { viewSchema, view(state) } }` (`sessionProjections.register`). `apply` runs for every

@@ -6,7 +6,10 @@ const message = (blocks) => ({ content: blocks })
 
 const log = [
   { seq: 1, time: 1000, type: 'step/start', data: { turn: 1, step: 1 } },
-  { seq: 2, time: 1100, type: 'user/message', data: { turn: 1, step: 1, message: message([{ type: 'text', text: 'where did the money go?' }]) } },
+  // A user message carries the message itself, with no Turn or Step of its own;
+  // that is the shape the session log writes, and the reason the export leaves
+  // turn/step null on those records.
+  { seq: 2, time: 1100, type: 'user/message', data: message([{ type: 'text', text: 'where did the money go?' }]) },
   { seq: 3, time: 1200, type: 'tool/call', data: { turn: 1, step: 1, callId: 'call-1', name: 'bash', arguments: '{"command":"ls -la"}' } },
   { seq: 4, time: 1300, type: 'tool/result', data: { turn: 1, step: 1, message: { ...message([{ type: 'text', text: 'total 0' }]), toolCallId: 'call-1', isError: false } } },
   {
@@ -31,7 +34,9 @@ test('the text extractor normalizes the log into the export records', () => {
     [5, 'assistant_message'],
     [5, 'assistant_thinking'],
   ], 'every record keeps the log order and its own sequence')
-  assert.deepEqual(records[0], { seq: 2, t: 1100, turn: 1, step: 1, type: 'user_message', text: 'where did the money go?' })
+  assert.deepEqual(records[0], {
+    seq: 2, t: 1100, turn: null, step: null, type: 'user_message', text: 'where did the money go?',
+  }, 'a user message is not tied to a Turn or Step, and the export says so')
   assert.deepEqual(records[1], {
     seq: 3, t: 1200, turn: 1, step: 1, type: 'tool_call', name: 'bash', callId: 'call-1', arguments: '{"command":"ls -la"}',
   })

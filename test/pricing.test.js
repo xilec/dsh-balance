@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   BJT_OFFSET_MS, OFF_PEAK_RATIO, PUBLIC_HOLIDAYS_2026,
-  bjtFields, costOfTokens, isPeakInstant, modelClass, peakState, priceAt, ratesAt,
+  bjtFields, costOfTokens, isPeakInstant, modelClass, peakState, priceAt, ratesAt, windowsOfLocalDay,
 } from '../src/pricing.js'
 
 /** Epoch ms of a Beijing-time wall-clock instant. */
@@ -126,4 +126,29 @@ test('the shipped holiday list covers the published 2026 windows', () => {
   assert.equal(PUBLIC_HOLIDAYS_2026.includes('2026-09-25'), true)
   assert.equal(PUBLIC_HOLIDAYS_2026.includes('2026-10-07'), true)
   assert.equal(PUBLIC_HOLIDAYS_2026.length, 3 + 9 + 3 + 5 + 3 + 3 + 7)
+})
+
+test('the host’s own zone defines the local day, not UTC', () => {
+  const previous = process.env.TZ
+  try {
+    // 00:30 on a Saturday in Tokyo is still Friday in UTC: the day labels must
+    // follow the host's calendar, not the UTC one.
+    process.env.TZ = 'Asia/Tokyo'
+    const now = Date.UTC(2026, 8, 18, 15, 30)
+    assert.deepEqual(windowsOfLocalDay(now, [], 'local', 0), [], 'Saturday has no peak window')
+    assert.deepEqual(
+      windowsOfLocalDay(now, [], 'local', -1),
+      ['10:00–13:00', '15:00–19:00'],
+      'Friday, the day the host is still living in, is the one before it, labelled in Tokyo time',
+    )
+    assert.deepEqual(
+      windowsOfLocalDay(now, [], 'Asia/Tokyo', 0),
+      [],
+      'and naming the zone explicitly agrees that this day has no window',
+    )
+    process.env.TZ = 'UTC'
+  } finally {
+    if (previous === undefined) delete process.env.TZ
+    else process.env.TZ = previous
+  }
 })

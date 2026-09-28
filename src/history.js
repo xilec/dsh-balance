@@ -211,7 +211,7 @@ export function buildLedger(options) {
   const keys = recentDayKeys(todayKey, days)
 
   const sampled = new Map()
-  let coarseKeys = new Set()
+  const coarseKeys = new Set()
   for (const interval of intervals) {
     if (interval.spend <= 0) continue
     const fromKey = dayKeyOf(interval.from, zone)

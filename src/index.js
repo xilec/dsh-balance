@@ -23,7 +23,7 @@ import { buildLedger, calibrationOf } from './history.js'
 import { textRecordsOf } from './export-text.js'
 import {
   OFF_PEAK_RATIO, PUBLIC_HOLIDAYS_2026, RULE_SOURCE_URL, RULE_VERIFIED_ON,
-  nextChange, peakIntervalsBetween, peakSchedule, peakState, phaseAt, priceAt, rateSchedule,
+  nextChange, peakIntervalsBetween, peakSchedule, phaseAt, priceAt, rateSchedule,
   utcWindowsLabel, windowsOfLocalDay,
 } from './pricing.js'
 import { SESSION_COST_KEY, makeFallbackResolver, makeSessionCostProjection, seriesPayload, subtreeSummary } from './session-cost.js'
@@ -240,10 +240,8 @@ export function apply(ctx, config) {
       ])
       samples = stored
       if (state.overrides !== null && typeof state.overrides === 'object') overrides = state.overrides
-      if (anchorMissingOverrides()) {
-        await persist()
-        log('anchored the overrides that predate the balance anchor')
-      }
+      // Everything the file holds is taken into memory first: a write triggered
+      // below must never put back an empty identity or empty view choices.
       if (state.client !== null && typeof state.client === 'object') clientHello = { ...clientHello, ...state.client }
       const prefs = state.prefs ?? {}
       for (const [key, check] of Object.entries(MUTABLE_SETTINGS)) {
@@ -254,6 +252,10 @@ export function apply(ctx, config) {
       }
       for (const [key, check] of Object.entries(UI_SETTINGS)) {
         if (prefs[key] !== undefined && check(prefs[key])) uiPrefs[key] = prefs[key]
+      }
+      if (anchorMissingOverrides()) {
+        await persist()
+        log('anchored the overrides that predate the balance anchor')
       }
       log(`loaded ${samples.length} samples, ${Object.keys(overrides).length} overrides, ${Object.keys(uiPrefs).length} panel settings`)
     } catch (error) {
@@ -393,10 +395,14 @@ export function apply(ctx, config) {
     return inflight
   }
 
+  /** Set once the plugin is disposed: a tick in flight must not schedule another. */
+  let loopStopped = false
+
   const resetLoop = () => {
     if (loopTimer !== null) clearTimeout(loopTimer)
     const tick = () => {
       void refresh().then(() => {
+        if (loopStopped) return
         const delay = cache.error === 'api-key-missing' ? 30000 : runtime.refreshIntervalMs
         loopTimer = setTimeout(tick, delay)
       })
@@ -405,8 +411,10 @@ export function apply(ctx, config) {
   }
 
   ctx.effect(() => {
+    loopStopped = false
     resetLoop()
     return () => {
+      loopStopped = true
       if (loopTimer !== null) clearTimeout(loopTimer)
     }
   }, 'dsh-balance: balance sampling loop')
@@ -791,7 +799,6 @@ export function apply(ctx, config) {
     zone: runtime.dayZone,
     nowMs: Date.now(),
     days: runtime.historyDays,
-    keepDays: runtime.keepDays,
   })
 
   /**
@@ -984,6 +991,9 @@ export function apply(ctx, config) {
     }, { lenient: true })
 
     postRoute('/dsh-balance/overrides', 'dsh-balance: overrides route', async (body, res) => {
+        // The load owns the maps it restores, so a request that arrives while it is
+        // in flight must wait rather than edit a map that is about to be replaced.
+        if (!loaded) await ready
         const date = typeof body.date === 'string' ? body.date : ''
         if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
           sendJson(res, 400, { ok: false, error: 'date must be YYYY-MM-DD' })
@@ -1011,12 +1021,12 @@ export function apply(ctx, config) {
             },
           }
         }
-        if (!loaded) await ready
         await persist()
         sendJson(res, 200, { ok: true, overrides, ledger: ledgerPayload() })
     })
 
     postRoute('/dsh-balance/settings', 'dsh-balance: settings route', async (body, res) => {
+        if (!loaded) await ready
         const changed = []
         for (const [key, check] of Object.entries(MUTABLE_SETTINGS)) {
           if (body[key] === undefined) continue

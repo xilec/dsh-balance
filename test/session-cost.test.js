@@ -188,6 +188,14 @@ test('the series sums to the session total exactly', () => {
   assert.ok(Math.abs(total - unit.wire.view(state).cost) < 1e-9, 'Σ nodes equals the session estimate')
   assert.deepEqual(nodes[2].unpriced, true)
   assert.deepEqual(unit.wire.view(state).unpriced, ['reseller-model'])
+  // Unpriced tokens are counted and shown even though no rate applies to them: the
+  // session's token figures must not shrink to the priced part (D18).
+  assert.deepEqual(nodes[2].buckets, { uncachedInput: 4e5, cacheRead: 0, cacheWrite: 0, output: 4e5 }, 'the unpriced Step carries its tokens')
+  assert.deepEqual(
+    unit.wire.view(state).tokens,
+    { uncachedInput: 3e6 + 1e6 + 4e5, cacheRead: 0, cacheWrite: 0, output: 1e6 + 2e6 + 4e5 },
+    'and they are in the wire totals, while the tokens of the evicted attempt stay out',
+  )
 })
 
 test('the wire view carries the sequence and the step count, and no series', () => {
@@ -226,6 +234,7 @@ test('a node prices each token bucket, and the buckets add up to the Step', () =
   const unpriced = fold(projection(), sequenced(message(time, 1, 1, 1e6, 0, 1e6, 'reseller-model')))
   const [unpricedNode] = seriesPayload(unpriced, { currency: 'CNY' })
   assert.deepEqual(unpricedNode.costByBucket, { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0 }, 'an unpriced Step splits no money')
+  assert.deepEqual(unpricedNode.buckets, { uncachedInput: 1e6, cacheRead: 0, cacheWrite: 0, output: 1e6 }, 'but its tokens are still its own')
 })
 
 test('every Step carries the three Tariff projections', () => {
@@ -447,4 +456,68 @@ test('a forked child does not inherit its parent’s work or spawns', () => {
   const whole = events.reduce((state, event) => unit.apply(state, event), unit.init())
   assert.equal(whole.cost, 12)
   assert.equal(whole.spawns.length, 1)
+})
+
+test('a report for a Step the loop already left lands in that Step, not in a second one', () => {
+  const unit = projection()
+  const time = bjt(2026, 9, 24, 10, 0)
+  const state = fold(unit, sequenced([
+    ...message(time, 1, 1, 2e6, 0, 0),
+    { type: 'assistant/message', time: time + 1, data: { turn: 1, step: 1, usage: { inputTokens: 1e6, outputTokens: 0 } } },
+    { type: 'step/start', time: time + 2, data: { turn: 1, step: 2 } },
+    ...message(time + 3, 1, 1, 3e6, 0, 0),
+  ]))
+  const nodes = seriesPayload(unit.wire ? state : state, { currency: 'CNY' })
+  assert.deepEqual(nodes.map((node) => [node.turn, node.step]), [[1, 1], [1, 2]], 'the Step keeps one node, in its place')
+  assert.equal(nodes[0].cost, 6, 'and it counts the restated report only: 3M miss at 2 CNY')
+  assert.equal(nodes[0].reports.length, 1)
+  assert.equal(unit.wire.view(state).tokens.uncachedInput, 3e6, 'the restated tokens are not counted twice')
+  assert.equal(unit.wire.view(state).cost, 6)
+})
+
+test('a model switch inside one Step keeps both reports and both prices', () => {
+  const unit = projection()
+  const time = bjt(2026, 9, 24, 10, 0)
+  const state = fold(unit, sequenced([
+    ...message(time, 1, 1, 1e6, 0, 0, 'deepseek-flash'),
+    ...message(time + 1, 1, 1, 1e6, 0, 0, 'deepseek-pro'),
+  ]))
+  const [node] = seriesPayload(state, { currency: 'CNY' })
+  assert.deepEqual(node.reports.map((report) => report.model), ['deepseek-flash', 'deepseek-pro'], 'both models are kept')
+  assert.deepEqual(node.buckets, { uncachedInput: 2e6, cacheRead: 0, cacheWrite: 0, output: 0 }, 'and both sets of tokens')
+  assert.equal(node.cost, 11, '2 CNY for flash plus 9 CNY for pro, each at its own rate')
+  assert.deepEqual(Object.keys(unit.wire.view(state).costByModel).sort(), ['deepseek-flash', 'deepseek-pro'])
+})
+
+test('a call for a Step the loop already left joins that Step', () => {
+  const unit = projection()
+  const time = bjt(2026, 9, 24, 10, 0)
+  const state = fold(unit, sequenced([
+    ...message(time, 1, 1, 1e6, 0, 0),
+    { type: 'step/start', time: time + 1, data: { turn: 1, step: 2 } },
+    ...message(time + 2, 1, 2, 1e6, 0, 0),
+    { type: 'tool/call', time: time + 3, data: { turn: 1, step: 1, callId: 'call-late', name: 'bash', arguments: '{"command":"ls"}' } },
+  ]))
+  const nodes = seriesPayload(state, { currency: 'CNY' })
+  assert.deepEqual(nodes.map((node) => [node.turn, node.step]), [[1, 1], [1, 2]])
+  assert.deepEqual(nodes[0].calls.map((call) => call.callId), ['call-late'], 'the late call joined its own Step')
+  assert.equal(unit.wire.view(state).steps, 2, 'and no extra Step appeared')
+})
+
+test('an evicted attempt leaves no stale model in the wire view', () => {
+  const unit = projection()
+  const time = bjt(2026, 9, 24, 10, 0)
+  const state = fold(unit, sequenced([
+    { type: 'step/start', time, data: { turn: 1, step: 1 } },
+    { type: 'request/header', time, data: { header: { config: { model: 'reseller-model' } } } },
+    { type: 'assistant/message', time, data: { turn: 1, step: 1, usage: { inputTokens: 1e6, outputTokens: 0 } } },
+    { type: 'llm/retry-started', time: time + 1, data: { turn: 1, step: 1 } },
+  ]))
+  const view = unit.wire.view(state)
+  assert.deepEqual(view.tokens, { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0 }, 'the evicted tokens are gone')
+  assert.deepEqual(view.models, [], 'so the model that only ever had that attempt is gone too')
+  assert.deepEqual(view.unpriced, [], 'and it is not still announced as unpriced')
+  const [node] = seriesPayload(state, { currency: 'CNY' })
+  assert.equal(node.unpriced, false, 'the series agrees: there is nothing left to price')
+  assert.deepEqual(node.evicted.map((report) => report.model), ['reseller-model'], 'while the evicted attempt stays retrievable')
 })

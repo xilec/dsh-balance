@@ -10,6 +10,7 @@ const buckets = (uncachedInput, output, cacheRead = 0, cacheWrite = 0) => ({ unc
 
 export const SESSION_ID = 'session-17d677cb-628f-4cd3-aeb6-a3c50a84b19f'
 export const CHILD_ID = '392960ac-1111-2222-3333-444455556666'
+export const GRANDCHILD_ID = '77aa11bb-5555-6666-7777-888899990000'
 
 /** A long answer, so the fixture pins the 2000-character cut and its flag. */
 const LONG_ANSWER = `answer ${'x'.repeat(2100)}`
@@ -23,11 +24,16 @@ export const exportInput = () => ({
     sessionId: SESSION_ID,
     seq: 12,
     currency: 'CNY',
+    // The exact shape the series route serves, so the fixture's meta cannot drift
+    // from the wire it is supposed to record.
     rule: {
       sourceUrl: 'https://api-docs.deepseek.com/quick_start/pricing',
       verifiedOn: '2026-08-23',
-      holidays: ['2026-10-01'],
-      rates: [{ model: 'deepseek-flash', from: '2026-08-23', peak: { uncachedInput: 1, output: 9 } }],
+      holidays: ['2026-10-01', '2026-10-02'],
+      rates: [
+        { effectiveFrom: Date.UTC(2026, 7, 23), rates: { flash: { cacheHit: 0.07, cacheMiss: 0.44, output: 1.32 } } },
+        { effectiveFrom: Date.UTC(2026, 8, 8), rates: { flash: { cacheHit: 0.014, cacheMiss: 0.3, output: 1.2 } } },
+      ],
     },
     nodes: [
       {
@@ -98,6 +104,7 @@ export const exportInput = () => ({
   ],
   children: [{
     id: CHILD_ID,
+    parentId: SESSION_ID,
     depth: 1,
     label: 'Survey the tree',
     mode: 'continuable',
@@ -131,5 +138,43 @@ export const exportInput = () => ({
       }],
     },
     text: [{ seq: 4, t: 2900, turn: 1, step: 1, type: 'assistant_message', text: 'the tree is fine' }],
+  }, {
+    // A grandchild: its catalog fact lives in CHILD_ID's log, so its markers must
+    // name that session rather than the exported one.
+    id: GRANDCHILD_ID,
+    parentId: CHILD_ID,
+    depth: 2,
+    label: 'Peer deeper',
+    mode: 'one-shot',
+    payload: {
+      ok: true,
+      sessionId: GRANDCHILD_ID,
+      seq: 2,
+      currency: 'CNY',
+      nodes: [{
+        turn: 1,
+        step: 1,
+        tStart: 3100,
+        tEnd: 3300,
+        ended: true,
+        hasUsage: true,
+        interrupted: false,
+        retries: 0,
+        reports: [{
+          model: 'deepseek-flash',
+          time: 3200,
+          buckets: buckets(1e5, 0),
+          seq: 2,
+          cost: 0.1,
+          costByBucket: buckets(0.1, 0),
+          offPeak: { cost: 0.05, costByBucket: buckets(0.05, 0) },
+          peak: { cost: 0.1, costByBucket: buckets(0.1, 0) },
+        }],
+        evicted: [],
+        calls: [],
+        children: [],
+      }],
+    },
+    text: [],
   }],
 })

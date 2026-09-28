@@ -433,7 +433,16 @@ truncated, with `thinking` present only at this level). The UI MUST warn before 
 
 The view SHALL distinguish three states: the session has no Steps with usage yet; the session
 has tokens but no rates apply to them; reading the history failed. The first two states MUST
-explain themselves in place; the failed read MUST offer a retry.
+explain themselves in place; the failed read MUST offer a retry. While the series is still being
+read the view MUST say so with a spinner instead of showing one of those states: a long session
+takes a while to fold and price, and an empty-state message would be a lie until the answer
+arrives.
+
+#### Scenario: Slow read
+
+- **WHEN** the series of a long session is still being fetched
+- **THEN** the view shows a spinner and a "reading" label, and the empty or error state appears
+  only once the fetch has answered
 
 #### Scenario: No steps yet
 

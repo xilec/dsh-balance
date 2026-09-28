@@ -42,8 +42,9 @@ export const TARIFF_PROJECTIONS = Object.freeze(['fact', 'offPeak', 'peak'])
 /**
  * The peak rate of one model, from the config.
  *
- * A rate the reader entered for a model wins, whatever the model is; otherwise the
- * global `fallbackPrices` applies, which the Host hands over already gated by
+ * The rate table prices every model it knows by class. A model it does not know —
+ * one the reader entered a rate for, or a reseller name — is priced from the
+ * global `fallbackPrices`, which the Host hands over already gated by
  * `priceUnknownModels` (`undefined` when unknown models must stay unpriced).
  *
  * @param config - the live plugin config.
@@ -323,25 +324,32 @@ export function makeSessionCostProjection(getConfig) {
         ...state.byModel,
         [report.model]: { buckets: add(previous.buckets, report.buckets), cost: round6(previous.cost + cost) },
       }
-    } else if (entry !== undefined) {
+    }
+    let order = state.order
+    let unpriced = state.unpriced
+    if (sign < 0 && entry !== undefined) {
       const buckets = sub(entry.buckets, report.buckets)
       const next = round6(entry.cost - cost)
       if (next <= 0 && sameBuckets(buckets, zero())) {
+        // Nothing of this model is left: the model itself goes, so an evicted
+        // attempt cannot leave its model behind as priced or unpriced.
         const { [report.model]: _dropped, ...rest } = state.byModel
         byModel = rest
+        order = order.filter((model) => model !== report.model)
+        unpriced = unpriced.filter((model) => model !== report.model)
       } else {
         byModel = { ...state.byModel, [report.model]: { buckets, cost: next } }
       }
     }
-    const isNew = sign > 0 && entry === undefined && !state.order.includes(report.model)
-    const unpriced = priced === null && !state.unpriced.includes(report.model)
+    const isNew = sign > 0 && entry === undefined && !order.includes(report.model)
+    const isUnpriced = sign > 0 && priced === null && !unpriced.includes(report.model)
     return {
       ...state,
       totals: sign > 0 ? add(state.totals, report.buckets) : sub(state.totals, report.buckets),
       cost: round6(state.cost + sign * cost),
       byModel,
-      order: isNew ? [...state.order, report.model] : state.order,
-      unpriced: unpriced ? [...state.unpriced, report.model] : state.unpriced,
+      order: isNew ? [...order, report.model] : order,
+      unpriced: isUnpriced ? [...unpriced, report.model] : unpriced,
     }
   }
 
@@ -374,20 +382,81 @@ export function makeSessionCostProjection(getConfig) {
     return { ...state, ...committed, pending: blankNode(turn, step, time) }
   }
 
+  /**
+   * Find the committed node of one Step, or `null` when the series has none.
+   *
+   * A restated report or a late call can name a Step the loop has already left,
+   * and such an event belongs to that Step's own node rather than to a new one:
+   * a second node for the same `(turn, step)` would count the Step twice and put
+   * the series out of order.
+   */
+  const committedNodeOf = (state, turn, step) => {
+    const nodes = [...iterateChunkedList(state.series)]
+    const index = nodes.findIndex((node) => node.turn === turn && node.step === step)
+    return index === -1 ? null : { index, node: nodes[index], nodes }
+  }
+
+  /** The series with one committed node replaced where it sits. */
+  const replaceCommitted = (state, found, node) => {
+    const nodes = [...found.nodes]
+    nodes[found.index] = node
+    let series
+    for (const kept of nodes) series = appendChunkedList(series, kept)
+    return { ...state, series }
+  }
+
+  /**
+   * Fold a report into a Step the loop has left, in that Step's own node.
+   *
+   * The node keeps its place in the series, its aggregates are moved from the old
+   * report to the new one, and nothing about the pending node changes.
+   */
+  const restateCommitted = (state, found, report) => {
+    const node = found.node
+    const last = node.reports.length > 0 ? node.reports[node.reports.length - 1] : null
+    if (last !== null && last.model === report.model && sameBuckets(last.buckets, report.buckets)) return state
+    let shifted = state
+    let reports = node.reports
+    if (last !== null && last.model === report.model) {
+      shifted = shift(shifted, last, -1)
+      reports = [...node.reports.slice(0, -1), report]
+    } else {
+      reports = [...node.reports, report]
+    }
+    shifted = shift(shifted, report, 1)
+    return replaceCommitted(shifted, found, {
+      ...node,
+      reports,
+      tEnd: node.tEnd === null ? report.time : Math.max(node.tEnd, report.time),
+      hasUsage: true,
+    })
+  }
+
   /** Fold one usage report into its node and the aggregates. */
   const withReport = (state, event, usage, turn, step, model) => {
     const time = typeof event.time === 'number' ? event.time : Date.now()
     const buckets = bucketsOf(usage)
-    const priced = model ?? 'unknown'
+    const reportModel = model ?? 'unknown'
+    const report = { model: reportModel, time, buckets, seq: typeof event.seq === 'number' ? event.seq : 0 }
+    // The series is searched only for a Step the loop has already left: Steps open in
+    // order, so a Step newer than the pending one cannot be committed yet, and the
+    // ordinary step-by-step path stays free of the scan.
+    const pending = state.pending
+    const leftBehind = pending === null || turn < pending.turn || (turn === pending.turn && step < pending.step)
+    if (leftBehind && !(pending !== null && pending.turn === turn && pending.step === step)) {
+      const found = committedNodeOf(state, turn, step)
+      if (found !== null) return restateCommitted(state, found, report)
+    }
     const opened = openNode(state, turn, step, time)
     const node = opened.pending
     const last = node.slotOpen && node.reports.length > 0 ? node.reports[node.reports.length - 1] : null
-    if (last !== null && last.model === priced && sameBuckets(last.buckets, buckets)) return state
+    if (last !== null && last.model === reportModel && sameBuckets(last.buckets, buckets)) return state
 
-    const report = { model: priced, time, buckets, seq: typeof event.seq === 'number' ? event.seq : 0 }
     let next = opened
     let reports = node.reports
-    if (last !== null) {
+    // A restatement of the same model replaces that report; a different model is a
+    // report of its own, because a Step may hold several when the model switches.
+    if (last !== null && last.model === reportModel) {
       next = shift(next, last, -1)
       reports = [...node.reports.slice(0, -1), report]
     } else {
@@ -425,21 +494,30 @@ export function makeSessionCostProjection(getConfig) {
   const withCall = (state, event) => {
     const { turn, step, callId, name, arguments: args } = event.data
     const time = typeof event.time === 'number' ? event.time : Date.now()
+    const call = {
+      name: String(name ?? ''),
+      callId: String(callId ?? ''),
+      preview: previewOf(args),
+      time,
+      seq: typeof event.seq === 'number' ? event.seq : 0,
+    }
+    // A call that arrives after the loop left its Step belongs to that Step's node,
+    // exactly as a restated report does.
+    const pending = state.pending
+    const leftBehind = pending === null || turn < pending.turn || (turn === pending.turn && step < pending.step)
+    if (leftBehind && !(pending !== null && pending.turn === turn && pending.step === step)) {
+      const found = committedNodeOf(state, turn, step)
+      if (found !== null) {
+        if (found.node.calls.some((existing) => existing.callId === call.callId)) return state
+        return replaceCommitted(state, found, { ...found.node, calls: [...found.node.calls, call] })
+      }
+    }
     const opened = openNode(state, turn, step, time)
     const node = opened.pending
-    if (node.calls.some((call) => call.callId === callId)) return state
+    if (node.calls.some((existing) => existing.callId === callId)) return state
     return {
       ...opened,
-      pending: {
-        ...node,
-        calls: [...node.calls, {
-          name: String(name ?? ''),
-          callId: String(callId ?? ''),
-          preview: previewOf(args),
-          time,
-          seq: typeof event.seq === 'number' ? event.seq : 0,
-        }],
-      },
+      pending: { ...node, calls: [...node.calls, call] },
     }
   }
 
@@ -789,23 +867,20 @@ function describeNode(node, options) {
   let unknownModel = false
   const bucketCost = { fact: zero(), offPeak: zero(), peak: zero() }
   for (const report of node.reports) {
-    const fallback = resolve(report.model)
-    const rate = rateFor(report, options, fallback, 'fact')
-    if (rate === null) unpriced = true
-    if (modelClass(report.model) === null) unknownModel = true
-    buckets = add(buckets, report.buckets)
     // The table in the Cost view shows where the money went per bucket, and the
     // rate that priced the Step is the host's: the client never splits it itself.
     // Every projection is priced here for the same reason — the client only draws.
+    const { rate, costs } = projectionsOf(report)
+    if (rate === null) unpriced = true
+    if (modelClass(report.model) === null) unknownModel = true
+    buckets = add(buckets, report.buckets)
     for (const projection of TARIFF_PROJECTIONS) {
-      const projected = pricedReport(report, projection === 'fact' ? rate : rateFor(report, options, fallback, projection))
-      if (projected === null) continue
-      bucketCost[projection] = add(bucketCost[projection], projected.buckets)
+      bucketCost[projection] = add(bucketCost[projection], costs[projection].costByBucket)
     }
     const previous = byModel[report.model] ?? { buckets: zero(), cost: 0 }
     byModel[report.model] = {
       buckets: add(previous.buckets, report.buckets),
-      cost: round6(previous.cost + (pricedReport(report, rate)?.cost ?? 0)),
+      cost: round6(previous.cost + costs.fact.cost),
     }
   }
   const last = node.reports[node.reports.length - 1]

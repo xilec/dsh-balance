@@ -37,11 +37,38 @@ function reactStub() {
         }
       }
     },
+    /**
+     * Unmount the view the way the shell does when another conversation view takes
+     * over: hook state and effects go away, module-level memory does not.
+     */
+    unmount() {
+      while (cleanups.length > 0) {
+        try {
+          cleanups.pop()()
+        } catch {
+          /* already gone */
+        }
+      }
+      state.slots = {}
+      state.cursor = 0
+    },
     useRef(initial) {
       const index = state.cursor++
-      // The plugin only takes a ref to measure an element, so the stub hands it a
-      // stand-in with a readable offsetHeight.
-      if (!(index in state.slots)) state.slots[index] = { current: initial ?? { offsetHeight: 321 } }
+      // The plugin takes refs to measure elements and to attach the non-passive
+      // wheel listener, so the stub hands it a stand-in that can do both.
+      if (!(index in state.slots)) {
+        const target = {
+          offsetHeight: 321,
+          listeners: {},
+          addEventListener(type, fn) {
+            this.listeners[type] = [...(this.listeners[type] ?? []), fn]
+          },
+          removeEventListener(type, fn) {
+            this.listeners[type] = (this.listeners[type] ?? []).filter((each) => each !== fn)
+          },
+        }
+        state.slots[index] = { current: initial === null || initial === undefined ? target : initial }
+      }
       return state.slots[index]
     },
     useState(initial) {
@@ -826,6 +853,11 @@ test('the chart data helpers decimate, clip and band without a DOM', async () =>
   const steady = Array.from({ length: 20 }, () => 1)
   assert.equal(clipThreshold([...steady, 1000]), 10, 'a spike above ten times the p95 is clipped')
   assert.equal(clipThreshold([...steady, 5]), 10, 'a spike inside ten times the p95 is not')
+  assert.equal(
+    clipThreshold(Array.from({ length: 100 }, (_, index) => index + 1)),
+    950,
+    'the percentile is the 95th of a hundred values, not the 96th',
+  )
 
   const points = Array.from({ length: 10_000 }, (_, index) => ({ x: index / 100, y: index % 7 }))
   const { bars, marks } = decimatePoints(points, 100)
@@ -843,6 +875,19 @@ test('the chart data helpers decimate, clip and band without a DOM', async () =>
     costNode({ turn: 2, step: 1, tStart: NOW - MINUTE, tEnd: NOW, cost: 100, unpriced: true }),
   ]
   assert.equal(metricOf(nodes[1], 'cost'), 1)
+  // The canvas repaints only when the digest moves, so the digest has to move for
+  // everything the canvas draws — the clipping above all, which leaves the points
+  // themselves untouched.
+  const clippedPlot = buildPlot(nodes, { width: 300, height: 100, clip: true })
+  const unclippedPlot = buildPlot(nodes, { width: 300, height: 100, clip: false })
+  assert.notEqual(clippedPlot.threshold, null, 'the spike is clipped')
+  assert.equal(unclippedPlot.threshold, null, 'and the reader can take the clipping off')
+  assert.notEqual(clippedPlot.digest, unclippedPlot.digest, 'which is a repaint, not a no-op')
+  assert.deepEqual(
+    buildPlot(nodes, { width: 300, height: 100, clip: true }).digest,
+    clippedPlot.digest,
+    'while the same inputs still produce the same digest',
+  )
   assert.equal(metricOf(nodes[1], 'tokens'), 10)
   assert.equal(metricOf(nodes[0], 'output'), 1e6)
   const { fromMs, toMs } = seriesWindow(nodes)
@@ -853,6 +898,8 @@ test('the chart data helpers decimate, clip and band without a DOM', async () =>
   assert.equal(plot.points.length, 3)
   assert.deepEqual(plot.points.map((point) => point.x > 0), [false, true, true], 'time is the x axis by default')
   assert.equal(plot.threshold, null, 'clipping off means no threshold')
+  // A Step with tokens but no rate is marked, not drawn as a free Step.
+  assert.deepEqual(plot.points.map((point) => point.unpriced), [false, false, true])
   assert.ok(plot.points.every((point) => point.y >= 0 && point.y <= 100), 'every point stays inside the plot')
   assert.deepEqual(buildPlot(nodes, { width: 300, height: 100, axis: 'index' }).points.map((point) => point.x), [0, 150, 300])
 
@@ -865,6 +912,9 @@ test('the chart data helpers decimate, clip and band without a DOM', async () =>
   assert.equal(clipped.points.at(-1).clipped, true, 'the outlier is clipped')
   assert.ok(clipped.threshold < 1000)
   assert.equal(buildPlot(long, { width: 300, height: 100, clip: false }).points.at(-1).clipped, false)
+  const unclipped = buildPlot(long, { width: 300, height: 100, clip: false })
+  assert.equal(unclipped.threshold, null)
+  assert.deepEqual(unclipped.points.at(-1).node, long.at(-1), 'and the whole Step is still the point')
 
   const bands = bandRanges([{ startMs: fromMs - HOUR, endMs: fromMs + HOUR }], fromMs, toMs)
   assert.equal(bands.length, 1)
@@ -931,9 +981,9 @@ test('the inspector explains a Step and offers the jump only for a tool call', a
     ...props,
     node: costNode({ calls: [{ name: 'bash', callId: 'call-1', preview: 'ls -la' }] }),
     inspectCall: (callId) => opened.push(callId),
-    loadOlder: async () => {
-      loaded.push(true)
-      return true
+    loadPrompt: async (node) => {
+      loaded.push(node.turn)
+      return 'where did the money go?'
     },
   })
   const focus = find(withCall, (element) => element.type === 'button' && element.children.join('') === 'cost.inspector.focus')[0]
@@ -944,7 +994,24 @@ test('the inspector explains a Step and offers the jump only for a tool call', a
   assert.ok(older !== undefined, 'the prompt is behind an explicit action')
   await older.props.onClick()
   await new Promise((resolve) => setTimeout(resolve, 0))
-  assert.deepEqual(loaded, [true])
+  assert.deepEqual(loaded, [1], 'the prompt was asked for by the Step it belongs to')
+  const shown = react.createElement(Inspector, {
+    ...props,
+    node: costNode({ calls: [{ name: 'bash', callId: 'call-1', preview: 'ls -la' }] }),
+    loadPrompt: async () => 'where did the money go?',
+  })
+  assert.match(textOf(shown), /where did the money go\?/, 'and the words appear where the offer was')
+  assert.doesNotMatch(textOf(shown), /cost\.inspector\.loadOlder/, 'the offer is gone once the prompt is there')
+  assert.doesNotMatch(textOf(shown), /cost\.inspector\.noPrompt/)
+
+  // Another Step starts over: the prompt of the previous one is not carried over.
+  const moved = react.createElement(Inspector, {
+    ...props,
+    node: costNode({ turn: 2, step: 1 }),
+    loadPrompt: async () => 'the other question',
+  })
+  assert.match(textOf(moved), /cost\.inspector\.noPrompt/, 'a Step of its own asks again')
+  assert.doesNotMatch(textOf(moved), /where did the money go\?/)
   react.stop()
 })
 
@@ -1097,6 +1164,18 @@ test('the top rows follow the metric and always carry their cost', async () => {
   assert.deepEqual(byCost[0].buckets, nodes[1].buckets)
   assert.equal(byCost[0].call.name, 'bash', 'a row names the tool it called')
 
+  // An unpriced Step is worth nothing under the money metric, but the spec puts it in
+  // top-K anyway: it is the one row the reader has to price.
+  const withUnpriced = [...nodes, costNode({
+    turn: 3, step: 1, tStart: NOW, tEnd: NOW + MINUTE, cost: 0, unpriced: true,
+    buckets: { uncachedInput: 500, cacheRead: 0, cacheWrite: 0, output: 0 },
+  })]
+  const ranked = topRows(withUnpriced, { metric: 'cost' })
+  assert.equal(ranked.length, 4, 'the unpriced Step keeps its row')
+  assert.equal(ranked.at(-1).turn, 3, 'ranked last, because it is worth nothing')
+  assert.equal(ranked.at(-1).unpriced, true, 'and marked as unpriced')
+  assert.deepEqual(topRows(nodes, { metric: 'cost' }).length, 3, 'while a priced Step worth nothing is not invented')
+
   const byCacheRead = topRows(nodes, { metric: 'cacheRead' })
   assert.deepEqual(byCacheRead.map((row) => row.index), [1], 'only the Step with cache reads ranks')
   assert.equal(byCacheRead[0].cost, 4, 'and it still shows its cost')
@@ -1197,7 +1276,19 @@ test('the chart zooms with the wheel, pans on the right button and brushes a ran
 
   // Wheel: an 0.8 factor anchored at the pointer, `preventDefault` so the page does not scroll.
   let prevented = 0
-  render(null).plot.props.onWheel({ deltaY: -1, clientX: 360, preventDefault: () => { prevented += 1 } })
+  const wheelPlot = render(null).plot
+  wheelPlot.props.onWheel({ deltaY: -1, clientX: 360, preventDefault: () => { prevented += 1 } })
+  // The zoom itself rides React's passive listener; a native listener beside it is
+  // what actually stops the panel from scrolling, and it must not zoom as well.
+  // The stub re-runs effects on every traversal instead of tracking mount and update,
+  // so the newest native listener stands in for the single one a browser would hold.
+  const native = wheelPlot.props.ref.current.listeners.wheel
+  assert.ok(native.length >= 1, 'the plot listens for the wheel natively')
+  let refused = 0
+  const windowsBefore = windows.length
+  native.at(-1)({ deltaY: -1, clientX: 360, preventDefault: () => { refused += 1 } })
+  assert.equal(refused, 1, 'and refuses the scroll the passive listener cannot')
+  assert.equal(windows.length, windowsBefore, 'without zooming a second time')
   assert.equal(prevented, 1)
   assert.deepEqual(windows.at(-1), { from: 0.1, to: 0.9 })
 
@@ -1351,7 +1442,9 @@ test('the Step reached from Trajectory is still marked when the view comes back'
     assert.deepEqual(jumped, ['call-1'], 'the jump carries the call')
 
     // The conversation unmounts the Cost view when Trajectory becomes active, so the
-    // Step has to be remembered outside it: coming back must mark the same one.
+    // Step has to be remembered outside it: coming back must mark the same one. The
+    // unmount drops every hook value, so a Step kept in component state would be lost.
+    react.unmount()
     const back = await mount()
     assert.match(textOf(back), /cost\.inspector\.title/, 'the Step is still open after the round trip')
     assert.equal(find(back, (element) => element.props?.className === 'dshb_cost_mark').length, 1)
@@ -1989,21 +2082,28 @@ test('a subagent line opens that session’s own Cost view', async () => {
   assert.equal(openSessionCost({ workspace, sessionId: '' }), false)
 
   // The stored preference is what makes a session the shell has never bound mount on
-  // Cost; the rest of the record (the reader's draft) must survive the write.
+  // Cost; the rest of the record (the reader's draft) must survive the write, and a
+  // session with no record at all gets every field the shell's store starts with —
+  // the shell replaces its whole state with this JSON, so a partial record would
+  // leave the composer with an undefined draft.
   const disk = new Map()
-  disk.set('dsh.conversation.child-4', JSON.stringify({ draft: 'keep me', view: 'chat' }))
+  disk.set('dsh.conversation.chat.child-4', JSON.stringify({ draft: 'keep me', view: 'chat', inspect: 'x' }))
   const storage = {
     getItem: (name) => (disk.has(name) ? disk.get(name) : null),
     setItem: (name, value) => disk.set(name, value),
   }
   assert.equal(preferCostView(storage, 'child-4'), true)
-  assert.deepEqual(JSON.parse(disk.get('dsh.conversation.child-4')), { draft: 'keep me', view: 'dsh-balance-cost' })
+  assert.deepEqual(JSON.parse(disk.get('dsh.conversation.chat.child-4')), {
+    selection: null, draft: 'keep me', view: 'dsh-balance-cost', inspect: 'x',
+  })
   assert.equal(preferCostView(storage, 'child-5'), true, 'a session with no record gets one')
-  assert.deepEqual(JSON.parse(disk.get('dsh.conversation.child-5')), { view: 'dsh-balance-cost' })
+  assert.deepEqual(JSON.parse(disk.get('dsh.conversation.chat.child-5')), {
+    selection: null, draft: '', view: 'dsh-balance-cost', inspect: null,
+  })
   assert.equal(preferCostView(undefined, 'child-5'), false, 'no storage, no claim')
-  disk.set('dsh.conversation.child-6', 'not json')
+  disk.set('dsh.conversation.chat.child-6', 'not json')
   assert.equal(preferCostView(storage, 'child-6'), false, 'a record that cannot be read is left alone')
-  disk.set('dsh.conversation.child-7', '[]')
+  disk.set('dsh.conversation.chat.child-7', '[]')
   assert.equal(preferCostView(storage, 'child-7'), false, 'and an array is not a store record')
 })
 
@@ -2117,5 +2217,303 @@ test('the export line offers the two levels, warns on full and folds subagents i
     else globalThis.document = previousDocument
     URL.createObjectURL = previousCreate
     URL.revokeObjectURL = previousRevoke
+  }
+})
+
+test('a series still being read shows a spinner instead of an empty chart', async () => {
+  const { exported, react } = await loadClient()
+  const previousFetch = globalThis.fetch
+  let release = () => {}
+  const gate = new Promise((resolve) => { release = resolve })
+  globalThis.fetch = async (url) => {
+    if (String(url).startsWith('/dsh-balance/session-cost')) await gate
+    return { ok: true, status: 200, json: async () => costPayload([costNode()]) }
+  }
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => ({ seq: 5, currency: 'CNY' }) }
+    react.beginRender()
+    let tree = react.createElement(exported.__internals.CostView, props)
+    let text = textOf(tree)
+    assert.match(text, /cost\.loading/, 'the view says it is reading, not that the session is empty')
+    assert.doesNotMatch(text, /cost\.empty\.steps/, 'the empty state is a lie until the answer arrives')
+    assert.equal(find(tree, (element) => String(element.props?.className).includes('dshb_spinner_ring')).length, 1)
+    assert.equal(find(tree, (element) => element.props?.role === 'status').length, 1, 'and it is announced as a status')
+
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    tree = react.createElement(exported.__internals.CostView, props)
+    text = textOf(tree)
+    assert.doesNotMatch(text, /cost\.loading/, 'the spinner gives way once the series lands')
+    assert.match(text, /cost\.topk\.title/)
+
+    // A read that fails ends the same way: the spinner is for waiting, not for hiding
+    // an error that has already arrived.
+    globalThis.fetch = async () => ({ ok: false, status: 500, json: async () => ({ ok: false, error: 'boom' }) })
+    // Another session means another mount, so nothing of the previous one is left.
+    react.unmount()
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, { ...props, sessionId: 'session-8' }))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    const failed = react.createElement(exported.__internals.CostView, { ...props, sessionId: 'session-8' })
+    assert.doesNotMatch(textOf(failed), /cost\.loading/)
+    assert.match(textOf(failed), /cost\.empty\.error/)
+    assert.match(textOf(failed), /cost\.retry/)
+    react.stop()
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('the Top-K mode is a saved choice, and every row says when and in which phase', async () => {
+  const { exported, react } = await loadClient()
+  const posts = []
+  // Two Turns, one inside the peak interval of the payload and one outside it, so the
+  // grouped list has two rows and each can be asked about its phase.
+  const nodes = [costNode(), costNode({ turn: 2, step: 1, tStart: NOW - HOUR, tEnd: NOW - HOUR + MINUTE, cost: 4 })]
+  const restore = stubSeriesAndWrites(costPayload(nodes, { prefs: { costTopK: 'turns' } }), posts)
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => undefined }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    let tree = react.createElement(exported.__internals.CostView, props)
+    let text = textOf(tree)
+    assert.match(text, /cost\.topk\.ofSteps/, 'the stored mode came back grouped by Turns')
+    // The first Step starts inside the peak interval of the payload, the second outside it.
+    const rows = find(tree, (element) => String(element.props?.className).includes('dshb_topk_row'))
+    assert.equal(rows.length, 2)
+    assert.match(textOf(rows[0]), /cost\.tip\.phase\.peak/, 'a row says which tariff phase it fell in')
+    assert.match(textOf(rows[1]), /cost\.tip\.phase\.off-peak/)
+
+    const steps = find(tree, (element) => element.type === 'button' && element.children?.join('') === 'cost.topk.steps')[0]
+    await steps.props.onClick()
+    const settings = posts.filter((post) => post.url === '/dsh-balance/settings')
+    assert.deepEqual(settings.map((post) => post.body), [{ costTopK: 'steps' }], 'switching the mode is written through alone')
+    react.beginRender()
+    tree = react.createElement(exported.__internals.CostView, props)
+    assert.doesNotMatch(textOf(tree), /cost\.topk\.ofSteps/, 'and the list regroups at once')
+    react.stop()
+  } finally {
+    restore()
+  }
+})
+
+test('the plugin registers with no Coding Tools service and reads nothing before the tab is chosen', async () => {
+  const { exported } = await loadClient()
+  const ctx = clientContext()
+  // The stub offers slots, locale and no coding-tools service at all: the Cost view
+  // must register anyway, and nothing may be fetched until the reader selects it.
+  const previousFetch = globalThis.fetch
+  let fetches = 0
+  globalThis.fetch = async () => {
+    fetches += 1
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  try {
+    exported.apply(ctx)
+    assert.equal(ctx.registered.length, 4, 'the readout, both peak surfaces and the Cost view are registered')
+    assert.equal(fetches, 0, 'registering the plugin reads nothing')
+    const cost = ctx.registered.find((entry) => entry.options.id === 'dsh-balance-cost')
+    // The view is a component until it is mounted: mounting it is what starts the read.
+    assert.equal(typeof cost.component, 'function')
+    assert.equal(fetches, 0, 'and neither does holding the component')
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('a new projection sequence re-reads the series of an open view', async () => {
+  const { exported, react } = await loadClient()
+  const reads = []
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    reads.push(String(url))
+    return { ok: true, status: 200, json: async () => costPayload([costNode()]) }
+  }
+  try {
+    let seq = 5
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => ({ seq, currency: 'CNY' }) }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    assert.equal(reads.filter((url) => url.startsWith('/dsh-balance/session-cost?')).length, 1)
+
+    // The projection sequence moves as the session runs: the open view follows it,
+    // which is what makes the tab a live tail rather than a snapshot.
+    seq = 6
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    assert.equal(reads.filter((url) => url.startsWith('/dsh-balance/session-cost?')).length, 2)
+    react.stop()
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('a clipped chart offers its way back out, and taking it keeps every Step', async () => {
+  const { exported, react } = await loadClient()
+  // One outlier among many Steps: enough samples for the percentile to sit low.
+  const nodes = [
+    ...Array.from({ length: 40 }, (_, index) => costNode({
+      turn: 1, step: index + 1, tStart: NOW - (40 - index) * MINUTE, tEnd: NOW - (39 - index) * MINUTE, cost: 1,
+    })),
+    costNode({ turn: 2, step: 1, tStart: NOW, tEnd: NOW + MINUTE, cost: 1000 }),
+  ]
+  const restore = stubSeriesAndWrites(costPayload(nodes), [])
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => undefined }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    let tree = react.createElement(exported.__internals.CostView, props)
+    assert.match(textOf(tree), /cost\.clip/)
+    const unclip = find(tree, (element) => element.type === 'button' && element.children?.join('') === 'cost.unclip')[0]
+    assert.ok(unclip !== undefined, 'the note offers to stop clipping')
+
+    await unclip.props.onClick()
+    react.beginRender()
+    tree = react.createElement(exported.__internals.CostView, props)
+    const text = textOf(tree)
+    assert.doesNotMatch(text, /cost\.unclip/, 'the offer goes away with the clipping')
+    assert.doesNotMatch(text, /cost\.clip/, 'and so does the note that announced it')
+    assert.match(text, /cost\.topk\.title/, 'the list is still there, now with every Step in it')
+    const rows = find(tree, (element) => String(element.props?.className).includes('dshb_topk_row'))
+    assert.equal(rows.length, 10, 'the outlier no longer hides the rest')
+    assert.match(textOf(rows[0]), /¥1000/, 'and the biggest Step leads the list')
+    react.stop()
+  } finally {
+    restore()
+  }
+})
+
+test('the view renders a payload produced by the host, not only a hand-written one', async () => {
+  const { exported, react } = await loadClient()
+  // The host half builds its series with its own fold and pricing; the browser half
+  // has to read exactly those field names and units. This is the one test that
+  // crosses the boundary: nothing here is hand-written except the session events.
+  const { makeSessionCostProjection, makeFallbackResolver, seriesPayload } = await import('../src/session-cost.js')
+  const unit = makeSessionCostProjection(() => ({ currency: 'CNY' }))
+  const time = Date.parse('2026-09-24T02:00:00Z') // 10:00 Beijing, inside a peak window
+  const events = [
+    { type: 'step/start', seq: 1, time, data: { turn: 1, step: 1 } },
+    { type: 'request/header', seq: 2, time, data: { header: { config: { model: 'deepseek-flash' } } } },
+    { type: 'assistant/message', seq: 3, time, data: { turn: 1, step: 1, usage: { inputTokens: 1e6, outputTokens: 1e6 } } },
+    { type: 'step/end', seq: 4, time: time + 1000, data: { turn: 1, step: 1 } },
+  ]
+  const state = events.reduce((folded, event) => unit.apply(folded, event), unit.init())
+  const nodes = seriesPayload(state, { currency: 'CNY', holidays: [], fallback: makeFallbackResolver({}) })
+  const series = {
+    ok: true,
+    sessionId: 'session-7',
+    seq: state.seq,
+    currency: 'CNY',
+    nodes,
+    rule: { sourceUrl: 'https://api-docs.deepseek.com/quick_start/pricing', verifiedOn: '2026-09-27', holidays: [], rates: [] },
+    peakIntervals: [],
+    calibration: null,
+    prefs: {},
+  }
+  const restore = stubSeriesAndWrites(series, [])
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => ({ seq: state.seq, currency: 'CNY' }) }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    const tree = react.createElement(exported.__internals.CostView, props)
+    const text = textOf(tree)
+    // 1M uncached input at 2 CNY plus 1M output at 8 CNY, as the host priced it.
+    assert.match(text, /¥10\.00/, 'the headline is the host’s figure')
+    assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_mark').length, 0)
+    assert.match(text, /cost\.inspector\.empty/, 'and the inspector waits for a selection')
+    const row = find(tree, (element) => String(element.props?.className).includes('dshb_topk_row'))[0]
+    assert.match(textOf(row), /¥10\.00/, 'the list reads the same node')
+    react.stop()
+  } finally {
+    restore()
+  }
+})
+
+test('zooming recomputes the list and the headline for the visible range', async () => {
+  const { exported, react } = await loadClient()
+  const nodes = [
+    costNode({ turn: 1, step: 1, tStart: NOW - 3 * HOUR, tEnd: NOW - 3 * HOUR + MINUTE, cost: 10 }),
+    costNode({ turn: 2, step: 1, tStart: NOW - 2 * HOUR, tEnd: NOW - 2 * HOUR + MINUTE, cost: 5 }),
+    costNode({ turn: 3, step: 1, tStart: NOW - MINUTE, tEnd: NOW, cost: 40 }),
+  ]
+  const restore = stubSeriesAndWrites(costPayload(nodes), [])
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => undefined }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    let tree = react.createElement(exported.__internals.CostView, props)
+    let text = textOf(tree)
+    assert.match(text, /¥55\.00/, 'the whole session first')
+    const rowTexts = () => find(tree, (element) => String(element.props?.className).includes('dshb_topk_row')).map(textOf)
+    assert.equal(rowTexts().length, 3)
+    assert.match(rowTexts()[0], /¥40\.00/, 'the biggest Step leads')
+
+    // Zoom hard onto the left edge: only the earliest Steps are then on screen.
+    const plot = find(tree, (element) => element.props?.className === 'dshb_cost_plot')[0]
+    for (let index = 0; index < 6; index += 1) {
+      plot.props.onWheel({ deltaY: -1, clientX: 2, preventDefault: () => {} })
+      react.beginRender()
+      tree = react.createElement(exported.__internals.CostView, props)
+      textOf(tree)
+    }
+    const zoomedPlot = find(tree, (element) => element.props?.className === 'dshb_cost_plot')[0]
+    zoomedPlot.props.onWheel({ deltaY: -1, clientX: 2, preventDefault: () => {} })
+    react.beginRender()
+    tree = react.createElement(exported.__internals.CostView, props)
+    text = textOf(tree)
+    assert.match(text, /cost\.zoom\.reset/, 'a window is in force')
+    const zoomedRows = find(tree, (element) => String(element.props?.className).includes('dshb_topk_row')).map(textOf)
+    assert.equal(zoomedRows.some((row) => /¥40\.00/.test(row)), false, 'the Step outside the window left the list')
+    assert.equal(zoomedRows.length, 1, 'only the Step the window covers is left to rank')
+    assert.match(zoomedRows[0], /¥5\.00/)
+    assert.match(zoomedRows[0], /9\.1%/, 'while the share still speaks for the whole session, as the spec says')
+    assert.match(text, /¥5\.00/, 'and the headline speaks for the visible range')
+    react.stop()
+  } finally {
+    restore()
+  }
+})
+
+test('the inspector prompt is the newest user message at or before the Step', async () => {
+  const { exported } = await loadClient()
+  const { promptForNode } = exported.__internals
+  const previous = globalThis.fetch
+  const urls = []
+  globalThis.fetch = async (url) => {
+    urls.push(String(url))
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        records: [
+          { seq: 1, t: 100, turn: null, step: null, type: 'user_message', text: 'first question' },
+          { seq: 2, t: 200, turn: 1, step: 1, type: 'assistant_message', text: 'an answer' },
+          { seq: 3, t: 300, turn: null, step: null, type: 'user_message', text: 'second question' },
+          { seq: 4, t: 400, turn: null, step: null, type: 'user_message', text: '   ' },
+        ],
+      }),
+    }
+  }
+  try {
+    assert.equal(await promptForNode('session-prompt', { turn: 1, step: 1, tStart: 250 }), 'first question')
+    assert.equal(await promptForNode('session-prompt', { turn: 2, step: 1, tStart: 350 }), 'second question', 'the newest one wins')
+    assert.equal(await promptForNode('session-prompt', { turn: 1, step: 1, tStart: 50 }), null, 'a Step before the first message has no prompt')
+    assert.equal(urls.length, 1, 'the words of a session are read once, however many Steps ask')
+    assert.match(urls[0], /sessionId=session-prompt/)
+  } finally {
+    globalThis.fetch = previous
   }
 })

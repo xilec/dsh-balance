@@ -78,7 +78,6 @@ window.__ModuleLoader__.load({
         '.dshb_rows{display:flex;flex-direction:column;gap:3px}',
         '.dshb_row{display:flex;justify-content:space-between;gap:12px}',
         '.dshb_row span:last-child{color:var(--dsw-alias-label-tertiary)}',
-        '.dshb_meta{display:flex;flex-wrap:wrap;gap:4px 12px;color:var(--dsw-alias-label-tertiary);font-size:11px}',
         '.dshb_flag{color:var(--dsw-alias-state-warn-primary,#f59e0b);font-size:11px}',
         '.dshb_link{color:var(--dsw-alias-label-link,var(--dsw-alias-state-info-primary,#3b82f6));cursor:pointer;',
         'text-decoration:none;background:none;border:none;padding:0;font:inherit;text-align:left}',
@@ -156,7 +155,6 @@ window.__ModuleLoader__.load({
         'border-radius:8px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.25));',
         'background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1,#fff));color:var(--dsw-alias-label-secondary);',
         'box-shadow:var(--dsw-shadow-lv2,0 6px 18px rgba(0,0,0,.14));font-size:11.5px;line-height:1.45;text-align:left}',
-        '.dshb_cost_split{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;align-items:start}',
         '.dshb_cost_card{border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:10px;padding:8px 10px;font-size:12px;max-width:100%;display:flex;flex-direction:column;gap:6px;flex:1 1 auto}',
         '.dshb_cost_actions{display:flex;gap:6px;align-items:center;margin-top:4px}',
         '.dshb_cost_kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:2px 10px;align-items:baseline}',
@@ -210,9 +208,14 @@ window.__ModuleLoader__.load({
         '.dshb_cost_turn_alt{background:rgba(128,128,128,.07)}',
         '.dshb_cost_turnLabel{position:absolute;top:0;left:3px;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-layer-1,rgba(0,0,0,0));',
         'font-size:9px;line-height:12px;padding:0 2px;border-radius:2px;white-space:nowrap}',
+        '.dshb_spinner{display:flex;align-items:center;justify-content:center;gap:10px;padding:30px 0;color:var(--dsw-alias-label-tertiary);font-size:12px}',
+        '.dshb_spinner_ring{width:16px;height:16px;border:2px solid var(--dsw-alias-border-l2);border-top-color:var(--dsw-alias-label-secondary);border-radius:50%;animation:dshb_spin .8s linear infinite}',
+        '@keyframes dshb_spin{to{transform:rotate(360deg)}}',
+        '.dshb_cost_prompt{white-space:pre-wrap;word-break:break-word;display:block;max-height:110px;overflow:auto;margin-top:2px;color:var(--dsw-alias-label-secondary)}',
         '.dshb_export{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;max-width:1120px}',
         '.dshb_export_check{display:inline-flex;align-items:center;gap:4px;color:var(--dsw-alias-label-tertiary);font-size:11.5px}',
-        '.dshb_cost_tabs{display:flex;gap:2px;width:100%;max-width:1120px;box-sizing:border-box;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.25))}',
+        '.dshb_cost_tabrow{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;max-width:1120px}',
+        '.dshb_cost_tabs{display:flex;gap:2px;flex:1 1 auto;min-width:0;box-sizing:border-box;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.25))}',
         '.dshb_cost_tab{background:transparent;border:0;border-bottom:2px solid transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;font:var(--dsw-font-xxs-12);padding:3px 10px}',
         '.dshb_cost_tab:hover{color:var(--dsw-alias-label-primary)}',
         '.dshb_cost_tabOn{color:var(--dsw-alias-label-primary);border-bottom-color:var(--dsw-alias-state-business-primary,var(--dsw-static-blue-500,#4d6bfe))}',
@@ -329,8 +332,6 @@ window.__ModuleLoader__.load({
         'peak.dayTomorrow': 'tomorrow',
         'peak.source': 'Source: {url} · verified {date}',
         'view.cost': 'Cost',
-        'cost.title': 'Session cost estimate',
-        'cost.sub': 'per Step, priced at the tariff in force when the tokens were reported',
         'cost.proj.fact': 'Fact',
         'cost.proj.offPeak': 'off-peak',
         'cost.proj.peak': 'peak',
@@ -368,7 +369,6 @@ window.__ModuleLoader__.load({
         'cost.session.label': 'session',
         'cost.session.copy': 'copy id',
         'cost.session.copied': 'copied',
-        'cost.session.id': 'session {id}',
         'cost.export.title': 'Export',
         'cost.export.detail': 'detail',
         'cost.export.detail.costs': 'costs',
@@ -413,6 +413,7 @@ window.__ModuleLoader__.load({
         'cost.unclip': 'Remove clipping',
         'cost.retry': 'Retry',
         'cost.empty.steps': 'No Steps with usage yet — the chart fills as the session runs.',
+        'cost.loading': 'reading the session history…',
         'cost.empty.rates': 'This session reported tokens, but no rate in the tariff rule applies to their models.',
         'cost.empty.error': 'Cannot read this session’s history.',
         'cost.tip.turn': 'Turn {turn} · Step {step}',
@@ -430,8 +431,6 @@ window.__ModuleLoader__.load({
         'cost.tip.interval': '{from}–{to}',
         'cost.inspector.title': 'Step {turn}.{step}',
         'cost.inspector.empty': 'Select a Step in the chart to inspect it.',
-        'cost.inspector.tokens': 'Tokens',
-        'cost.inspector.cost': 'Cost',
         'cost.inspector.share': 'Share of session',
         'cost.inspector.interval': 'Interval',
         'cost.inspector.calls': 'Tool calls',
@@ -538,8 +537,6 @@ window.__ModuleLoader__.load({
         'peak.dayTomorrow': 'завтра',
         'peak.source': 'Источник: {url} · проверено {date}',
         'view.cost': 'Стоимость',
-        'cost.title': 'Оценка стоимости сессии',
-        'cost.sub': 'по шагам, по тарифу на момент отчёта о токенах',
         'cost.proj.fact': 'Факт',
         'cost.proj.offPeak': 'льготный',
         'cost.proj.peak': 'пиковый',
@@ -577,7 +574,6 @@ window.__ModuleLoader__.load({
         'cost.session.label': 'сессия',
         'cost.session.copy': 'копировать id',
         'cost.session.copied': 'скопировано',
-        'cost.session.id': 'сессия {id}',
         'cost.export.title': 'Экспорт',
         'cost.export.detail': 'детализация',
         'cost.export.detail.costs': 'затраты',
@@ -622,6 +618,7 @@ window.__ModuleLoader__.load({
         'cost.unclip': 'Снять обрезку',
         'cost.retry': 'Повторить',
         'cost.empty.steps': 'Шагов с usage пока нет — график заполнится по ходу сессии.',
+        'cost.loading': 'читаю историю сессии…',
         'cost.empty.rates': 'Сессия отчиталась о токенах, но в тарифном правиле нет ставки для их моделей.',
         'cost.empty.error': 'Не удалось прочитать историю этой сессии.',
         'cost.tip.turn': 'Ход {turn} · шаг {step}',
@@ -639,8 +636,6 @@ window.__ModuleLoader__.load({
         'cost.tip.interval': '{from}–{to}',
         'cost.inspector.title': 'Шаг {turn}.{step}',
         'cost.inspector.empty': 'Выбери шаг на графике, чтобы посмотреть детали.',
-        'cost.inspector.tokens': 'Токены',
-        'cost.inspector.cost': 'Стоимость',
         'cost.inspector.share': 'Доля от сессии',
         'cost.inspector.interval': 'Интервал',
         'cost.inspector.calls': 'Вызовы инструментов',
@@ -1601,7 +1596,9 @@ window.__ModuleLoader__.load({
       const positive = values.filter((value) => value > 0)
       if (positive.length === 0) return null
       const sorted = [...positive].sort((a, b) => a - b)
-      const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))]
+      // The 95th percentile of a sorted list is the value one position above 95% of
+      // its length, counted from one and clamped to the last entry.
+      const p95 = sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * 0.95) - 1))]
       return p95 > 0 ? p95 * 10 : null
     }
 
@@ -1911,10 +1908,16 @@ window.__ModuleLoader__.load({
       })), count)
     }
 
-    /** Best first, the oldest first among equals, at most `count` rows. */
+    /**
+     * Best first, the oldest first among equals, at most `count` rows.
+     *
+     * A Step whose model has no rate keeps its row even though it is worth nothing:
+     * the spec puts an unpriced Step in the tooltip, in this list and on the chart,
+     * and dropping it here would hide the one Step the reader has to price.
+     */
     function rank(rows, count) {
       return rows
-        .filter((row) => row.value > 0)
+        .filter((row) => row.value > 0 || row.unpriced === true)
         .sort((a, b) => b.value - a.value || a.tStart - b.tStart)
         .slice(0, Math.max(0, count))
     }
@@ -1926,7 +1929,7 @@ window.__ModuleLoader__.load({
      * state, a failed read, is the error the route or the fetch reported.
      */
     function seriesState(status, payload, nodes, summary) {
-      if (status === 'error' || payload?.ok === false) return 'error'
+      if (status === 'error') return 'error'
       if (status === 'loading' && payload === null) return 'loading'
       if (nodes.length === 0 || summary.steps === 0) return 'empty-steps'
       const priced = nodes.some((node) => node.cost > 0)
@@ -1991,7 +1994,17 @@ window.__ModuleLoader__.load({
         return { index, node, value, clipped, unpriced: node.unpriced === true, x, y: yOf(clipped ? threshold : value) }
       })
       const { bars, marks } = decimatePoints(points, Math.max(1, Math.floor(width)))
-      const digest = `${axis}:${metric}:${projection}:${points.length}:${Math.round(points.reduce((sum, point) => sum + point.value, 0) * 1e6)}`
+      // Everything the canvas draws is folded into one string: the same points can
+      // paint differently when the clipping, the scale or the window moves, and the
+      // draw effect must run for each of those even though the points are unchanged.
+      const digest = [
+        axis, metric, projection, points.length,
+        Math.round(points.reduce((sum, point) => sum + point.value, 0) * 1e6),
+        threshold === null ? 'none' : Math.round(threshold * 1e6),
+        Math.round(max * 1e6),
+        Math.round(fromMs), Math.round(toMs), width, height,
+        points.reduce((count, point) => count + (point.unpriced ? 1 : 0), 0),
+      ].join(':')
       return { points, bars, marks, threshold, max, axis: scale, mode: axis, metric, projection, fromMs, toMs, width, height, xOf, yOf, digest }
     }
 
@@ -2060,7 +2073,8 @@ window.__ModuleLoader__.load({
       })
       context.stroke()
 
-      // Markers: the newest point of each column, hollow when its value is clipped.
+      // Markers: the newest point of each column, in the warning color when its
+      // value is the clipped one rather than the real one.
       for (const mark of plot.marks) {
         context.beginPath()
         context.arc(mark.x, mark.y, 2.4, 0, Math.PI * 2)
@@ -2142,7 +2156,17 @@ window.__ModuleLoader__.load({
     }
 
     /** The shell keeps one conversation store per session under this key. */
-    const CONVERSATION_STORE_KEY = 'dsh.conversation'
+    const CONVERSATION_STORE_KEY = 'dsh.conversation.chat'
+    /**
+     * The fields that store starts with, in the shell's own order.
+     *
+     * The shell rehydrates by replacing its whole state with the stored JSON, so a
+     * record written here has to name every field: a partial one would leave the
+     * composer's draft, and the restored selection, `undefined` rather than empty.
+     */
+    const CONVERSATION_STORE_DEFAULTS = Object.freeze({
+      selection: null, draft: '', view: null, inspect: null,
+    })
     /** This view's own id, as registered in the `conversation.view` slot. */
     const COST_VIEW_ID = 'dsh-balance-cost'
 
@@ -2151,9 +2175,10 @@ window.__ModuleLoader__.load({
      *
      * Activating a binding only works for a session that is already bound, and the
      * shell restores the view of a freshly opened session from the per-session store
-     * it hydrates on mount — so the preference is written first, with the rest of the
-     * record (the draft) left untouched. It is a browser-local preference, so a reader
-     * who prefers another tab there simply switches it back.
+     * it hydrates on mount — so the preference is written first, over the fields the
+     * shell expects to find and whatever else the record already holds. It is a
+     * browser-local preference, so a reader who prefers another tab there simply
+     * switches it back.
      */
     function preferCostView(storage, sessionId, viewId) {
       const name = `${CONVERSATION_STORE_KEY}.${sessionId}`
@@ -2161,8 +2186,8 @@ window.__ModuleLoader__.load({
         const raw = storage?.getItem?.(name)
         const stored = raw === null || raw === undefined || raw === '' ? {} : JSON.parse(raw)
         if (typeof stored !== 'object' || stored === null || Array.isArray(stored)) return false
-        stored.view = viewId ?? COST_VIEW_ID
-        storage.setItem(name, JSON.stringify(stored))
+        const record = { ...CONVERSATION_STORE_DEFAULTS, ...stored, view: viewId ?? COST_VIEW_ID }
+        storage.setItem(name, JSON.stringify(record))
         return true
       } catch {
         return false
@@ -2282,21 +2307,22 @@ window.__ModuleLoader__.load({
           }
           // The call list of the projection carries the name, the id and the short
           // preview; the `full` level takes the call from the log instead, where the
-          // whole argument string lives — one record per call, never both.
-          if (!full || callsInText.size === 0) {
-            for (const call of node.calls ?? []) {
-              push({
-                type: 'tool_call',
-                session: id,
-                depth,
-                seq: call.seq ?? 0,
-                t: at(call.time),
-                turn: node.turn,
-                step: node.step,
-                name: call.name,
-                callId: call.callId,
-              })
-            }
+          // whole argument string lives — one record per call, never both. The match
+          // is by call id: a text read that came back short must not drop the calls
+          // the projection still knows about.
+          for (const call of node.calls ?? []) {
+            if (full && callsInText.has(call.callId)) continue
+            push({
+              type: 'tool_call',
+              session: id,
+              depth,
+              seq: call.seq ?? 0,
+              t: at(call.time),
+              turn: node.turn,
+              step: node.step,
+              name: call.name,
+              callId: call.callId,
+            })
           }
         }
         for (const word of words) {
@@ -2343,9 +2369,12 @@ window.__ModuleLoader__.load({
         const own = Array.isArray(child.payload?.nodes) ? child.payload.nodes : []
         const start = own[0]
         const end = own[own.length - 1]
+        // A marker belongs to the session that spawned the child, which for a
+        // grandchild is a child session, and never to the exported root by default.
+        const owner = child.parentId ?? sessionId
         push({
           type: 'subagent_spawn',
-          session: sessionId,
+          session: owner,
           depth: Math.max(0, (child.depth ?? 1) - 1),
           seq: spawn.seq,
           t: spawn.t,
@@ -2358,7 +2387,7 @@ window.__ModuleLoader__.load({
         addSession(child.id, child.depth ?? 1, child.payload, full ? (child.text ?? []) : [])
         push({
           type: 'subagent_settle',
-          session: sessionId,
+          session: owner,
           depth: Math.max(0, (child.depth ?? 1) - 1),
           // Synthesized by the builder: there is no log event to cite.
           seq: null,
@@ -2429,7 +2458,12 @@ window.__ModuleLoader__.load({
           binding = undefined
         }
         if (binding?.activate !== undefined) {
-          binding.activate(viewId ?? COST_VIEW_ID)
+          try {
+            binding.activate(viewId ?? COST_VIEW_ID)
+          } catch {
+            // A binding that refuses to be driven leaves the session opened on
+            // whatever tab it was on: the reader can pick Cost there.
+          }
           return
         }
         left -= 1
@@ -2476,6 +2510,45 @@ window.__ModuleLoader__.load({
       return payload
     }
 
+    /**
+     * The prompts of one session, read once and kept for the inspector.
+     *
+     * The projection carries usage rather than messages, so the prompt of a Step is
+     * read from the session's words the first time a reader asks for one; only the
+     * user messages are kept, not the whole log.
+     */
+    const sessionPrompts = new Map()
+
+    /**
+     * The prompt that started a Step's Turn.
+     *
+     * The user message of a Turn is written before its Steps, and carries no Turn or
+     * Step of its own, so the newest message at or before the Step's own start is the
+     * one the Step answered.
+     *
+     * @param sessionId - the session whose words to read.
+     * @param node - the Step the inspector is showing.
+     * @returns the prompt text, or `null` when the session has none before that Step.
+     */
+    async function promptForNode(sessionId, node = {}) {
+      let prompts = sessionPrompts.get(sessionId)
+      if (prompts === undefined) {
+        const records = await readText(sessionId)
+        prompts = (Array.isArray(records) ? records : [])
+          .filter((record) => record.type === 'user_message' && typeof record.text === 'string' && record.text.trim() !== '')
+          .map((record) => ({ t: typeof record.t === 'number' ? record.t : null, text: record.text }))
+        sessionPrompts.set(sessionId, prompts)
+      }
+      const start = typeof node.tStart === 'number' ? node.tStart : null
+      if (start === null) return prompts.length === 0 ? null : prompts[prompts.length - 1].text
+      let found = null
+      for (const prompt of prompts) {
+        if (prompt.t === null || prompt.t <= start) found = prompt.text
+        else break
+      }
+      return found
+    }
+
     /** The words of one session, for the `full` level of the export (D46). */
     async function readText(sessionId) {
       const response = await fetch(`/dsh-balance/session-cost/text?sessionId=${encodeURIComponent(sessionId)}`, {
@@ -2497,13 +2570,18 @@ window.__ModuleLoader__.load({
     function saveTextFile(name, text) {
       if (typeof document === 'undefined' || typeof Blob === 'undefined') return false
       const url = URL.createObjectURL(new Blob([text], { type: 'application/x-ndjson' }))
+      // The object URL is released on the next task either way, so a click that
+      // throws cannot leave it behind; the click itself happens in this task.
+      setTimeout(() => URL.revokeObjectURL(url), 0)
       const link = document.createElement('a')
       link.href = url
       link.download = name
       document.body.appendChild(link)
-      link.click()
-      link.remove()
-      setTimeout(() => URL.revokeObjectURL(url), 0)
+      try {
+        link.click()
+      } finally {
+        link.remove()
+      }
       return true
     }
 
@@ -2605,6 +2683,15 @@ window.__ModuleLoader__.load({
      * This is page memory, not a setting: nothing here is written to the Host.
      */
     const lastStep = new Map()
+
+    /**
+     * The newest subtree read per session.
+     *
+     * Two reads can overlap — "subagents only" and then "everything below" — and the
+     * slower one must not land on top of the newer answer. Like the marked Step, this
+     * is page memory: it is what the view is doing right now, never a setting.
+     */
+    const subtreeReads = new Map()
 
     /**
      * The Cost view: the per-Step chart with its tooltip, the top list and the inspector.
@@ -2712,6 +2799,7 @@ window.__ModuleLoader__.load({
             const childPayload = await readSeries(line.id)
             children.push({
               id: line.id,
+              parentId: line.parentId ?? sessionId,
               depth: line.depth,
               label: line.label,
               mode: line.mode,
@@ -2742,9 +2830,14 @@ window.__ModuleLoader__.load({
        * the view performs, and it can be slow on a wide tree.
        */
       const loadSubtree = async (full) => {
+        const read = (subtreeReads.get(sessionId) ?? 0) + 1
+        subtreeReads.set(sessionId, read)
         setSubtree((current) => ({ ...current, status: 'loading', error: null }))
         try {
           const answer = await readSubtree(sessionId, full)
+          // Two reads can overlap ("subagents only" and "everything below"); the
+          // newest one is the answer, and a slower older one is dropped.
+          if (subtreeReads.get(sessionId) !== read) return
           setSubtree({
             status: 'ok',
             lines: Array.isArray(answer.children) ? answer.children : [],
@@ -2754,6 +2847,7 @@ window.__ModuleLoader__.load({
             error: null,
           })
         } catch (error) {
+          if (subtreeReads.get(sessionId) !== read) return
           setSubtree((current) => ({
             ...current,
             status: 'error',
@@ -2957,13 +3051,15 @@ window.__ModuleLoader__.load({
         // tab of its own, never a row of the session's total (D25), and the strip
         // only appears when the session actually spawned something.
         spawns > 0
-          ? h(CostTabs, {
-            key: 'tabs',
-            t,
-            value: tab,
-            spawns,
-            onSelect: (value) => choose('tab', 'costTab', value),
-          })
+          ? h('div', { key: 'tabs', className: 'dshb_cost_tabrow' }, [
+            h(CostTabs, {
+              t,
+              value: tab,
+              spawns,
+              onSelect: (value) => choose('tab', 'costTab', value),
+            }),
+            h('span', { key: 'hint', className: 'dshb_cost_note' }, t('cost.tab.hint')),
+          ])
           : null,
         // The inspector and the reading beside it describe the same selection, so they
         // sit side by side: the Step reached from a row is read next to the row that
@@ -2977,7 +3073,7 @@ window.__ModuleLoader__.load({
             projection,
             peakIntervals: payload?.peakIntervals ?? [],
             inspectCall: props.inspectCall,
-            loadOlder: props.loadOlder,
+            loadPrompt: props.loadPrompt,
             subtree,
             onLoadSubtree: loadSubtree,
             onOpenSubtree: props.openSessionCost,
@@ -2989,7 +3085,6 @@ window.__ModuleLoader__.load({
               groups,
               spawns,
               state: subtree,
-              hint: t('cost.tab.hint'),
               onLoad: loadSubtree,
               onOpen: props.openSessionCost,
             })
@@ -2999,6 +3094,7 @@ window.__ModuleLoader__.load({
               mode: topk,
               currency,
               total,
+              intervals: payload?.peakIntervals ?? [],
               selected,
               onSelect: select,
             })),
@@ -3014,7 +3110,7 @@ window.__ModuleLoader__.load({
      * range, each saying what it is — when it ran, which model paid, what it called,
      * where the tokens went, what it cost and how much of the session that is.
      */
-    function TopK({ t, rows, mode, currency, total, selected, onSelect }) {
+    function TopK({ t, rows, mode, currency, total, intervals, selected, onSelect }) {
       const head = h('div', { className: 'dshb_cost_note', key: 'title' }, t('cost.topk.title'))
       if (rows.length === 0) {
         return h('div', { className: 'dshb_topk dshb_cost_card' }, [head, h('div', { className: 'dshb_cost_note', key: 'empty' }, t('cost.topk.empty'))])
@@ -3032,6 +3128,8 @@ window.__ModuleLoader__.load({
             h('span', { key: 'turn' }, t('cost.tip.turn', { turn: row.turn, step: row.step })),
             mode === 'turns' ? h('span', { className: 'dshb_cost_sub', key: 'steps' }, ` · ${t('cost.topk.ofSteps', { steps: row.steps })}`) : null,
             h('span', { className: 'dshb_cost_sub', key: 'when' }, ` · ${clock(row.tStart) ?? ''}`),
+            // A row identifies itself the way the tooltip does, phase included.
+            h('span', { className: 'dshb_cost_sub', key: 'phase' }, ` · ${t(`cost.tip.phase.${phaseOf(row.tStart, intervals)}`)}`),
           ]),
           h('span', { className: 'dshb_topk_money', key: 'money' }, `${costText(row.cost, currency)} · ${shareOf(row.cost, total)}`),
           h('span', { className: 'dshb_topk_body', key: 'body' }, [
@@ -3215,8 +3313,17 @@ window.__ModuleLoader__.load({
       ])
     }
 
+    /** The in-flight read: a long session folds and prices for a moment, and must say so. */
+    function Spinner({ label }) {
+      return h('div', { className: 'dshb_spinner', role: 'status' }, [
+        h('span', { className: 'dshb_spinner_ring', key: 'ring' }),
+        h('span', { key: 'label' }, label),
+      ])
+    }
+
     /** The in-place empty and error states: they explain themselves, no blank plot. */
     function CostEmpty({ t, state, error, onRetry, models, rates, onRates }) {
+      if (state === 'loading') return h('div', { className: 'dshb_cost_empty' }, h(Spinner, { label: t('cost.loading') }))
       const message = state === 'error'
         ? `${t('cost.empty.error')}${error === null || error === undefined ? '' : ` (${error})`}`
         : state === 'empty-rates'
@@ -3313,7 +3420,24 @@ window.__ModuleLoader__.load({
 
       react.useEffect(() => {
         const box = boxRef.current
-        if (box === null || box === undefined || typeof box.getBoundingClientRect !== 'function') return undefined
+        if (box === null || box === undefined) return undefined
+        /**
+         * Refuse the panel's scroll while the reader zooms.
+         *
+         * React hangs its own `wheel` on the root as a passive listener, where
+         * `preventDefault` is ignored: the zoom below still works, but the panel
+         * would scroll under the pointer at the same time. Only a native listener
+         * can stop that, so one is attached here, and it does nothing else.
+         */
+        const stopScroll = (event) => {
+          if (typeof event.preventDefault === 'function') event.preventDefault()
+        }
+        const listening = typeof box.addEventListener === 'function'
+        if (listening) box.addEventListener('wheel', stopScroll, { passive: false })
+        const release = () => {
+          if (listening && typeof box.removeEventListener === 'function') box.removeEventListener('wheel', stopScroll)
+        }
+        if (typeof box.getBoundingClientRect !== 'function') return release
         const measure = () => {
           const rect = box.getBoundingClientRect()
           if (rect.width > 0) setSize({ width: Math.round(rect.width), height: Math.round(rect.height) || 240 })
@@ -3322,9 +3446,12 @@ window.__ModuleLoader__.load({
         if (typeof ResizeObserver === 'function') {
           const observer = new ResizeObserver(measure)
           observer.observe(box)
-          return () => observer.disconnect()
+          return () => {
+            observer.disconnect()
+            release()
+          }
         }
-        return undefined
+        return release
       }, [])
 
       react.useEffect(() => {
@@ -3650,13 +3777,12 @@ window.__ModuleLoader__.load({
     /**
      * The inspector of one Step.
      *
-     * The prompt comes from the projection, and the projection holds usage, not
-     * messages: when there is no text the inspector says so and offers the explicit
-     * `Load older` action instead of loading the conversation behind the reader's
-     * back.
+     * The projection holds usage, not messages, so the prompt that started the Step's
+     * Turn is not part of it: the inspector says so and reads the session's words only
+     * when the reader asks, with the explicit `Load older` action.
      */
-    function CostInspector({ t, node, currency, total, projection = 'fact', peakIntervals, inspectCall, loadOlder, subtree = null, onLoadSubtree = null, onOpenSubtree = null }) {
-      const [older, setOlder] = react.useState({ status: 'idle', error: null })
+    function CostInspector({ t, node, currency, total, projection = 'fact', peakIntervals, inspectCall, loadPrompt, subtree = null, onLoadSubtree = null, onOpenSubtree = null }) {
+      const [prompt, setPrompt] = react.useState({ key: null, status: 'idle', error: null, text: null })
       if (node === null || node === undefined) {
         return h('div', { className: 'dshb_cost_card' }, h('div', { className: 'dshb_cost_note' }, t('cost.inspector.empty')))
       }
@@ -3676,14 +3802,19 @@ window.__ModuleLoader__.load({
         }, t('cost.inspector.focus'))
         : null
 
+      // The prompt belongs to the Step it was read for: a new selection starts over
+      // rather than showing the words of the Step before it.
+      const promptKey = `${node.turn}.${node.step}`
+      const shownPrompt = prompt.key === promptKey ? prompt : { key: promptKey, status: 'idle', text: null, error: null }
       const load = async () => {
-        if (typeof loadOlder !== 'function') return
-        setOlder({ status: 'loading', error: null })
+        if (typeof loadPrompt !== 'function') return
+        setPrompt({ key: promptKey, status: 'loading', text: null, error: null })
         try {
-          await loadOlder()
-          setOlder({ status: 'loaded', error: null })
+          const text = await loadPrompt(node)
+          const answered = typeof text === 'string' ? text.trim() : ''
+          setPrompt({ key: promptKey, status: answered === '' ? 'empty' : 'loaded', text: answered, error: null })
         } catch (error) {
-          setOlder({ status: 'failed', error: error instanceof Error ? error.message : String(error) })
+          setPrompt({ key: promptKey, status: 'failed', text: null, error: error instanceof Error ? error.message : String(error) })
         }
       }
 
@@ -3740,16 +3871,23 @@ window.__ModuleLoader__.load({
         // the explicit "load older" action instead of hidden auto-loading.
         h('div', { className: 'dshb_cost_note', key: 'prompt-title' }, t('cost.inspector.prompt')),
         h('div', { className: 'dshb_cost_note', key: 'prompt' }, [
-          h('span', { key: 'text' }, older.status === 'failed'
-            ? t('cost.inspector.loadFailed')
-            : t('cost.inspector.noPrompt')),
-          h('button', {
-            key: 'older',
-            className: 'dshb_btn',
-            disabled: older.status === 'loading' || typeof loadOlder !== 'function',
-            onClick: () => { void load() },
-            style: { marginLeft: 8 },
-          }, older.status === 'loading' ? t('cost.inspector.loading') : t('cost.inspector.loadOlder')),
+          h('span', {
+            key: 'text',
+            className: shownPrompt.status === 'loaded' ? 'dshb_cost_prompt' : undefined,
+          }, shownPrompt.status === 'loaded'
+            ? shownPrompt.text
+            : shownPrompt.status === 'failed' ? t('cost.inspector.loadFailed') : t('cost.inspector.noPrompt')),
+          shownPrompt.status === 'loading'
+            ? h('span', { key: 'given', className: 'dshb_cost_note' }, t('cost.inspector.loading'))
+            : shownPrompt.status === 'loaded' || shownPrompt.status === 'empty'
+              ? null
+              : h('button', {
+                key: 'older',
+                className: 'dshb_btn',
+                disabled: typeof loadPrompt !== 'function',
+                onClick: () => { void load() },
+                style: { marginLeft: 8 },
+              }, t('cost.inspector.loadOlder')),
         ]),
         h('div', { className: 'dshb_cost_note', key: 'calls-title' }, t('cost.inspector.calls')),
         calls.length === 0
@@ -3839,17 +3977,12 @@ window.__ModuleLoader__.load({
         label: () => bind('view.cost'),
         inject: (sessionId) => ({
           /**
-           * Load older conversation events on demand. The chart itself needs the
-           * projection, not the messages; this exists for the inspector's prompt
-           * preview and is only ever called from its explicit action.
+           * The prompt that started a Step's Turn, for the inspector's preview.
+           *
+           * The chart itself needs the projection, not the messages; this reads the
+           * session's words and is only ever called from the explicit action.
            */
-          loadOlder: async () => {
-            const sessions = ctx.get('sessions')
-            const session = sessions?.binding?.(sessionId)?.session
-            if (session === undefined || session === null) return false
-            await session.loadOlder()
-            return true
-          },
+          loadPrompt: (node) => promptForNode(sessionId, node),
           /**
            * Follow a spawned subagent into its own Cost view.
            *
@@ -3892,7 +4025,7 @@ window.__ModuleLoader__.load({
       costColumnDigits, costCell, indexTicks, projectionOf, Segmented, RateEntry, rateDraftOf,
       TopK, topRows, visibleSlice, sumBuckets, zoomWindow, panWindow, clampWindow, isFullWindow, turnSpans,
       arrowDelta, nextSelection, subtreeOf, stepGroups, Subagents, SubagentOpen, openSessionCost, preferCostView,
-      costHistory, exportFileName, truncateText, EXPORT_DETAILS, CostExport, saveTextFile, readSeries, readText,
+      costHistory, exportFileName, truncateText, EXPORT_DETAILS, CostExport, saveTextFile, readSeries, readText, promptForNode,
       valueAxis, compactNumber, tickLabel, tooltipLines,
     }
     return module.exports

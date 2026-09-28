@@ -756,3 +756,121 @@ test('the text route serves one session’s words and skips the inherited prefix
     },
   })
 })
+
+test('the series route reports the account-wide calibration of the session interval', async () => {
+  const states = new Map()
+  const sessions = new Map([['session-1', { id: 'session-1' }]])
+  await withPlugin(async ({ ctx, setBalance }) => {
+    // Two samples in the account's own currency, then a session that runs past the
+    // second one, so both fall inside the interval the series covers.
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    setBalance(9.34)
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    const unit = ctx.projections[0]
+    const now = Date.now()
+    const events = [
+      { type: 'step/start', seq: 1, time: now - 60_000, data: { turn: 1, step: 1 } },
+      { type: 'request/header', seq: 2, time: now - 60_000, data: { header: { config: { model: 'deepseek-flash' } } } },
+      { type: 'assistant/message', seq: 3, time: now - 30_000, data: { turn: 1, step: 1, usage: { inputTokens: 1e6, outputTokens: 0 } } },
+      { type: 'step/end', seq: 4, time: now + 1000, data: { turn: 1, step: 1 } },
+    ]
+    states.set('session-1', events.reduce((state, event) => unit.apply(state, event), unit.init()))
+
+    const res = response()
+    await ctx.routes.get('/dsh-balance/session-cost')(request('GET', '/dsh-balance/session-cost?sessionId=session-1'), res)
+    const payload = JSON.parse(res.body)
+    assert.equal(payload.ok, true, res.body)
+    assert.equal(payload.calibration.samples, 2, 'both samples of the interval calibrate the estimate')
+    assert.equal(payload.calibration.currency, 'CNY')
+    assert.equal(payload.calibration.delta, 3, 'the account lost 3 CNY while the session was sampled')
+    assert.ok(payload.calibration.from <= payload.calibration.to)
+  }, {
+    sessionOf: (id) => sessions.get(id),
+    projectionState: (session, key) => (key === 'dshBalanceCost' ? states.get(session.id) : undefined),
+  })
+})
+
+test('a write that arrives while the state is still loading survives the load', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
+  const previousHome = process.env.DSH_HOME
+  const previousFetch = globalThis.fetch
+  process.env.DSH_HOME = home
+  globalThis.fetch = async () => ({ ok: true, json: async () => balanceBody(12.34) })
+  const ctx = hostContext()
+  try {
+    const { mkdir, writeFile, readFile, rm } = await import('node:fs/promises')
+    await mkdir(join(home, 'dsh-balance'), { recursive: true })
+    const at = Date.now() - 86_400_000
+    // A sample just before the override, so the migration has a balance to anchor to.
+    await writeFile(join(home, 'dsh-balance', 'samples.ndjson'), [
+      JSON.stringify({ t: at - 60_000, currency: 'CNY', total: 10, granted: 0, toppedUp: 10 }),
+    ].join('\n') + '\n', 'utf8')
+    // A stored state with a saved identity and view choices, and one override the
+    // migration will anchor: the anchor writes the file, so it must not write it
+    // before the identity and the choices are back in memory.
+    await writeFile(join(home, 'dsh-balance', 'state.json'), JSON.stringify({
+      version: 1,
+      overrides: { '2026-09-01': { amount: 1.5, at } },
+      prefs: { costMetric: 'output', costTopK: 'turns' },
+      client: { version: '9.9.9', at: 1234, count: 7 },
+    }), 'utf8')
+    const module = await import(`../src/index.js?write-race=${encodeURIComponent(home)}`)
+    module.apply(ctx, module.Config({ apiKey: 'test-key', currency: 'CNY' }))
+    // Fire a write immediately: the load is still running.
+    const res = response()
+    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { costMetric: 'cost' }), res)
+    assert.equal(res.status, 200, res.body)
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    const state = JSON.parse(await readFile(join(home, 'dsh-balance', 'state.json'), 'utf8'))
+    assert.equal(state.prefs.costTopK, 'turns', 'the choices the load restored are still on disk')
+    assert.equal(state.prefs.costMetric, 'cost', 'with the one the request changed')
+    assert.equal(state.client.version, '9.9.9', 'and the saved client identity was not blanked')
+    assert.equal(state.overrides['2026-09-01'].balance !== undefined, true, 'while the override got its anchor')
+    await rm(home, { recursive: true, force: true })
+  } finally {
+    ctx.dispose()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('the sampling loop stops for good when the plugin is disposed with a fetch in flight', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
+  const previousHome = process.env.DSH_HOME
+  const previousFetch = globalThis.fetch
+  process.env.DSH_HOME = home
+  let calls = 0
+  let release = null
+  globalThis.fetch = () => {
+    calls += 1
+    return new Promise((resolve) => {
+      release = () => resolve({ ok: true, json: async () => balanceBody(1) })
+    })
+  }
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const ctx = hostContext()
+  try {
+    const module = await import(`../src/index.js?dispose-race=${encodeURIComponent(home)}`)
+    module.apply(ctx, module.Config({ apiKey: 'test-key', currency: 'CNY', refreshIntervalMs: 15000 }))
+    // Let the state load settle, then fire the first tick and wait for its fetch.
+    for (let index = 0; index < 500 && calls === 0; index += 1) {
+      t.mock.timers.tick(500)
+      await new Promise((resolve) => setImmediate(resolve))
+    }
+    assert.equal(calls, 1, 'the first tick asked for the balance')
+    ctx.dispose()
+    release()
+    for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setImmediate(resolve))
+    t.mock.timers.tick(10 * 60_000)
+    assert.equal(calls, 1, 'and the loop did not schedule another poll after the plugin went away')
+  } finally {
+    ctx.dispose()
+    t.mock.timers.reset()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    globalThis.fetch = previousFetch
+    const { rm } = await import('node:fs/promises')
+    await rm(home, { recursive: true, force: true })
+  }
+})
