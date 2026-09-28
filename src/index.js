@@ -19,12 +19,14 @@
  */
 import Schema from '@deepseek-ai/schemastery'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
-import { buildLedger } from './history.js'
+import { buildLedger, calibrationOf } from './history.js'
+import { textRecordsOf } from './export-text.js'
 import {
   OFF_PEAK_RATIO, PUBLIC_HOLIDAYS_2026, RULE_SOURCE_URL, RULE_VERIFIED_ON,
-  nextChange, peakSchedule, peakState, phaseAt, priceAt, utcWindowsLabel, windowsOfLocalDay,
+  nextChange, peakIntervalsBetween, peakSchedule, phaseAt, priceAt, rateSchedule,
+  utcWindowsLabel, windowsOfLocalDay,
 } from './pricing.js'
-import { SESSION_COST_KEY, makeSessionCostProjection } from './session-cost.js'
+import { SESSION_COST_KEY, makeFallbackResolver, makeSessionCostProjection, seriesPayload, subtreeSummary } from './session-cost.js'
 import { appendSample, readSamplesCompacting, readState, writeState } from './store.js'
 
 export const name = 'dsh-balance'
@@ -74,7 +76,38 @@ export const Config = Schema.object({
     cacheMiss: Schema.number().min(0).default(1),
     output: Schema.number().min(0).default(4),
   }).default({ cacheHit: 0.02, cacheMiss: 1, output: 4 }),
+  /**
+   * Peak rates per 1M tokens entered by the reader, keyed by model id. They win
+   * over `fallbackPrices` and price the model even when `priceUnknownModels` is
+   * off; the off-peak rate is half and cache write is billed as a cache miss.
+   */
+  fallbackRates: Schema.dict(Schema.object({
+    cacheHit: Schema.number().min(0).default(0),
+    cacheMiss: Schema.number().min(0).default(0),
+    output: Schema.number().min(0).default(0),
+  })).default({}),
 })
+
+/** A rate map is accepted only when every entry is a set of non-negative numbers. */
+function isFallbackRates(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  return Object.entries(value).every(([model, rate]) => model !== '' && rate !== null && typeof rate === 'object' &&
+    ['cacheHit', 'cacheMiss', 'output'].every((key) => Number.isFinite(Number(rate[key])) && Number(rate[key]) >= 0))
+}
+
+/** Drop the entries a hand-written settings body got wrong instead of storing them. */
+function normalizeFallbackRates(value) {
+  const next = {}
+  for (const [model, rate] of Object.entries(value ?? {})) {
+    if (!isFallbackRates({ [model]: rate })) continue
+    next[model] = {
+      cacheHit: Number(rate.cacheHit),
+      cacheMiss: Number(rate.cacheMiss),
+      output: Number(rate.output),
+    }
+  }
+  return next
+}
 
 /** Keys a runtime settings write may change, with the check each value must pass. */
 const MUTABLE_SETTINGS = {
@@ -85,8 +118,28 @@ const MUTABLE_SETTINGS = {
   warningThreshold: (value) => Number.isFinite(value) && value >= 0,
   dangerThreshold: (value) => Number.isFinite(value) && value >= 0,
   historyDays: (value) => Number.isInteger(value) && value >= 3 && value <= 400,
+  fallbackRates: isFallbackRates,
 }
 
+/** Settings whose stored value is folded into the runtime config, not kept verbatim. */
+const SETTING_SHAPES = {
+  currency: (value) => String(value).toUpperCase(),
+  fallbackRates: normalizeFallbackRates,
+}
+
+/**
+ * Browser-side choices that have no runtime counterpart: they are stored and
+ * echoed back to the client, never applied to the Host config. The Cost view's
+ * metric, X axis, Tariff projection, top-K mode and open tab live here — brush
+ * and zoom deliberately do not, so reopening the view shows the whole range.
+ */
+const UI_SETTINGS = {
+  costMetric: (value) => ['cost', 'output', 'cacheRead', 'cacheWrite', 'tokens'].includes(value),
+  costAxis: (value) => value === 'time' || value === 'index',
+  costProjection: (value) => ['fact', 'offPeak', 'peak'].includes(value),
+  costTopK: (value) => value === 'steps' || value === 'turns',
+  costTab: (value) => value === 'session' || value === 'subagents',
+}
 export function apply(ctx, config) {
   const runtime = {
     apiKey: config.apiKey ?? '',
@@ -104,6 +157,13 @@ export function apply(ctx, config) {
     holidays: Array.isArray(config.holidays) ? config.holidays : [...PUBLIC_HOLIDAYS_2026],
     priceUnknownModels: config.priceUnknownModels === true,
     fallbackPrices: { cacheHit: 0.02, cacheMiss: 1, output: 4, ...(config.fallbackPrices ?? {}) },
+    fallbackRates: normalizeFallbackRates(config.fallbackRates ?? {}),
+  }
+
+  /** Fold one accepted settings value into the runtime config. */
+  const assignSetting = (key, value) => {
+    const shape = SETTING_SHAPES[key]
+    runtime[key] = shape === undefined ? value : shape(value)
   }
 
   const log = (message) => {
@@ -180,17 +240,22 @@ export function apply(ctx, config) {
       ])
       samples = stored
       if (state.overrides !== null && typeof state.overrides === 'object') overrides = state.overrides
-      if (anchorMissingOverrides()) {
-        await persist()
-        log('anchored the overrides that predate the balance anchor')
-      }
+      // Everything the file holds is taken into memory first: a write triggered
+      // below must never put back an empty identity or empty view choices.
       if (state.client !== null && typeof state.client === 'object') clientHello = { ...clientHello, ...state.client }
       const prefs = state.prefs ?? {}
       for (const [key, check] of Object.entries(MUTABLE_SETTINGS)) {
         if (prefs[key] !== undefined && check(prefs[key])) {
-          runtime[key] = key === 'currency' ? String(prefs[key]).toUpperCase() : prefs[key]
+          assignSetting(key, prefs[key])
           uiPrefs[key] = runtime[key]
         }
+      }
+      for (const [key, check] of Object.entries(UI_SETTINGS)) {
+        if (prefs[key] !== undefined && check(prefs[key])) uiPrefs[key] = prefs[key]
+      }
+      if (anchorMissingOverrides()) {
+        await persist()
+        log('anchored the overrides that predate the balance anchor')
       }
       log(`loaded ${samples.length} samples, ${Object.keys(overrides).length} overrides, ${Object.keys(uiPrefs).length} panel settings`)
     } catch (error) {
@@ -330,10 +395,14 @@ export function apply(ctx, config) {
     return inflight
   }
 
+  /** Set once the plugin is disposed: a tick in flight must not schedule another. */
+  let loopStopped = false
+
   const resetLoop = () => {
     if (loopTimer !== null) clearTimeout(loopTimer)
     const tick = () => {
       void refresh().then(() => {
+        if (loopStopped) return
         const delay = cache.error === 'api-key-missing' ? 30000 : runtime.refreshIntervalMs
         loopTimer = setTimeout(tick, delay)
       })
@@ -342,8 +411,10 @@ export function apply(ctx, config) {
   }
 
   ctx.effect(() => {
+    loopStopped = false
     resetLoop()
     return () => {
+      loopStopped = true
       if (loopTimer !== null) clearTimeout(loopTimer)
     }
   }, 'dsh-balance: balance sampling loop')
@@ -440,6 +511,238 @@ export function apply(ctx, config) {
   }
 
   /**
+   * The projection state of one session.
+   *
+   * A session this host owns answers from the live projection. A session that is
+   * only open for reading — the usual case in a browser instance that did not
+   * start the agent, where `sessions.get` knows nothing — is folded here from its
+   * stored log through the same unit, so both paths price with one rule.
+   *
+   * @param sessionId - the session whose state is read.
+   * @returns `{ state }`, or `{ error, detail? }` when it cannot be read.
+   */
+  const projectionStateOf = async (sessionId) => {
+    const projections = ctx.get('sessionProjections')
+    if (projections === undefined) return { error: 'projection-unavailable' }
+    try {
+      const live = ctx.get('sessions')?.get?.(sessionId)
+      if (live !== undefined && live !== null) {
+        const state = projections.stateOf(live, SESSION_COST_KEY)
+        return state === undefined ? { error: 'projection-unavailable' } : { state }
+      }
+      const query = ctx.get('sessionQuery')
+      if (query === undefined) return { error: 'unknown-session' }
+      const snapshot = await query.readSession(sessionId)
+      // A forked child is seeded with its parent's turns; that prefix is the
+      // parent's work, and the fold is told to skip it exactly as the live unit is.
+      const empty = storedFold.init(undefined, snapshot.inheritedEventCount ?? 0)
+      const state = snapshot.events.reduce((folded, event) => storedFold.apply(folded, event), empty)
+      return { state }
+    } catch (error) {
+      return { error: 'unknown-session', detail: message(error) }
+    }
+  }
+
+  /**
+   * The per-Step series of one session, priced and ready for the Cost view.
+   *
+   * This is the only route that reads the series, and it answers for exactly the
+   * session it was asked about: nothing here enumerates sessions or walks a
+   * subtree — subagent sessions get their own route (and their own explicit ask).
+   *
+   * @param sessionId - the session whose series is requested.
+   * @returns the payload, or `{ ok: false, error }` when the session or the
+   * projection is not available.
+   */
+  const seriesPayloadOf = async (sessionId) => {
+    const resolved = await projectionStateOf(sessionId)
+    if (resolved.error !== undefined) {
+      return { ok: false, error: resolved.error, ...(resolved.detail === undefined ? {} : { detail: resolved.detail }) }
+    }
+    try {
+      const state = resolved.state
+      const currency = effectiveCurrency()
+      const options = {
+        currency,
+        holidays: runtime.holidays,
+        fallback: makeFallbackResolver(projectionConfig()),
+      }
+      const nodes = seriesPayload(state, options)
+      const first = nodes[0]
+      const last = nodes[nodes.length - 1]
+      const fromMs = first === undefined ? Date.now() : first.tStart
+      const toMs = last === undefined ? fromMs + 1 : Math.max(last.tEnd, fromMs + 1)
+      return {
+        ok: true,
+        sessionId,
+        seq: state.seq,
+        currency,
+        nodes,
+        rule: {
+          sourceUrl: RULE_SOURCE_URL,
+          verifiedOn: RULE_VERIFIED_ON,
+          holidays: runtime.holidays,
+          rates: rateSchedule(currency),
+        },
+        peakIntervals: peakIntervalsBetween(fromMs, toMs, runtime.holidays),
+        /**
+         * What the account as a whole spent while this session was sampled, or
+         * `null` when the samples cannot express it (D27).
+         */
+        calibration: calibrationOf({ samples, fromMs, toMs, currency }),
+        /**
+         * The session's own title, so the export can name what it is a history of.
+         * A session without one reports an empty title, never a fabricated one.
+         */
+        title: await sessionTitleOf(sessionId),
+        /** The view choices this reader saved, so the view opens as they left it. */
+        prefs: browserPrefs(),
+      }
+    } catch (error) {
+      warn(`cannot read the session series: ${message(error)}`)
+      return { ok: false, error: message(error) }
+    }
+  }
+
+  /**
+   * The title of one session, or `''` when it has none.
+   *
+   * A title is a nicety of the series payload (the export names its subject with
+   * it), so a query service that is absent or cannot fold one is not an error: the
+   * figures stand on their own.
+   */
+  const sessionTitleOf = async (sessionId) => {
+    const query = ctx.get('sessionQuery')
+    if (query?.readTitle === undefined) return ''
+    try {
+      const snapshot = await query.readTitle(sessionId)
+      return typeof snapshot?.title === 'string' ? snapshot.title : ''
+    } catch {
+      return ''
+    }
+  }
+
+  /**
+   * The text of one session's log, for the export's `full` level.
+   *
+   * The cost projection holds usage and not messages (D20), so the words come from
+   * the log itself — read here, normalized, and never truncated: the client owns
+   * the 2000-character rule, which keeps one place responsible for the payload
+   * (D45, D46). Nothing is written anywhere; the client downloads what it gets.
+   *
+   * @param sessionId - the session whose text records are requested.
+   * @returns `{ ok, records }`, or an error when the log cannot be read.
+   */
+  const textPayloadOf = async (sessionId) => {
+    const query = ctx.get('sessionQuery')
+    if (query === undefined) return { ok: false, error: 'query-unavailable' }
+    try {
+      const snapshot = await query.readSession(sessionId)
+      return {
+        ok: true,
+        sessionId,
+        records: textRecordsOf(snapshot.events, snapshot.inheritedEventCount ?? 0),
+      }
+    } catch (error) {
+      warn(`cannot read the session text: ${message(error)}`)
+      return { ok: false, error: message(error) }
+    }
+  }
+
+  /**
+   * The subagent tree of one session, each child priced by the same unit.
+   *
+   * This is the only route that reads other sessions, and it does so only when it
+   * is asked: with `full` it walks every session below through `listDescendants`,
+   * without it only the direct children are read (D26). Nothing here feeds the
+   * parent's total — a child line is a line of its own (D25) — and a child that
+   * cannot be read becomes a diagnostic line instead of failing the request, so
+   * one corrupt branch does not hide the rest of the tree.
+   *
+   * @param sessionId - the session whose subtree is requested.
+   * @param full - `true` to walk the whole tree, `false` for direct children.
+   * @returns the per-child lines, the subtree total and the diagnostics.
+   */
+  const childrenPayloadOf = async (sessionId, full, signal) => {
+    const subagents = ctx.get('subagents')
+    if (subagents === undefined) return { ok: false, error: 'subagents-unavailable' }
+    const options = {
+      currency: effectiveCurrency(),
+      holidays: runtime.holidays,
+      fallback: makeFallbackResolver(projectionConfig()),
+    }
+    let rows
+    try {
+      rows = full === true
+        ? await subagents.listDescendants(sessionId, signal)
+        : (await subagents.listChildren(sessionId, signal)).map((entry) => ({ ...entry, parentId: sessionId, depth: 1, kind: 'child' }))
+    } catch (error) {
+      return { ok: false, error: message(error) }
+    }
+    const children = []
+    const diagnostics = []
+    for (const row of rows) {
+      // An `unsupported` diagnostic means the catalog entry has an unknown mode:
+      // its own log is still readable and still counts, so it becomes a child line
+      // marked `unknown` — only a branch that cannot be read is a diagnostic.
+      const unsupported = row.kind === 'diagnostic' && row.reason === 'unsupported'
+      if (row.kind === 'diagnostic' && !unsupported) {
+        diagnostics.push({ id: row.id, parentId: row.parentId, depth: row.depth, reason: row.reason })
+        continue
+      }
+      const resolved = await projectionStateOf(row.id)
+      if (resolved.error !== undefined) {
+        diagnostics.push({ id: row.id, parentId: row.parentId, depth: row.depth, reason: 'unavailable' })
+        continue
+      }
+      try {
+        const summary = subtreeSummary(seriesPayload(resolved.state, options))
+        children.push({
+          id: row.id,
+          parentId: row.parentId,
+          depth: row.depth,
+          mode: unsupported ? 'unknown' : row.mode,
+          label: row.label ?? '',
+          // `listDescendants` strips the creation time, so a deep line has none:
+          // the client shows its id rather than a 1970 date.
+          createdAt: Number.isFinite(row.createdAt) ? row.createdAt : null,
+          ...(row.activity === undefined ? {} : { activity: row.activity }),
+          hasChildren: row.hasChildren === true,
+          ...summary,
+        })
+      } catch (error) {
+        diagnostics.push({ id: row.id, parentId: row.parentId, depth: row.depth, reason: 'unreadable' })
+        warn(`cannot price the child session ${row.id}: ${message(error)}`)
+      }
+    }
+    const total = subtreeSummary(children.map((child) => ({
+      tStart: child.tStart,
+      tEnd: child.tEnd,
+      buckets: child.tokens,
+      byModel: Object.fromEntries(child.models.map((model) => [model, { buckets: child.tokens }])),
+      cost: child.cost,
+      costByBucket: child.costByBucket,
+      offPeak: child.offPeak,
+      peak: child.peak,
+      unpriced: child.unpriced,
+    })))
+    return {
+      ok: true,
+      sessionId,
+      full: full === true,
+      currency: options.currency,
+      children,
+      diagnostics,
+      /**
+       * The subtree's own money: a child line carries exactly the shape a Step
+       * does here, so the sum is the same sum the parent's own total is. The Step
+       * count is the sum of the lines' Steps, not the number of sessions.
+       */
+      total: { ...total, steps: children.reduce((count, child) => count + child.steps, 0) },
+    }
+  }
+
+  /**
    * Currency the account is actually billed in.
    *
    * `currency` in the config is a preference, not a promise: an account topped up
@@ -454,8 +757,19 @@ export function apply(ctx, config) {
     return cache.balances[0]?.currency ?? runtime.currency
   }
 
-  /** The live config the session-cost projection prices with. */
-  const projectionConfig = () => ({ ...runtime, currency: effectiveCurrency() })
+  /**
+   * The live config the session-cost projection prices with. The global fallback
+   * is handed over already gated: with `priceUnknownModels` off an unknown model
+   * must stay unpriced, which is what the Cost view flags, while a rate the reader
+   * entered for that model prices it whatever that flag says.
+   */
+  const projectionConfig = () => ({ ...runtime, currency: effectiveCurrency(), fallbackPrices: fallback() })
+
+  /**
+   * The same unit again, unregistered: the series route folds a stored session log
+   * with it when this host does not own the session live.
+   */
+  const storedFold = makeSessionCostProjection(projectionConfig)
 
   const balancePayload = () => {
     const currency = effectiveCurrency()
@@ -485,8 +799,15 @@ export function apply(ctx, config) {
     zone: runtime.dayZone,
     nowMs: Date.now(),
     days: runtime.historyDays,
-    keepDays: runtime.keepDays,
   })
+
+  /**
+   * The browser-side choices, and only those: the settings the Host applies live
+   * in their own payload fields, so this stays the map the Cost view restores from.
+   */
+  const browserPrefs = () => Object.fromEntries(
+    Object.entries(uiPrefs).filter(([key]) => UI_SETTINGS[key] !== undefined),
+  )
 
   const buildPayload = (sessionId, zone = 'local') => ({
     host: { version: VERSION, now: Date.now(), dir, samples: samples.length, loaded },
@@ -495,6 +816,9 @@ export function apply(ctx, config) {
     peak: peakPayload(zone),
     prices: pricePayload(),
     fallbackPrices: runtime.priceUnknownModels ? runtime.fallbackPrices : null,
+    fallbackRates: runtime.fallbackRates,
+    /** Choices the panel stored, so the browser restores them on the next mount. */
+    prefs: browserPrefs(),
     sampling: {
       refreshIntervalMs: runtime.refreshIntervalMs,
       clientPollIntervalMs: runtime.clientPollIntervalMs,
@@ -578,6 +902,81 @@ export function apply(ctx, config) {
       sendJson(res, 200, buildPayload(''))
     }, { lenient: true })
 
+    webCtx.effect(() => webCtx.webServer.register({
+      kind: 'exact',
+      path: '/dsh-balance/session-cost',
+      async handler(req, res) {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          res.writeHead(405, { Allow: 'GET, HEAD' })
+          res.end()
+          return
+        }
+        const url = new URL(req.url ?? '/dsh-balance/session-cost', 'http://127.0.0.1')
+        const sessionId = url.searchParams.get('sessionId') ?? ''
+        if (sessionId === '') {
+          sendJson(res, 400, { ok: false, error: 'sessionId is required' })
+          return
+        }
+        if (!loaded) await ready
+        sendJson(res, 200, await seriesPayloadOf(sessionId))
+      },
+    }), 'dsh-balance: session cost route')
+
+    // The subtree route. It is a separate registration because it is a separate
+    // question: the series route above answers for one session and enumerates
+    // nothing, while this one walks the subagent catalog on an explicit ask (D26).
+    webCtx.effect(() => webCtx.webServer.register({
+      kind: 'exact',
+      path: '/dsh-balance/session-cost/children',
+      async handler(req, res) {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          res.writeHead(405, { Allow: 'GET, HEAD' })
+          res.end()
+          return
+        }
+        const url = new URL(req.url ?? '/dsh-balance/session-cost/children', 'http://127.0.0.1')
+        const sessionId = url.searchParams.get('sessionId') ?? ''
+        if (sessionId === '') {
+          sendJson(res, 400, { ok: false, error: 'sessionId is required' })
+          return
+        }
+        if (!loaded) await ready
+        // A tree can be wide and every child is read from its own log, so the walk
+        // is cancellable: the reader closing the view stops the work on the Host.
+        const abort = new AbortController()
+        const cancel = () => abort.abort()
+        req.on?.('close', cancel)
+        try {
+          sendJson(res, 200, await childrenPayloadOf(sessionId, url.searchParams.get('full') === '1', abort.signal))
+        } finally {
+          req.off?.('close', cancel)
+        }
+      },
+    }), 'dsh-balance: session cost children route')
+
+    // The text route. It exists for the export's `full` level alone (D46): the cost
+    // projection holds no messages, so the words come from the session log, and only
+    // when the reader asks for them.
+    webCtx.effect(() => webCtx.webServer.register({
+      kind: 'exact',
+      path: '/dsh-balance/session-cost/text',
+      async handler(req, res) {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          res.writeHead(405, { Allow: 'GET, HEAD' })
+          res.end()
+          return
+        }
+        const url = new URL(req.url ?? '/dsh-balance/session-cost/text', 'http://127.0.0.1')
+        const sessionId = url.searchParams.get('sessionId') ?? ''
+        if (sessionId === '') {
+          sendJson(res, 400, { ok: false, error: 'sessionId is required' })
+          return
+        }
+        if (!loaded) await ready
+        sendJson(res, 200, await textPayloadOf(sessionId))
+      },
+    }), 'dsh-balance: session cost text route')
+
     postRoute('/dsh-balance/hello', 'dsh-balance: client hello route', async (body, res) => {
       const mount = body.phase === 'mount'
       clientHello = {
@@ -592,6 +991,9 @@ export function apply(ctx, config) {
     }, { lenient: true })
 
     postRoute('/dsh-balance/overrides', 'dsh-balance: overrides route', async (body, res) => {
+        // The load owns the maps it restores, so a request that arrives while it is
+        // in flight must wait rather than edit a map that is about to be replaced.
+        if (!loaded) await ready
         const date = typeof body.date === 'string' ? body.date : ''
         if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
           sendJson(res, 400, { ok: false, error: 'date must be YYYY-MM-DD' })
@@ -619,12 +1021,12 @@ export function apply(ctx, config) {
             },
           }
         }
-        if (!loaded) await ready
         await persist()
         sendJson(res, 200, { ok: true, overrides, ledger: ledgerPayload() })
     })
 
     postRoute('/dsh-balance/settings', 'dsh-balance: settings route', async (body, res) => {
+        if (!loaded) await ready
         const changed = []
         for (const [key, check] of Object.entries(MUTABLE_SETTINGS)) {
           if (body[key] === undefined) continue
@@ -632,13 +1034,28 @@ export function apply(ctx, config) {
             sendJson(res, 400, { ok: false, error: `${key} rejected` })
             return
           }
-          runtime[key] = key === 'currency' ? String(body[key]).toUpperCase() : body[key]
+          assignSetting(key, body[key])
           uiPrefs[key] = runtime[key]
+          changed.push(key)
+        }
+        for (const [key, check] of Object.entries(UI_SETTINGS)) {
+          if (body[key] === undefined) continue
+          if (!check(body[key])) {
+            sendJson(res, 400, { ok: false, error: `${key} rejected` })
+            return
+          }
+          uiPrefs[key] = body[key]
           changed.push(key)
         }
         if (changed.includes('refreshIntervalMs')) resetLoop()
         if (changed.length > 0) await persist()
-        sendJson(res, 200, { ok: true, changed, sampling: { refreshIntervalMs: runtime.refreshIntervalMs, clientPollIntervalMs: runtime.clientPollIntervalMs } })
+        sendJson(res, 200, {
+          ok: true,
+          changed,
+          prefs: browserPrefs(),
+          fallbackRates: runtime.fallbackRates,
+          sampling: { refreshIntervalMs: runtime.refreshIntervalMs, clientPollIntervalMs: runtime.clientPollIntervalMs },
+        })
     })
   })
 }

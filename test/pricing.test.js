@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   BJT_OFFSET_MS, OFF_PEAK_RATIO, PUBLIC_HOLIDAYS_2026,
-  bjtFields, costOfTokens, isPeakInstant, modelClass, peakState, priceAt, ratesAt,
+  bjtFields, costOfTokens, isPeakInstant, modelClass, peakState, priceAt, ratesAt, windowsOfLocalDay,
 } from '../src/pricing.js'
 
 /** Epoch ms of a Beijing-time wall-clock instant. */
@@ -99,6 +99,23 @@ test('a fallback rate can price an unknown model', () => {
   assert.equal(rate.class, 'fallback')
 })
 
+test('a Tariff projection forces the phase without changing the rate table', () => {
+  const peak = bjt(2026, 9, 24, 10, 0)
+  const off = bjt(2026, 9, 24, 13, 0)
+  const factPeak = priceAt('deepseek-flash', peak, { currency: 'CNY' })
+  const factOff = priceAt('deepseek-flash', off, { currency: 'CNY' })
+  assert.equal(factPeak.cacheMiss, 2)
+  assert.equal(factOff.cacheMiss, 1)
+  // Off-peak is half of the peak rate, in both directions and at either instant.
+  assert.equal(priceAt('deepseek-flash', off, { currency: 'CNY', phase: 'peak' }).cacheMiss, 2)
+  assert.equal(priceAt('deepseek-flash', peak, { currency: 'CNY', phase: 'offPeak' }).cacheMiss, 1)
+  assert.equal(priceAt('deepseek-flash', off, { currency: 'CNY', phase: 'peak' }).peak, true)
+  assert.equal(priceAt('deepseek-flash', peak, { currency: 'CNY', phase: 'offPeak' }).peak, false)
+  // The projection still reads the table in force at the event, not the current one.
+  const oldPeak = priceAt('deepseek-flash', bjt(2026, 9, 1, 10, 0), { currency: 'CNY', phase: 'offPeak' })
+  assert.equal(oldPeak.cacheMiss, 1.5)
+})
+
 test('token cost adds cache writes to the miss bucket', () => {
   const rate = { cacheHit: 0.02, cacheMiss: 1, output: 4 }
   const cost = costOfTokens({ uncachedInput: 1e6, cacheRead: 1e6, cacheWrite: 1e6, output: 1e6 }, rate)
@@ -109,4 +126,29 @@ test('the shipped holiday list covers the published 2026 windows', () => {
   assert.equal(PUBLIC_HOLIDAYS_2026.includes('2026-09-25'), true)
   assert.equal(PUBLIC_HOLIDAYS_2026.includes('2026-10-07'), true)
   assert.equal(PUBLIC_HOLIDAYS_2026.length, 3 + 9 + 3 + 5 + 3 + 3 + 7)
+})
+
+test('the host’s own zone defines the local day, not UTC', () => {
+  const previous = process.env.TZ
+  try {
+    // 00:30 on a Saturday in Tokyo is still Friday in UTC: the day labels must
+    // follow the host's calendar, not the UTC one.
+    process.env.TZ = 'Asia/Tokyo'
+    const now = Date.UTC(2026, 8, 18, 15, 30)
+    assert.deepEqual(windowsOfLocalDay(now, [], 'local', 0), [], 'Saturday has no peak window')
+    assert.deepEqual(
+      windowsOfLocalDay(now, [], 'local', -1),
+      ['10:00–13:00', '15:00–19:00'],
+      'Friday, the day the host is still living in, is the one before it, labelled in Tokyo time',
+    )
+    assert.deepEqual(
+      windowsOfLocalDay(now, [], 'Asia/Tokyo', 0),
+      [],
+      'and naming the zone explicitly agrees that this day has no window',
+    )
+    process.env.TZ = 'UTC'
+  } finally {
+    if (previous === undefined) delete process.env.TZ
+    else process.env.TZ = previous
+  }
 })

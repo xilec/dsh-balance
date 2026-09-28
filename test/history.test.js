@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  buildLedger, compactSamples, dayKeyOf, medianGapMs, movements, parseSamples,
+  buildLedger, calibrationOf, compactSamples, dayKeyOf, medianGapMs, movements, parseSamples,
   recentDayKeys, serializeSamples,
 } from '../src/history.js'
 
@@ -255,4 +255,38 @@ test('compaction keeps every recent sample and one per hour before that', () => 
   const kept = compactSamples([...old, ...recent], { nowMs: now, keepDays: 7 })
   assert.equal(kept.filter((s) => s.t >= now - 7 * 24 * hour).length, 2)
   assert.equal(kept.filter((s) => s.t < now - 7 * 24 * hour).length, 1) // all ten fall in one hour
+})
+
+test('calibration needs two samples inside the window and says what it covers', () => {
+  const samples = [
+    sample('2026-09-24T09:00:00Z', 100),
+    sample('2026-09-24T09:30:00Z', 99.5),
+    sample('2026-09-24T10:00:00Z', 99),
+    sample('2026-09-24T10:30:00Z', 98),
+    sample('2026-09-24T11:00:00Z', 97.75),
+    sample('2026-09-24T12:00:00Z', 97),
+  ]
+  const window = { fromMs: at('2026-09-24T09:15:00Z'), toMs: at('2026-09-24T10:45:00Z') }
+  const calibration = calibrationOf({ samples, ...window, currency: 'CNY' })
+  assert.deepEqual(calibration, {
+    currency: 'CNY',
+    samples: 3,
+    from: at('2026-09-24T09:30:00Z'),
+    to: at('2026-09-24T10:30:00Z'),
+    delta: 1.5,
+  }, 'the delta is first-in-window minus last-in-window, and it says which samples')
+
+  assert.equal(calibrationOf({ samples, ...window, currency: 'USD' }), null, 'another currency has no samples here')
+  assert.equal(calibrationOf({ samples: samples.slice(0, 1), fromMs: 0, toMs: at('2026-09-25T00:00:00Z') }), null, 'one sample cannot express a delta')
+  assert.equal(calibrationOf({ samples, fromMs: at('2026-09-24T10:45:00Z'), toMs: at('2026-09-24T09:15:00Z') }), null, 'a reversed window is refused')
+  assert.equal(calibrationOf({}), null)
+
+  // A top-up inside the window is a negative delta, not an error: the label says
+  // the line is account-wide, so it must report what the account did.
+  const toppedUp = calibrationOf({
+    samples: [sample('2026-09-24T09:30:00Z', 10), sample('2026-09-24T10:30:00Z', 60)],
+    fromMs: at('2026-09-24T09:00:00Z'),
+    toMs: at('2026-09-24T11:00:00Z'),
+  })
+  assert.equal(toppedUp.delta, -50)
 })

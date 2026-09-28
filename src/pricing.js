@@ -333,6 +333,28 @@ function zoneOffsetMs(tsMs, zone) {
 }
 
 /**
+ * The instant one calendar day begins in a zone.
+ *
+ * The host's own zone is read from `Date`, whose fields are local; an IANA zone
+ * is derived from its offset, and the offset is taken twice because it can change
+ * between the instant asked about and the day boundary itself (a DST day).
+ *
+ * @param tsMs - the instant that defines "today" in the zone.
+ * @param zone - IANA zone name, or `local` for the host's own zone.
+ * @param dayOffset - 0 for today, 1 for tomorrow.
+ * @returns the epoch instant the day starts at.
+ */
+function localDayStart(tsMs, zone, dayOffset) {
+  if (zone === 'local' || zone === undefined || zone === null) {
+    const date = new Date(tsMs)
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate() + dayOffset).getTime()
+  }
+  const boundary = (offset) => Math.floor((tsMs + offset) / DAY_MS) * DAY_MS - offset + dayOffset * DAY_MS
+  const first = boundary(zoneOffsetMs(tsMs, zone))
+  return boundary(zoneOffsetMs(first, zone))
+}
+
+/**
  * Peak windows of one local calendar day, as `HH:MM–HH:MM` labels in that zone.
  *
  * @param tsMs - the instant that defines "today" in the zone.
@@ -342,8 +364,7 @@ function zoneOffsetMs(tsMs, zone) {
  * @returns labels in window order; empty when that day has no peak window.
  */
 export function windowsOfLocalDay(tsMs, holidays = PUBLIC_HOLIDAYS_2026, zone = 'local', dayOffset = 0) {
-  const offset = zoneOffsetMs(tsMs, zone)
-  const dayStart = Math.floor((tsMs + offset) / DAY_MS) * DAY_MS - offset + dayOffset * DAY_MS
+  const dayStart = localDayStart(tsMs, zone, dayOffset)
   const dayEnd = dayStart + DAY_MS
   // A window belongs to the day its *start* falls in: one that opens at 23:00 and
   // closes at 03:00 is listed under the earlier day, and the tail of a window that
@@ -401,11 +422,30 @@ export function ratesAt(tsMs) {
 }
 
 /**
+ * Effective-dated rate tables of one currency, oldest first.
+ *
+ * The Cost view ships the whole schedule to the client so a session that spans a
+ * price change is rendered against the rates that were in force, exactly as the
+ * Host priced it.
+ *
+ * @param currency - `CNY` or `USD`; anything else is read as `CNY`.
+ * @returns `[{ effectiveFrom, rates: { flash, pro } }]` in chronological order.
+ */
+export function rateSchedule(currency) {
+  const code = String(currency ?? 'CNY').toUpperCase() === 'USD' ? 'USD' : 'CNY'
+  return RATE_SCHEDULE.map((entry) => ({ effectiveFrom: entry.fromMs, rates: entry.rates[code] }))
+}
+
+/**
  * The price of one model at one instant.
  *
  * @param model - model id.
  * @param tsMs - epoch milliseconds of the billable event.
- * @param options - `currency` (CNY/USD) and `holidays`.
+ * @param options - `currency` (CNY/USD), `holidays`, `fallback` (peak rates for a
+ * model the table does not know) and `phase`: `fact` bills the instant as it was,
+ * `peak` forces the peak rate and `offPeak` the off-peak one, which is what the
+ * two Tariff projections show. The rate table itself still comes from `tsMs`, so
+ * a projection over an old session uses the rates that were in force then.
  * @returns `{ cacheHit, cacheMiss, output, peak, reason, currency, class }`, or
  * null when neither the config nor the built-in tables know the model.
  */
@@ -417,12 +457,14 @@ export function priceAt(model, tsMs, options = {}) {
   if (kind === null) return null
   const peak = kind === 'fallback' ? options.fallback : (table[kind] ?? options.fallback)
   if (peak === undefined || peak === null) return null
-  const ratio = state.peak ? 1 : OFF_PEAK_RATIO
+  const projected = options.phase === 'peak' || options.phase === 'offPeak'
+  const atPeak = projected ? options.phase === 'peak' : state.peak
+  const ratio = atPeak ? 1 : OFF_PEAK_RATIO
   return {
     cacheHit: peak.cacheHit * ratio,
     cacheMiss: peak.cacheMiss * ratio,
     output: peak.output * ratio,
-    peak: state.peak,
+    peak: atPeak,
     reason: state.reason,
     currency,
     class: kind,

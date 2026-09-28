@@ -123,6 +123,36 @@ function seriesFor(samples, currency) {
 }
 
 /**
+ * What the account spent while a session ran, as far as the samples reach.
+ *
+ * The balance is account-wide and the samples are sparse, so this is a
+ * calibration rather than a measurement of one session: the delta covers every
+ * session and every other charge between the first and the last sample inside
+ * the window, and a single sample cannot express a delta at all — hence `null`
+ * below two samples (the view then shows no calibration line).
+ *
+ * @param options - `samples` (any currency), `fromMs`/`toMs` of the window and
+ * the `currency` to keep.
+ * @returns `{ currency, samples, from, to, delta }`, or `null` when the window
+ * holds fewer than two samples of that currency.
+ */
+export function calibrationOf(options = {}) {
+  const { samples = [], fromMs = 0, toMs = 0, currency } = options
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs < fromMs) return null
+  const inside = seriesFor(samples, currency).filter((sample) => sample.t >= fromMs && sample.t <= toMs)
+  if (inside.length < 2) return null
+  const first = inside[0]
+  const last = inside[inside.length - 1]
+  return {
+    currency: first.currency ?? currency ?? null,
+    samples: inside.length,
+    from: first.t,
+    to: last.t,
+    delta: round6(first.total - last.total),
+  }
+}
+
+/**
  * Fold a balance series into per-interval movements and credit events.
  *
  * @param series - ascending samples of one currency.
@@ -181,7 +211,7 @@ export function buildLedger(options) {
   const keys = recentDayKeys(todayKey, days)
 
   const sampled = new Map()
-  let coarseKeys = new Set()
+  const coarseKeys = new Set()
   for (const interval of intervals) {
     if (interval.spend <= 0) continue
     const fromKey = dayKeyOf(interval.from, zone)

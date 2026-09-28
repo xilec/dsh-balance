@@ -148,6 +148,7 @@ and a value written there outranks the row for that key only.
 | `warningThreshold` / `dangerThreshold` | `10` / `5` | Balance colouring |
 | `holidays` | 2026 list | Chinese public holidays (Beijing dates) |
 | `priceUnknownModels` / `fallbackPrices` | `false` / — | Price models outside the built-in table |
+| `fallbackRates` | `{}` | Peak rates per 1M tokens keyed by model id, for a model the table does not price; they win over `fallbackPrices` and can be entered from the Cost view or the panel. Off-peak is half, a cache write is billed as a cache miss |
 
 State lives in `$DSH_HOME/dsh-balance/`: `samples.ndjson` is the append-only
 sample log (thinned to one sample per hour beyond `keepDays`), `state.json` holds
@@ -161,7 +162,20 @@ the day overrides, the settings and the last client contact.
   a month are far less sensitive to this than a single day.
 * **Everything under the API key counts.** The balance is account-wide, so the
   1d/1w/1m figures include any other machine or tool using the same key. Only the
-  session estimate is per-session.
+  session estimate is per-session; the Cost view shows that account-wide figure
+  beside the estimate as a calibration line whenever two or more samples fall
+  inside the session's interval.
+* **Subagents are their own sessions.** A session that spawns subagents marks the
+  spawning Step and offers to read the subtree on a `Subagents` tab under the
+  chart, but the child's cost is never folded into the session estimate: the
+  header stays that one session's on both tabs.
+* **The history export is a file you keep.** The Cost view can assemble the
+  session's history as one ordered NDJSON stream and download it — `costs` by
+  default (usage, money, tool names and call ids), `full` on request (also the
+  message, tool and thinking text, each text field cut at 2000 characters and
+  flagged `truncated`), with the subtree folded in only when it is asked for.
+  Reading a subtree reads those sessions' logs; the file is written by the
+  browser, never into the workspace or `$DSH_HOME`.
 * **A top-up hides the spend inside the same sampling gap.** With 1–2 top-ups a
   month and a five-minute cadence this is negligible; the credit list shows every
   event so a suspicious day can be corrected.
@@ -183,7 +197,7 @@ src/session-cost.js   the sessionProjections unit (tokens priced per event time)
 src/store.js          samples.ndjson and state.json on disk
 src/index.js          the Host plugin: sampler loop, HTTP routes
 client/client.js      the browser half: the readout, the peak chip, the panel
-test/                 node --test suite (76 cases, no build step)
+test/                 node --test suite (136 cases, no build step)
 ```
 
 ```sh
