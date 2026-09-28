@@ -14,10 +14,10 @@ jobs:
     name: Unit tests (npm)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           # Node version is taken from `engines.node` (">=22") in package.json,
           # so CI and the flake/consumer never drift apart.
@@ -46,10 +46,10 @@ jobs:
     name: Dead code and duplication
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version-file: package.json
           cache: npm
@@ -72,7 +72,7 @@ jobs:
     name: Flake package
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # install-nix-action enables flakes and the nix-command experimental
       # features on the runner.
