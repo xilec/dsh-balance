@@ -294,6 +294,25 @@ rationale. Alternatives that were considered and rejected are named.
   the route passes `readSession().inheritedEventCount` into the same `init`. Without it a child's
   line would bill the parent's work a second time and adopt the parent's spawns as its own, which
   is precisely what D25 forbids.
+- **D45 — The export is a flat record stream assembled in the view.** The builder is a pure
+  function of what the routes return (the series payload of the exported session, each child's
+  payload when the subtree is included, and — at the `full` level only — the text events of the
+  same sessions), so the whole stream is unit-testable with a golden fixture and the Host keeps
+  owning every price. Ordering is by `t`, then by `seq`, with `meta` first, and `i` is stamped
+  after ordering, so a merged parent/child stream is linear by construction and can be split again
+  by `session`/`depth`. The vocabulary is fixed in the spec: `usage` per report (all three
+  projections), `retry` per evicted attempt, `tool_call`, the text records of the `full` level,
+  and `subagent_spawn`/`subagent_settle` around a child's records. Two facts had to reach the
+  wire for this: the source sequence of a report, an evicted attempt and a tool call, and the
+  priced buckets of an evicted attempt — hence `stateVersion: 5`, whose mismatch discards a
+  persisted row and refolds, as always.
+- **D46 — Text comes from the log, through its own route, and only for `full`.** The projection
+  deliberately holds usage and not messages (D20), so the export's text level reads the session
+  events (`sessionQuery.readSession`) on the Host and normalizes them into text records — message
+  text, tool arguments and results, thinking — with no truncation applied there. The view truncates
+  at 2000 characters and flags it, which keeps the Host route a plain log reader and puts the one
+  rule that shapes the payload under the golden test. Nothing is written anywhere: the browser
+  hands the assembled text to a download (D11).
 - **D23 — Export defaults to the current session plus markers.** By default the export covers the
   current session and records `subagent_spawn`/`subagent_settle` markers; folding children into
   the stream is an explicit checkbox with progress, because it reads other sessions.

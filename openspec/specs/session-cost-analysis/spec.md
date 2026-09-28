@@ -384,24 +384,34 @@ steered through its stored preference.
 ### Requirement: Linear history export
 
 The view SHALL be able to export the session's history as one ordered NDJSON stream,
-`dsh-balance-<session id first 8 chars>-<yyyymmdd-hhmm>.cost-history.ndjson`, built and
-downloaded in the browser. The stream MUST begin with a `meta` record (plugin version, session
-id and title, models, currency, the Tariff rule snapshot with rates, holidays, rule source and
-date, the projection definitions, and the detail level) and every record MUST carry `i`,
-`type`, `session`, `depth`, `seq` and `t`. Subagent sessions MUST be merged into the same
-stream in time order and marked by spawn and settle records, with `session` and `depth`
-allowing the streams to be split apart again. Each usage record MUST carry its cost under all
-three Tariff projections. The export SHALL offer two detail levels: `costs` (default, no
-message or tool text) and `full` (message, tool and thinking text, each text field truncated
-at 2000 characters and flagged as truncated, with `thinking` present only at this level). The
-UI MUST warn before a `full` export. The plugin MUST NOT write the export anywhere on disk or
-in the workspace.
+`dsh-balance-<session id first 8 chars>-<yyyymmdd-hhmm>.cost-history.ndjson`, assembled by the
+view and downloaded in the browser. The stream MUST begin with a `meta` record (plugin version,
+session id and title, models, currency, the Tariff rule snapshot with rates, holidays, rule
+source and date, the projection definitions, and the detail level) and every record MUST carry
+`i`, `type`, `session`, `depth`, `seq` and `t` — the position in the stream, the record type, the
+session the record came from, its nesting below the exported session, the session-log sequence it
+came from, and its instant. Records MUST be ordered by `t` and then by `seq`, with `meta` first.
+
+The record vocabulary SHALL be `meta`; one `usage` record per usage report carrying the model,
+the token buckets and the cost under all three Tariff projections; one `retry` record per attempt
+evicted by a retry carrying its model, buckets and projections and never counted in a total;
+`tool_call` carrying the call name and id; `user_message`, `assistant_message`,
+`assistant_thinking` and `tool_result` carrying text at the `full` level only; and
+`subagent_spawn` / `subagent_settle` around the records of a child session. Subagent sessions
+MUST be merged into the same stream in time order and marked by spawn and settle records, with
+`session` and `depth` allowing the streams to be split apart again. Text at the `full` level
+comes from the session log, because the projection holds usage and not messages.
+
+The export SHALL offer two detail levels: `costs` (default, no message or tool text) and `full`
+(message, tool and thinking text, each text field truncated at 2000 characters and flagged as
+truncated, with `thinking` present only at this level). The UI MUST warn before a `full` export.
+The plugin MUST NOT write the export anywhere on disk or in the workspace.
 
 #### Scenario: Default export
 
 - **WHEN** the reader exports with the default detail level
 - **THEN** a single NDJSON file with the described name is downloaded, containing the ordered
-  event stream with costs and no message or tool text
+  record stream with costs and no message or tool text
 
 #### Scenario: Full export warns
 
@@ -412,7 +422,7 @@ in the workspace.
 #### Scenario: Subagents in one stream
 
 - **WHEN** the session has subagent sessions and they are included
-- **THEN** their events appear in the same stream at their own times, inside spawn and settle
+- **THEN** their records appear in the same stream at their own times, inside spawn and settle
   records, and nothing is written to the workspace or the harness home
 
 ### Requirement: Empty and error states
