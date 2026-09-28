@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { makeSessionCostProjection, makeFallbackResolver, seriesPayload, SESSION_COST_KEY, TARIFF_PROJECTIONS } from '../src/session-cost.js'
+import { makeSessionCostProjection, makeFallbackResolver, seriesPayload, subtreeSummary, SESSION_COST_KEY, TARIFF_PROJECTIONS } from '../src/session-cost.js'
 import { BJT_OFFSET_MS } from '../src/pricing.js'
 
 const bjt = (y, m, d, h = 0, min = 0) => Date.UTC(y, m - 1, d, h, min) - BJT_OFFSET_MS
@@ -23,7 +23,7 @@ test('the projection is registered under its own key with client-visible fields'
   assert.equal(unit.key, SESSION_COST_KEY)
   assert.equal(typeof unit.stateSchema.parse, 'function')
   assert.equal(typeof unit.wire.viewSchema.parse, 'function')
-  assert.equal(unit.stateVersion, 3)
+  assert.equal(unit.stateVersion, 4)
 })
 
 test('a peak-window session is priced at peak rates', () => {
@@ -325,4 +325,112 @@ test('a call preview keeps three lines of a long command', () => {
   const [other] = seriesPayload(truncated, { currency: 'CNY' })
   assert.equal(other.calls[0].preview.length, 200, 'the character budget still applies')
   assert.match(other.calls[0].preview, /…$/)
+})
+
+test('a spawn is attributed to the Step that created the child, and its money stays out of the session', () => {
+  const unit = projection()
+  const time = bjt(2026, 9, 24, 10, 0)
+  const state = fold(unit, sequenced([
+    { type: 'step/start', time, data: { turn: 4, step: 2 } },
+    ...message(time + 1_000, 4, 2, 1e6, 0, 0).map((event) => ({ ...event, time: time + 1_000 })),
+    { type: 'subagent/catalog', time: time + 2_000, data: { version: 1, childId: 'child-1', childCreatedAt: time + 1_500, mode: 'continuable', label: 'Survey the client' } },
+    { type: 'step/end', time: time + 3_000, data: { turn: 4, step: 2 } },
+    { type: 'step/start', time: time + 4_000, data: { turn: 4, step: 3 } },
+    ...message(time + 5_000, 4, 3, 0, 0, 1e6).map((event, index) => ({ ...event, time: time + 5_000, seq: index + 6 })),
+  ]))
+  const nodes = seriesPayload(state, { currency: 'CNY' })
+  assert.equal(nodes.length, 2)
+  assert.deepEqual(nodes[0].children.map((child) => child.id), ['child-1'], 'the spawning Step carries the marker')
+  assert.equal(nodes[0].children[0].label, 'Survey the client')
+  assert.equal(nodes[0].children[0].createdAt, time + 1_500, 'with the child’s own creation instant')
+  assert.deepEqual(nodes[1].children, [], 'and no other Step does')
+  // 1M miss at 2 CNY + 1M output at 8 CNY: the child contributes nothing.
+  assert.equal(state.cost, 10)
+  assert.equal(state.spawns.length, 1)
+
+  const again = unit.apply(state, { type: 'subagent/catalog', seq: 99, time: time + 6_000, data: { childId: 'child-1', childCreatedAt: time + 1_500, mode: 'continuable', label: 'Survey the client' } })
+  assert.equal(again.spawns.length, 1, 'the same child is catalogued once')
+
+  // A background child is catalogued after its Step ended, and the next Step has
+  // already started: the creation instant still names the Step that spawned it.
+  const background = fold(unit, sequenced([
+    { type: 'step/start', time, data: { turn: 4, step: 2 } },
+    ...message(time + 1_000, 4, 2, 1e6, 0, 0).map((event) => ({ ...event, time: time + 1_000 })),
+    { type: 'step/end', time: time + 2_000, data: { turn: 4, step: 2 } },
+    { type: 'step/start', time: time + 5_000, data: { turn: 4, step: 3 } },
+    { type: 'subagent/catalog', time: time + 6_000, data: { childId: 'child-bg', childCreatedAt: time + 1_500, mode: 'one-shot' } },
+  ]))
+  const [first, second] = seriesPayload(background, { currency: 'CNY' })
+  assert.deepEqual(first.children.map((child) => child.id), ['child-bg'], 'the spawn belongs to the Step that ran the call')
+  assert.deepEqual(second.children, [], 'not to the Step that happened to be open when the fact was written')
+
+  // A spawn catalogued outside any Step at all is still kept, and the export will
+  // see it even though no Step of this session can carry the marker.
+  const loose = fold(unit, sequenced([
+    { type: 'subagent/catalog', time, data: { childId: 'child-2', childCreatedAt: time, mode: 'one-shot' } },
+  ]))
+  assert.equal(loose.spawns.length, 1)
+  assert.equal(loose.spawns[0].label, '')
+  assert.equal(loose.spawns[0].createdAt, time, 'the event time stands in when there is no creation instant')
+})
+
+test('a child summary sums the same priced Steps the parent uses', () => {
+  const unit = projection()
+  const time = bjt(2026, 9, 24, 10, 0)
+  const child = fold(unit, sequenced([
+    { type: 'step/start', time, data: { turn: 1, step: 1 } },
+    ...message(time + 1_000, 1, 1, 1e6, 0, 1e6).map((event) => ({ ...event, time: time + 1_000 })),
+    { type: 'step/end', time: time + 2_000, data: { turn: 1, step: 1 } },
+    { type: 'step/start', time: time + 3_000, data: { turn: 1, step: 2 } },
+    ...message(time + 4_000, 1, 2, 0, 2e6, 0).map((event, index) => ({ ...event, time: time + 4_000, seq: 10 + index })),
+  ]))
+  const summary = subtreeSummary(seriesPayload(child, { currency: 'CNY' }))
+  assert.equal(summary.steps, 2)
+  assert.equal(summary.cost, 10.08, 'the two Steps, priced as the parent prices its own')
+  assert.equal(summary.costByBucket.uncachedInput, 2)
+  assert.equal(summary.costByBucket.cacheRead, 0.08)
+  assert.equal(summary.costByBucket.output, 8)
+  assert.deepEqual(summary.models, ['deepseek-flash'])
+  assert.equal(summary.tStart, time)
+  assert.equal(summary.tEnd, time + 4_000)
+  assert.equal(summary.offPeak.cost, 5.04, 'and every projection comes along')
+  assert.deepEqual(subtreeSummary([]), {
+    steps: 0,
+    tokens: { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0 },
+    models: [],
+    unpriced: false,
+    tStart: 0,
+    tEnd: 0,
+    cost: 0,
+    costByBucket: { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0 },
+    offPeak: { cost: 0, costByBucket: { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0 } },
+    peak: { cost: 0, costByBucket: { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0 } },
+  })
+})
+
+test('a forked child does not inherit its parent’s work or spawns', () => {
+  const unit = projection()
+  const time = bjt(2026, 9, 24, 10, 0)
+  const events = sequenced([
+    { type: 'step/start', time, data: { turn: 1, step: 1 } },
+    ...message(time + 1_000, 1, 1, 1e6, 0, 1e6).map((event) => ({ ...event, time: time + 1_000 })),
+    { type: 'step/end', time: time + 2_000, data: { turn: 1, step: 1 } },
+    { type: 'subagent/catalog', time: time + 2_500, data: { childId: 'child-1', childCreatedAt: time + 2_500, mode: 'one-shot' } },
+    { type: 'step/start', time: time + 3_000, data: { turn: 2, step: 1 } },
+    ...message(time + 4_000, 2, 1, 1e6, 0, 0).map((event, index) => ({ ...event, time: time + 4_000, seq: 10 + index })),
+  ])
+  // The child's log is its own events after the inherited prefix (seeded with the
+  // parent's completed turn, sequences 1..4).
+  const inherited = { session: { id: 'child' }, inheritedEventCount: 6, events }
+  const child = inherited.events.reduce((state, event) => unit.apply(state, event), unit.init(undefined, inherited.inheritedEventCount))
+  assert.equal(child.cost, 2, 'only the child’s own Step is billed: 1M miss at 2 CNY')
+  assert.equal(child.spawns.length, 0, 'and the parent’s catalog fact is not the child’s spawn')
+  const [node] = seriesPayload(child, { currency: 'CNY' })
+  assert.equal(node.turn, 2, 'the inherited Step is not part of the child’s series')
+  assert.equal(node.cost, 2)
+
+  // Without the count the same log would report the parent's turn too.
+  const whole = events.reduce((state, event) => unit.apply(state, event), unit.init())
+  assert.equal(whole.cost, 12)
+  assert.equal(whole.spawns.length, 1)
 })

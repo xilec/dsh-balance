@@ -162,7 +162,13 @@ the day overrides, the settings and the last client contact.
   a month are far less sensitive to this than a single day.
 * **Everything under the API key counts.** The balance is account-wide, so the
   1d/1w/1m figures include any other machine or tool using the same key. Only the
-  session estimate is per-session.
+  session estimate is per-session; the Cost view shows that account-wide figure
+  beside the estimate as a calibration line whenever two or more samples fall
+  inside the session's interval.
+* **Subagents are their own sessions.** A session that spawns subagents marks the
+  spawning Step and offers to read the subtree on a `Subagents` tab under the
+  chart, but the child's cost is never folded into the session estimate: the
+  header stays that one session's on both tabs.
 * **A top-up hides the spend inside the same sampling gap.** With 1–2 top-ups a
   month and a five-minute cadence this is negligible; the credit list shows every
   event so a suspicious day can be corrected.
@@ -184,7 +190,7 @@ src/session-cost.js   the sessionProjections unit (tokens priced per event time)
 src/store.js          samples.ndjson and state.json on disk
 src/index.js          the Host plugin: sampler loop, HTTP routes
 client/client.js      the browser half: the readout, the peak chip, the panel
-test/                 node --test suite (76 cases, no build step)
+test/                 node --test suite (136 cases, no build step)
 ```
 
 ```sh

@@ -83,6 +83,20 @@ const callSchema = z.object({
 })
 
 /**
+ * One subagent spawn seen on this session: the catalog fact the harness appends
+ * to the *parent* log, with the child's creation instant and the instant the fact
+ * itself was written. The Step is derived from these times when the series is
+ * read (D41), because a background child is catalogued after its Step ended.
+ */
+const spawnSchema = z.object({
+  id: z.string(),
+  mode: z.string(),
+  label: z.string(),
+  createdAt: z.number(),
+  time: z.number(),
+})
+
+/**
  * One `(turn, step)` node: every usage report of the Step, the reports a retry
  * evicted, the calls of the Step and its flags. `slotOpen` is the replacement
  * slot: `true` means the newest report may still be restated, `false` means a
@@ -119,6 +133,17 @@ const stateSchema = z.object({
   byModel: z.record(z.string(), z.object({ buckets: bucketsSchema, cost: z.number() })),
   order: z.array(z.string()),
   unpriced: z.array(z.string()),
+  /**
+   * Subagents this session spawned, in the order the catalog facts arrived. The
+   * child's own money never enters `totals` or `cost` (D25): this is the record
+   * of the spawn, and the child's series is a separate, explicit read (D26).
+   */
+  spawns: z.array(spawnSchema).optional(),
+  /**
+   * Events below this sequence belong to the parent a forked child was seeded
+   * with. They are folded into nothing here: a child's line is its own work.
+   */
+  inheritedEventCount: z.number().int().nonnegative().optional(),
   seq: z.number().int().nonnegative(),
 })
 
@@ -253,7 +278,17 @@ export function makeSessionCostProjection(getConfig) {
     ])
   }
 
-  const init = () => ({
+  /**
+   * The empty state, carrying the count of events this session inherited.
+   *
+   * A forked child is seeded with its parent's completed turns, and those events
+   * are in the child's log with the parent's sequence numbers: folding them would
+   * bill the child for the parent's work and read the parent's spawns as its own.
+   *
+   * @param _header - the session header, unused: the count is what matters.
+   * @param inheritedEventCount - events below this sequence belong to the parent.
+   */
+  const init = (_header, inheritedEventCount = 0) => ({
     model: null,
     series: undefined,
     pending: null,
@@ -264,6 +299,8 @@ export function makeSessionCostProjection(getConfig) {
     byModel: {},
     order: [],
     unpriced: [],
+    spawns: [],
+    inheritedEventCount: Number.isInteger(inheritedEventCount) && inheritedEventCount > 0 ? inheritedEventCount : 0,
     seq: 0,
   })
 
@@ -393,6 +430,33 @@ export function makeSessionCostProjection(getConfig) {
     }
   }
 
+  /**
+   * Record one subagent spawn as the parent's own catalog fact.
+   *
+   * The event names the child and its creation instant, not the Step that caused
+   * it, and a background child is catalogued after its Step has ended — so the
+   * Step is derived when the series is read rather than at fold time (D41). A
+   * child catalogued twice is kept once, and one established outside any Step is
+   * still kept, because the export needs the spawn even when no Step owns it.
+   */
+  const withSpawn = (state, event) => {
+    const { childId, childCreatedAt, mode, label } = event.data ?? {}
+    if (typeof childId !== 'string' || childId === '') return state
+    const spawns = state.spawns ?? []
+    if (spawns.some((spawn) => spawn.id === childId)) return state
+    const time = typeof event.time === 'number' ? event.time : 0
+    return {
+      ...state,
+      spawns: [...spawns, {
+        id: childId,
+        mode: typeof mode === 'string' ? mode : 'unknown',
+        label: typeof label === 'string' ? label : '',
+        createdAt: typeof childCreatedAt === 'number' && Number.isFinite(childCreatedAt) ? childCreatedAt : time,
+        time,
+      }],
+    }
+  }
+
   /** Close the pending node: its Step cannot receive anything else. */
   const withStepEnd = (state, turn, step, time) => {
     const node = state.pending
@@ -455,6 +519,7 @@ export function makeSessionCostProjection(getConfig) {
     if (event.type === 'turn/end') return flush(state)
     if (event.type === 'llm/retry-started') return withRetry(state, event.data.turn, event.data.step)
     if (event.type === 'tool/call') return withCall(state, event)
+    if (event.type === 'subagent/catalog') return withSpawn(state, event)
     if (event.type === 'assistant/message' || event.type === 'assistant/attempt') {
       const { turn, step } = event.data
       const usage = usageOf(event)
@@ -472,6 +537,10 @@ export function makeSessionCostProjection(getConfig) {
   }
 
   const apply = (state, event) => {
+    // A forked child carries its parent's completed turns as inherited events:
+    // they are the parent's work, already billed there, and reading them here
+    // would double-count the child's line (and adopt the parent's spawns).
+    if (typeof event.seq === 'number' && event.seq < (state.inheritedEventCount ?? 0)) return state
     const base = current(state)
     const next = reduce(base, event)
     if (next === base) return base
@@ -500,7 +569,7 @@ export function makeSessionCostProjection(getConfig) {
 
   return {
     key: SESSION_COST_KEY,
-    stateVersion: 3,
+    stateVersion: 4,
     stateSchema,
     init,
     apply,
@@ -517,9 +586,44 @@ function seriesNodes(state) {
 }
 
 /**
+ * Attach every spawn to the Step that caused it.
+ *
+ * The catalog fact names the child and its creation instant but not the Step, and
+ * a background child is catalogued after its Step has ended, so the Step is chosen
+ * by time: the one whose interval holds the creation instant, else the last Step
+ * that had already started, else the first. That keeps a background spawn on the
+ * Step that ran the tool call instead of on whatever Step happened to be open
+ * while the fact was written.
+ *
+ * @param nodes - every node of the series, oldest first.
+ * @param spawns - the spawns the state recorded (`{ id, createdAt, time, ... }`).
+ * @returns one array of spawns per node, in the same order.
+ */
+function attachSpawns(nodes, spawns) {
+  const attached = nodes.map(() => [])
+  if (nodes.length === 0) return attached
+  for (const spawn of spawns) {
+    const at = Number.isFinite(spawn.createdAt) && spawn.createdAt > 0 ? spawn.createdAt : spawn.time
+    let chosen = -1
+    for (let index = 0; index < nodes.length; index += 1) {
+      const node = nodes[index]
+      // An interval holds the instant; an open Step holds everything after its start.
+      if (node.tStart <= at && (node.tEnd === null || node.tEnd === undefined || at <= node.tEnd)) {
+        chosen = index
+        break
+      }
+      if (node.tStart <= at) chosen = index
+    }
+    if (chosen < 0) chosen = 0
+    attached[chosen].push(spawn)
+  }
+  return attached
+}
+
+/**
  * The per-Step series as the Cost view consumes it: every node priced under the
  * live rule and under the two other Tariff projections, with its buckets, its
- * calls and its flags.
+ * calls, its subagent spawns and its flags.
  *
  * @param state - the projection state (`sessionProjections.stateOf`).
  * @param options - `currency`, `holidays` of the Tariff rule and `fallback`:
@@ -527,7 +631,84 @@ function seriesNodes(state) {
  * @returns an array of step records, oldest first.
  */
 export function seriesPayload(state, options = {}) {
-  return seriesNodes(state).map((node) => describeNode(node, options))
+  const nodes = seriesNodes(state)
+  const spawns = attachSpawns(nodes, state.spawns ?? [])
+  return nodes.map((node, index) => describeNode(node, { ...options, children: spawns[index] }))
+}
+
+/**
+ * Round the per-bucket money of every projection and sum each one.
+ *
+ * One Step and one child session go through this same chain, which is what makes
+ * their figures comparable: the per-report figures are already rounded, so a
+ * printed row sums exactly into the total that prints above it (D5).
+ *
+ * @param bucketCost - `{ fact, offPeak, peak }` of raw bucket sums.
+ * @returns `{ rounded, costs }`, each keyed by projection.
+ */
+function roundProjections(bucketCost) {
+  const rounded = {}
+  const costs = {}
+  for (const projection of TARIFF_PROJECTIONS) {
+    rounded[projection] = BUCKET_KEYS.reduce(
+      (acc, key) => ({ ...acc, [key]: round6(bucketCost[projection][key]) }),
+      zero(),
+    )
+    costs[projection] = round6(BUCKET_KEYS.reduce((total, key) => total + rounded[projection][key], 0))
+  }
+  return { rounded, costs }
+}
+
+/**
+ * One session's own figures, summed from its already-priced Steps.
+ *
+ * Used for a subagent's line: the child is priced by the very same rule and the
+ * very same rounding as the parent, so its total is comparable with the Step
+ * that spawned it — and it is added to nothing (D25).
+ *
+ * @param nodes - step records from `seriesPayload`.
+ * @returns the totals, the bucket sums per projection and the span of the Steps.
+ */
+export function subtreeSummary(nodes) {
+  const totals = zero()
+  const bucketCost = { fact: zero(), offPeak: zero(), peak: zero() }
+  const models = new Set()
+  let unpriced = false
+  let tStart = null
+  let tEnd = null
+  for (const node of nodes ?? []) {
+    for (const key of BUCKET_KEYS) totals[key] += node.buckets?.[key] ?? 0
+    for (const model of Object.keys(node.byModel ?? {})) models.add(model)
+    if (node.unpriced === true) unpriced = true
+    if (tStart === null || node.tStart < tStart) tStart = node.tStart
+    if (tEnd === null || node.tEnd > tEnd) tEnd = node.tEnd
+    for (const projection of TARIFF_PROJECTIONS) {
+      const money = projectionOfNode(node, projection)
+      for (const key of BUCKET_KEYS) bucketCost[projection][key] += money.costByBucket[key] ?? 0
+    }
+  }
+  const { rounded, costs } = roundProjections(bucketCost)
+  return {
+    steps: Array.isArray(nodes) ? nodes.length : 0,
+    tokens: BUCKET_KEYS.reduce((acc, key) => ({ ...acc, [key]: totals[key] }), zero()),
+    models: [...models],
+    unpriced,
+    tStart: tStart ?? 0,
+    tEnd: tEnd ?? 0,
+    cost: costs.fact,
+    costByBucket: rounded.fact,
+    offPeak: { cost: costs.offPeak, costByBucket: rounded.offPeak },
+    peak: { cost: costs.peak, costByBucket: rounded.peak },
+  }
+}
+
+/** The money of one node under a projection, `fact` included. */
+function projectionOfNode(node, projection) {
+  if (projection === 'fact') {
+    return { cost: node.cost ?? 0, costByBucket: node.costByBucket ?? zero() }
+  }
+  const entry = node[projection]
+  return entry ?? { cost: 0, costByBucket: zero() }
 }
 
 /** One report's rate under a projection, with the fallback already resolved. */
@@ -571,15 +752,7 @@ function describeNode(node, options) {
   // The per-report figures are already rounded, so summing them and rounding the
   // result changes nothing: a Step's cost is exactly the sum of its printed rows,
   // and the session total is exactly the sum of its Steps.
-  const rounded = {}
-  const costs = {}
-  for (const projection of TARIFF_PROJECTIONS) {
-    rounded[projection] = BUCKET_KEYS.reduce(
-      (acc, key) => ({ ...acc, [key]: round6(bucketCost[projection][key]) }),
-      zero(),
-    )
-    costs[projection] = round6(BUCKET_KEYS.reduce((total, key) => total + rounded[projection][key], 0))
-  }
+  const { rounded, costs } = roundProjections(bucketCost)
   return {
     turn: node.turn,
     step: node.step,
@@ -591,6 +764,8 @@ function describeNode(node, options) {
     retries: node.retries,
     evicted: node.evicted.map((report) => ({ model: report.model, time: report.time, buckets: report.buckets })),
     calls: node.calls,
+    /** Subagents spawned by this Step; empty on every other Step. */
+    children: options.children ?? [],
     buckets,
     byModel,
     cost: costs.fact,

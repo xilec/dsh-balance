@@ -12,12 +12,23 @@ markers, and a linear history export for deeper analysis.
 
 The plugin SHALL register a per-session Cost view in the `conversation.view` slot with the
 label `Cost` and a position immediately after Trajectory. The view MUST be mounted lazily on
-selection and MUST be available whether or not Coding Tools are enabled.
+selection and MUST be available whether or not Coding Tools are enabled. The view SHALL name
+the session it belongs to on a line above the chart, in full and selectable as a whole, with a
+one-click copy action, because the id is the handle the reader passes on. The two readings under the chart — the session's own
+list and the subtree — SHALL be cards of equal height in one bounded band, while the chart keeps
+the width it is given.
 
 #### Scenario: The tab appears for an open session
 
 - **WHEN** a session is open in the shell
 - **THEN** a `Cost` entry is offered next to `Trajectory`, and selecting it shows the Cost view
+
+#### Scenario: The open session is named
+
+- **WHEN** the Cost view is mounted for a session
+- **THEN** the session id is shown in full above the chart with a copy action, the two readings
+  below it are cards of the same height in one bounded band, and the chart itself is not narrowed
+  by that band
 
 #### Scenario: No work before selection
 
@@ -116,9 +127,11 @@ by the request — and the route MUST NOT enumerate or read any other session.
 The series response SHALL be self-describing: each node carries `turn`, `step`, start and end
 time, the token buckets split per model, the retry count, its tool calls (name, call id, and an
 argument preview of up to three lines and at most 200 characters, with escaped
-newlines decoded) and its flags; the response also carries
-the rates with their effective dates, the absolute peak intervals covering the series, the
-holidays, the Tariff rule source and verification date, the currency and the `seq` the series
+newlines decoded), its subagent spawns (child id, mode, label and creation time — the parent's
+own catalog facts, which is what the markers are drawn from) and its flags; the response also
+carries the rates with their effective dates, the absolute peak intervals covering the series,
+the holidays, the Tariff rule source and verification date, the currency, the account-wide
+calibration of the session's interval when the samples can express one, and the `seq` the series
 was built from.
 
 #### Scenario: The client needs no tariff logic
@@ -322,19 +335,52 @@ cost of a subagent session MUST NOT be folded into the session total of the pare
 covers that session only. Expanding the subtree SHALL be an explicit action with progress that
 reads the child sessions through a separate route walking the subagent catalog; the main series
 route MUST NOT serve any child session. Per-child lines and the subtree cost attributed to the
-spawning Step SHALL be shown only after that action, and the explicit "load full history"
-action SHALL exist for the subtree only.
+spawning Step SHALL be shown only after that action: the first ask reads the direct children,
+and the explicit "load full history" action — which exists for the subtree only — extends the
+read to every session below the session. Reading the subtree SHALL be a tab of the view beside
+the session's own reading, so including or excluding subagents is a tab switch and never a
+change to what the header total means; the selection of the session's own tab SHALL be a saved
+view choice. Each child line SHALL offer a one-click jump into that child session's own Cost
+view, so following the money does not require retyping an id. The jump SHALL open the session
+through the shell and SHALL ask for the Cost tab both as that session's stored view preference
+and on the live conversation binding, because a session the shell has not bound yet can only be
+steered through its stored preference.
 
 #### Scenario: Markers by default
 
 - **WHEN** the reader opens the Cost view of a session that spawned subagents
 - **THEN** the spawning Steps carry markers and the header total still covers the session alone
 
+#### Scenario: Switching between the session and the subtree
+
+- **WHEN** the reader switches the tab under the chart
+- **THEN** one tab shows the session's own top list and the other shows the subtree, while the
+  header total covers the session alone on both
+
 #### Scenario: Expanding the subtree
 
 - **WHEN** the reader asks to include subagents
 - **THEN** progress is shown, the child sessions are read through the subagent route, and their
   costs appear as per-child lines attributed to the spawning Step
+
+#### Scenario: Loading the whole subtree
+
+- **WHEN** the reader asks for the full history of the subtree
+- **THEN** every session below the session is read, and each one appears as its own line with its
+  own cost under the Step that spawned it
+
+#### Scenario: Following a child into its own Cost view
+
+- **WHEN** the reader activates the jump on a child line whose session is already open on another
+  tab
+- **THEN** the shell switches to that session with its Cost view active, or — if the shell offers
+  neither the preference nor the binding — opens the session and leaves the tab to the reader
+
+#### Scenario: A child that cannot be read
+
+- **WHEN** a child session cannot be read
+- **THEN** the remaining lines are still reported and the unreadable branch is named as a
+  diagnostic
 
 ### Requirement: Linear history export
 
@@ -394,12 +440,12 @@ explain themselves in place; the failed read MUST offer a retry.
 
 ### Requirement: View-choice persistence
 
-The metric, the X axis, the Tariff projection and the top-K mode SHALL be stored globally
-through the existing settings write and restored on the next mount of the view. Brush and zoom
-MUST NOT be stored.
+The metric, the X axis, the Tariff projection, the top-K mode and the open tab (the session's
+own reading or the subtree) SHALL be stored globally through the existing settings write and
+restored on the next mount of the view. Brush and zoom MUST NOT be stored.
 
 #### Scenario: Choices survive a reload
 
-- **WHEN** the reader sets the metric to cache read, the axis to Step index and the projection
-  to `peak`, then reloads the page
+- **WHEN** the reader sets the metric to cache read, the axis to Step index, the projection to
+  `peak` and switches to the subagents tab, then reloads the page
 - **THEN** the Cost view opens with those choices

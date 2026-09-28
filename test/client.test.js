@@ -1589,3 +1589,446 @@ test('the tooltip names the projection it prices under and marks an unpriced Ste
   assert.equal(unpriced.at(-1), 'cost.tip.unpriced')
   assert.equal(tooltipLines(node, { t: (key) => key, currency: 'CNY', total: 20 }).length, 5, 'the fact line only appears under a projection')
 })
+
+test('a Step that spawned subagents is marked without changing the session total', async () => {
+  const { exported, react } = await loadClient()
+  const child = { id: 'child-1234-abcd', mode: 'continuable', label: 'Survey the tree', createdAt: NOW, turn: 1, step: 1 }
+  const nodes = [
+    costNode({ turn: 1, step: 1, children: [child] }),
+    costNode({ turn: 1, step: 2, tStart: NOW - HOUR, tEnd: NOW - HOUR + MINUTE, cost: 20, byModel: { 'deepseek-flash': { buckets: { uncachedInput: 1e6, cacheRead: 0, cacheWrite: 0, output: 1e6 }, cost: 20 } } }),
+  ]
+  const restore = stubCostFetch(costPayload(nodes))
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => ({ seq: 5, currency: 'CNY' }) }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    let tree = react.createElement(exported.__internals.CostView, props)
+    const text = textOf(tree)
+    assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_spawn').length, 1, 'the spawning Step carries a chart mark')
+    assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_spawn')[0].props.title, 'cost.subagents.mark', 'and the mark names the child')
+    assert.match(text, /cost\.subagents\.count/, 'the header counts the spawns')
+    assert.match(text, /cost\.tab\.session/, 'the session tab is offered')
+    assert.match(text, /cost\.topk\.title/, 'and the top list is what opens')
+    assert.match(String(find(tree, (element) => String(element.props?.className).includes('dshb_topk'))[0].props.className), /dshb_cost_card/, 'the top list is a card like the inspector')
+    assert.doesNotMatch(text, /cost\.subagents\.include/, 'the subtree is not read behind the reader’s back')
+
+    // The mode switch: the session tab carries the session's own reading, the
+    // subagents tab carries the subtree, and neither touches the header total.
+    const tab = find(tree, (element) => element.props?.className === 'dshb_cost_tab' && textOf(element) === 'cost.tab.subagents')[0]
+    assert.ok(tab !== undefined, 'the subagents tab is offered')
+    tab.props.onClick()
+    react.beginRender()
+    tree = react.createElement(exported.__internals.CostView, props)
+    const subtreeText = textOf(tree)
+    assert.match(subtreeText, /cost\.subagents\.include/, 'the subtree is offered on its tab, not read')
+    assert.doesNotMatch(subtreeText, /cost\.topk\.title/, 'and the session reading is replaced by it')
+    assert.match(String(find(tree, (element) => String(element.props?.className).includes('dshb_subagents'))[0].props.className), /dshb_cost_card/, 'and so is the subtree panel')
+    assert.match(subtreeText, /Survey the tree/, 'the child is named from the catalog entry')
+    assert.match(subtreeText, /cost\.subagents\.notLoaded/, 'with no money until the subtree is read')
+    assert.match(subtreeText, /¥30\.00/, 'the header still covers this session alone')
+    assert.doesNotMatch(subtreeText, /¥40\.00/, 'and no child figure leaks into it')
+    react.stop()
+  } finally {
+    restore()
+  }
+})
+
+test('the subtree is read on demand and its money stays out of the session total', async () => {
+  const { exported, react } = await loadClient()
+  const nodes = [costNode({ turn: 1, step: 1, children: [{ id: 'child-1', mode: 'continuable', label: 'Survey the tree', createdAt: NOW, turn: 1, step: 1 }] })]
+  const children = {
+    ok: true,
+    sessionId: 'session-7',
+    full: false,
+    currency: 'CNY',
+    children: [{
+      id: 'child-1', parentId: 'session-7', depth: 1, mode: 'continuable', label: 'Survey the tree', createdAt: NOW,
+      steps: 4, models: ['deepseek-flash'], unpriced: false, tStart: NOW - HOUR, tEnd: NOW,
+      cost: 12.5, costByBucket: { uncachedInput: 2, cacheRead: 0.5, cacheWrite: 0, output: 10 },
+      offPeak: { cost: 6.25, costByBucket: {} }, peak: { cost: 12.5, costByBucket: {} }, tokens: { uncachedInput: 1e6, cacheRead: 1e6, cacheWrite: 0, output: 1e6 },
+    }],
+    diagnostics: [{ id: 'broken-1', parentId: 'session-7', depth: 1, reason: 'corrupt' }],
+    total: { cost: 12.5, steps: 4 },
+  }
+  const deeper = {
+    ...children,
+    full: true,
+    children: [
+      children.children[0],
+      {
+        id: 'grandchild-2', parentId: 'child-1', depth: 2, mode: 'one-shot', label: 'Read one page', createdAt: null,
+        steps: 2, models: ['deepseek-flash'], unpriced: false, tStart: NOW - HOUR, tEnd: NOW,
+        cost: 3.25, costByBucket: { uncachedInput: 1, cacheRead: 0, cacheWrite: 0, output: 2.25 },
+        offPeak: { cost: 1.625, costByBucket: {} }, peak: { cost: 3.25, costByBucket: {} }, tokens: { uncachedInput: 1e6, cacheRead: 0, cacheWrite: 0, output: 1e6 },
+      },
+    ],
+    total: { cost: 15.75, steps: 6 },
+  }
+  const previousFetch = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url) => {
+    seen.push(String(url))
+    if (String(url).startsWith('/dsh-balance/session-cost/children')) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      return { ok: true, status: 200, json: async () => (String(url).includes('full=1') ? deeper : children) }
+    }
+    if (String(url).startsWith('/dsh-balance/session-cost')) {
+      return { ok: true, status: 200, json: async () => costPayload(nodes) }
+    }
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => ({ seq: 5, currency: 'CNY' }) }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    let tree = react.createElement(exported.__internals.CostView, props)
+    const openSubagents = () => {
+      const tab = find(tree, (element) => element.props?.className === 'dshb_cost_tab' && textOf(element) === 'cost.tab.subagents')[0]
+      tab.props.onClick()
+      react.beginRender()
+      tree = react.createElement(exported.__internals.CostView, props)
+    }
+    openSubagents()
+    const panel = () => textOf(find(tree, (element) => String(element.props?.className).includes('dshb_subagents'))[0])
+    assert.doesNotMatch(panel(), /¥0\.00/, 'an unread subtree is never priced at zero')
+    assert.match(panel(), /cost\.subagents\.notLoaded/, 'it says it was not read')
+    const include = find(tree, (element) => element.type === 'button' && element.props?.className === 'dshb_btn' && textOf(element) === 'cost.subagents.include')[0]
+    assert.ok(include !== undefined, 'the subtree is an explicit action')
+    await include.props.onClick()
+    react.beginRender()
+    tree = react.createElement(exported.__internals.CostView, props)
+    assert.match(textOf(tree), /cost\.subagents\.loading/, 'the reader is told while foreign sessions are read')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    react.beginRender()
+    tree = react.createElement(exported.__internals.CostView, props)
+    const text = textOf(tree)
+    assert.ok(seen.some((url) => url.includes('/session-cost/children?sessionId=session-7')), 'the children route is the one asked')
+    assert.equal(seen.filter((url) => url.includes('full=1')).length, 0, 'and only the direct children are read first')
+    assert.match(text, /¥12\.50/, 'the child line carries its own estimate')
+    assert.match(text, /cost\.subagents\.total/)
+    assert.match(text, /¥10\.00/, 'the session total is still its own Step')
+    assert.doesNotMatch(text, /¥22\.50/, 'the child is not folded in')
+    assert.match(text, /broken-1/, 'a branch that could not be read is named')
+    assert.match(text, /cost\.subagents\.reason\.corrupt/, 'with the reason the Host gave')
+
+    // Select the Step itself: the attribution belongs beside the Step that caused it.
+    const toTab = (label) => {
+      const target = find(tree, (element) => element.props?.className === 'dshb_cost_tab' && textOf(element) === label)[0]
+      target.props.onClick()
+      react.beginRender()
+      tree = react.createElement(exported.__internals.CostView, props)
+    }
+    toTab('cost.tab.session')
+    const row = find(tree, (element) => element.props?.className === 'dshb_topk_row')[0]
+    row.props.onClick()
+    react.beginRender()
+    tree = react.createElement(exported.__internals.CostView, props)
+    toTab('cost.tab.subagents')
+    assert.match(textOf(tree), /cost\.subagents\.stepTotal/, 'and the subtree is attributed to the spawning Step')
+
+    const full = find(tree, (element) => element.type === 'button' && textOf(element) === 'cost.subagents.loadFull')[0]
+    assert.ok(full !== undefined, 'the whole subtree is a second, explicit action')
+    assert.equal(full.props.title, 'cost.subagents.fullHint')
+    await full.props.onClick()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    react.beginRender()
+    tree = react.createElement(exported.__internals.CostView, props)
+    assert.ok(seen.some((url) => url.includes('full=1')), 'Load full history walks every session below')
+    const whole = textOf(tree)
+    assert.match(whole, /Read one page/, 'a session below the direct children gets its own line')
+    assert.match(whole, /¥3\.25/, 'with its own estimate')
+    assert.match(whole, /¥15\.75/, 'and the subtree total covers every visible line')
+    react.stop()
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('the child lines of a Step follow the catalog order and keep unread children visible', async () => {
+  const { exported } = await loadClient()
+  const { subtreeOf, stepGroups } = exported.__internals
+  const node = {
+    turn: 2,
+    step: 3,
+    children: [
+      { id: 'a', mode: 'continuable', label: 'First' },
+      { id: 'b', mode: 'one-shot', label: '' },
+    ],
+  }
+  const lines = [{ id: 'a', cost: 1.5, steps: 2, parentId: 'session-7' }, { id: 'c', cost: 9, steps: 1, parentId: 'session-7' }]
+  const own = subtreeOf(node, lines)
+  assert.deepEqual(own.lines.map((line) => [line.id, line.loaded]), [['a', true], ['b', false]], 'the catalog order survives, unread children included')
+  assert.equal(own.cost, 1.5, 'only read children are summed')
+  assert.equal(own.steps, 2)
+  assert.equal(own.loaded, 1)
+  assert.deepEqual(subtreeOf(null, lines).lines, [])
+  // A session below the direct children belongs to the same group, indented: the
+  // route counts it in the subtree total, so the panel has to show it.
+  const nested = subtreeOf(node, [...lines, { id: 'grand', parentId: 'a', cost: 4, steps: 1 }])
+  assert.deepEqual(nested.lines.map((line) => [line.id, line.depth, line.loaded]), [['a', 0, true], ['grand', 1, true], ['b', 0, false]])
+  assert.equal(nested.cost, 5.5)
+  assert.equal(nested.steps, 3)
+  assert.deepEqual(stepGroups([costNode({ turn: 1, step: 1 }), { ...node, children: [] }], lines), [], 'a Step without children is not a group')
+  const groups = stepGroups([costNode({ turn: 2, step: 3, children: node.children })], lines)
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0].key, '2:3')
+  assert.equal(groups[0].cost, 1.5)
+  // A repeated id cannot loop the walk.
+  const looped = subtreeOf({ children: [{ id: 'a' }] }, [{ id: 'a', parentId: 'session-7', cost: 1, steps: 1 }, { id: 'a', parentId: 'a', cost: 1, steps: 1 }])
+  assert.equal(looped.lines.length, 1)
+})
+
+test('the calibration line appears only when the samples can express it', async () => {
+  const { exported, react } = await loadClient()
+  const render = async (over) => {
+    const restore = stubCostFetch(costPayload([costNode()], over))
+    try {
+      const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => ({ seq: 5, currency: 'CNY' }) }
+      react.beginRender()
+      textOf(react.createElement(exported.__internals.CostView, props))
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      react.beginRender()
+      return textOf(react.createElement(exported.__internals.CostView, props))
+    } finally {
+      restore()
+    }
+  }
+  const calibrated = await render({
+    calibration: { currency: 'CNY', samples: 6, from: NOW - 90 * MINUTE, to: NOW - 10 * MINUTE, delta: 2.5 },
+  })
+  assert.match(calibrated, /cost\.calibration/, 'the account-wide figure sits beside the estimate')
+  assert.match(calibrated, /¥2\.50/)
+  const bare = await render({})
+  assert.doesNotMatch(bare, /cost\.calibration/, 'and it is absent when the host could not compute it')
+  react.stop()
+})
+
+test('the tab is a stored view choice, and a session without subagents never opens on an empty one', async () => {
+  const { exported, react } = await loadClient()
+  const posts = []
+  const child = { id: 'child-1', mode: 'one-shot', label: 'Read one page', createdAt: NOW, turn: 1, step: 1 }
+  const restore = stubSeriesAndWrites(costPayload([costNode({ children: [child] })], {
+    prefs: { costTab: 'subagents' },
+  }), posts)
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => ({ seq: 5, currency: 'CNY' }) }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    let tree = react.createElement(exported.__internals.CostView, props)
+    const id = find(tree, (element) => element.props?.className === 'dshb_cost_id')[0]
+    assert.equal(textOf(id), 'session-7', 'the id is shown in full on a line of its own')
+    assert.equal(id.props.title, 'session-7')
+    assert.match(textOf(tree), /cost\.session\.copy/, 'and it can be copied in one click')
+    assert.match(textOf(tree), /cost\.subagents\.include/, 'the stored tab comes back')
+    assert.doesNotMatch(textOf(tree), /cost\.topk\.title/, 'and the session reading is not the one drawn')
+
+    const session = find(tree, (element) => element.props?.className === 'dshb_cost_tab' && textOf(element) === 'cost.tab.session')[0]
+    await session.props.onClick()
+    assert.match(textOf(react.createElement(exported.__internals.CostView, props)), /cost\.topk\.title/, 'the session tab brings the top list back')
+    const settings = posts.filter((post) => post.url === '/dsh-balance/settings')
+    assert.deepEqual(settings.at(-1).body, { costTab: 'session' }, 'and the choice is written through')
+    react.stop()
+  } finally {
+    restore()
+  }
+
+  // The same stored tab on a session that spawned nothing falls back to the session
+  // reading rather than opening a tab with nothing on it.
+  const plain = stubSeriesAndWrites(costPayload([costNode()], { prefs: { costTab: 'subagents' } }), [])
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => ({ seq: 5, currency: 'CNY' }) }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    const tree = react.createElement(exported.__internals.CostView, props)
+    assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_tab').length, 0, 'no tabs without subagents')
+    assert.match(textOf(tree), /cost\.topk\.title/)
+    react.stop()
+  } finally {
+    plain()
+  }
+})
+
+test('the session id can be copied in one click', async () => {
+  const { exported, react } = await loadClient()
+  const written = []
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { clipboard: { writeText: async (value) => { written.push(value) } } },
+  })
+  const restore = stubSeriesAndWrites(costPayload([costNode()]), [])
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => ({ seq: 5, currency: 'CNY' }) }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    let tree = react.createElement(exported.__internals.CostView, props)
+    const copy = find(tree, (element) => element.type === 'button' && textOf(element) === 'cost.session.copy')[0]
+    assert.ok(copy !== undefined, 'the id line offers the copy action')
+    await copy.props.onClick()
+    assert.deepEqual(written, ['session-7'], 'the whole id is what reaches the clipboard')
+    react.beginRender()
+    tree = react.createElement(exported.__internals.CostView, props)
+    assert.match(textOf(tree), /cost\.session\.copied/, 'and the reader is told it happened')
+    react.stop()
+  } finally {
+    restore()
+    if (previous === undefined) delete globalThis.navigator
+    else Object.defineProperty(globalThis, 'navigator', previous)
+  }
+})
+
+test('a subagent line opens that session’s own Cost view', async () => {
+  const { exported, react } = await loadClient()
+  const { Subagents, SubagentOpen, CostInspector, openSessionCost, preferCostView } = exported.__internals
+  // The panel asks the owner to follow the child, and never invents a session id.
+  const opened = []
+  const groups = [{
+    key: '1:1',
+    turn: 1,
+    step: 1,
+    cost: 1,
+    loaded: 1,
+    lines: [
+      { id: 'child-1', label: 'Survey the tree', mode: 'continuable', depth: 0, cost: 1, steps: 2, loaded: true },
+      { id: '', label: '', mode: 'one-shot', depth: 1, cost: 0, steps: 0, loaded: false },
+    ],
+  }]
+  react.beginRender()
+  let tree = react.createElement(Subagents, {
+    t: (key) => key,
+    currency: 'CNY',
+    groups,
+    spawns: 2,
+    state: { status: 'ok', lines: [{ id: 'child-1' }], total: { cost: 1 }, diagnostics: [], full: false },
+    onLoad: async () => {},
+    onOpen: (id) => opened.push(id),
+  })
+  const buttons = find(tree, (element) => element.type === 'button' && textOf(element) === 'cost.subagents.open')
+  assert.equal(buttons.length, 1, 'only a child with a session id gets the jump')
+  assert.equal(buttons[0].props.title, 'cost.subagents.openHint')
+  buttons[0].props.onClick()
+  assert.deepEqual(opened, ['child-1'], 'the child session id is what the jump carries')
+  react.beginRender()
+  tree = react.createElement(Subagents, {
+    t: (key) => key,
+    currency: 'CNY',
+    groups,
+    spawns: 2,
+    state: { status: 'ok', lines: [{ id: 'child-1' }], total: { cost: 1 }, diagnostics: [], full: false },
+    onLoad: async () => {},
+  })
+  assert.equal(find(tree, (element) => element.type === 'button' && textOf(element) === 'cost.subagents.open').length, 0, 'without an owner action there is no button')
+
+  react.beginRender()
+  assert.equal(textOf(react.createElement(SubagentOpen, { t: (key) => key, id: 'child-9' })), '', 'no owner action, no button')
+  react.beginRender()
+  assert.equal(textOf(react.createElement(SubagentOpen, { t: (key) => key, id: '', onOpen: () => {} })), '', 'no session id, no button')
+
+  // The inspector carries the same jump beside the Step it belongs to.
+  react.beginRender()
+  const inspector = react.createElement(CostInspector, {
+    t: (key) => key,
+    node: costNode({ children: [{ id: 'child-1', mode: 'one-shot', label: 'Read one page' }] }),
+    currency: 'CNY',
+    total: 10,
+    subtree: { status: 'ok', lines: [{ id: 'child-1', cost: 1, steps: 2, loaded: true }], total: { cost: 1 }, diagnostics: [], full: false },
+    onOpenSubtree: (id) => opened.push(id),
+  })
+  const inInspector = find(inspector, (element) => element.type === 'button' && textOf(element) === 'cost.subagents.open')[0]
+  assert.ok(inInspector !== undefined, 'the inspector attributes the subtree and offers the jump')
+  inInspector.props.onClick()
+  assert.deepEqual(opened, ['child-1', 'child-1'])
+  react.stop()
+
+  // The jump itself: open the session, then activate the Cost tab as soon as the
+  // shell has bound it — and never loop forever when it never does.
+  const calls = []
+  const workspace = { openSession: (id) => calls.push(['open', id]) }
+  let bound = 0
+  const conversation = {
+    binding: (id) => {
+      bound += 1
+      calls.push(['binding', id])
+      if (bound < 3) throw new Error('inactive session')
+      return { activate: (view) => calls.push(['activate', id, view]) }
+    },
+  }
+  const queue = []
+  const schedule = (fn) => { queue.push(fn) }
+  assert.equal(openSessionCost({ workspace, conversation, sessionId: 'child-1', schedule }), true)
+  for (let i = 0; i < 6 && queue.length > 0; i += 1) queue.shift()()
+  assert.deepEqual(calls[0], ['open', 'child-1'], 'the session is opened first')
+  assert.deepEqual(calls.at(-1), ['activate', 'child-1', 'dsh-balance-cost'], 'and its Cost tab is activated')
+
+  const never = []
+  assert.equal(openSessionCost({
+    workspace,
+    conversation: { binding: () => { throw new Error('inactive session') } },
+    sessionId: 'child-2',
+    attempts: 3,
+    delay: 1,
+    schedule: (fn) => { never.push(fn) },
+  }), true)
+  let guard = 0
+  while (never.length > 0 && guard < 10) {
+    guard += 1
+    never.shift()()
+  }
+  assert.equal(guard, 3, 'the retry is bounded, not a loop')
+  assert.equal(openSessionCost({ sessionId: 'child-3', workspace: {} }), false, 'a shell without the workspace action is a no-op')
+  assert.equal(openSessionCost({ workspace, sessionId: '' }), false)
+
+  // The stored preference is what makes a session the shell has never bound mount on
+  // Cost; the rest of the record (the reader's draft) must survive the write.
+  const disk = new Map()
+  disk.set('dsh.conversation.child-4', JSON.stringify({ draft: 'keep me', view: 'chat' }))
+  const storage = {
+    getItem: (name) => (disk.has(name) ? disk.get(name) : null),
+    setItem: (name, value) => disk.set(name, value),
+  }
+  assert.equal(preferCostView(storage, 'child-4'), true)
+  assert.deepEqual(JSON.parse(disk.get('dsh.conversation.child-4')), { draft: 'keep me', view: 'dsh-balance-cost' })
+  assert.equal(preferCostView(storage, 'child-5'), true, 'a session with no record gets one')
+  assert.deepEqual(JSON.parse(disk.get('dsh.conversation.child-5')), { view: 'dsh-balance-cost' })
+  assert.equal(preferCostView(undefined, 'child-5'), false, 'no storage, no claim')
+  disk.set('dsh.conversation.child-6', 'not json')
+  assert.equal(preferCostView(storage, 'child-6'), false, 'a record that cannot be read is left alone')
+  disk.set('dsh.conversation.child-7', '[]')
+  assert.equal(preferCostView(storage, 'child-7'), false, 'and an array is not a store record')
+})
+
+test('a subagent group head carries an aggregate, never a copy of its only line', async () => {
+  const { exported, react } = await loadClient()
+  const { Subagents } = exported.__internals
+  const line = (over) => ({ label: '', mode: 'one-shot', depth: 0, cost: 1, steps: 2, loaded: true, ...over })
+  const groups = [
+    { key: '1:1', turn: 1, step: 1, cost: 1, loaded: 1, lines: [line({ id: 'child-1' })] },
+    { key: '2:2', turn: 2, step: 2, cost: 3, loaded: 2, lines: [line({ id: 'child-2', cost: 1 }), line({ id: 'child-3', cost: 2 })] },
+    { key: '3:3', turn: 3, step: 3, cost: 0, loaded: 0, lines: [line({ id: 'child-4', cost: 0, loaded: false })] },
+  ]
+  react.beginRender()
+  const tree = react.createElement(Subagents, {
+    t: (key) => key,
+    currency: 'CNY',
+    groups,
+    spawns: 4,
+    state: { status: 'ok', lines: [{ id: 'child-1' }], total: { cost: 4, steps: 4 }, diagnostics: [], full: false },
+    onLoad: async () => {},
+  })
+  const heads = find(tree, (element) => element.props?.className === 'dshb_sub_head')
+  assert.equal(heads.length, 3)
+  assert.equal(textOf(heads[0]).includes('¥1.00'), false, 'a group of one line does not repeat that line’s figure')
+  assert.equal(textOf(heads[1]).includes('¥3.00'), true, 'a group of several lines shows their sum')
+  assert.equal(textOf(heads[2]).includes('¥0.00'), false, 'an unread group shows no figure at all')
+  react.stop()
+})

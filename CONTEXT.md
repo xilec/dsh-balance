@@ -57,3 +57,28 @@ _Avoid_: unknown model, missing rate.
 The per-session `conversation.view` tab that shows where a session's estimated
 cost goes.
 _Avoid_: cost tab, cost page, analytics view.
+
+**Calibration line**:
+The account-wide spend over the part of a session the balance samples cover, shown
+beside the session estimate and labelled as account-wide. It includes every other
+session and every other charge, so it calibrates the estimate rather than measuring
+it, and it exists only when two or more samples fall inside the interval.
+_Avoid_: balance delta, real cost.
+
+**Subagent session**:
+A session spawned by another session through the subagent catalog. It has its own
+log, its own models and its own estimate, and its cost never enters the parent's
+total; the Cost view marks the Step that spawned it and reads the child only on an
+explicit ask.
+_Avoid_: child thread, nested session.
+
+**Spawn marker**:
+The mark a Step carries because it established a subagent, drawn on the chart and
+counted in the header. It is a fact about this session's own catalog, not a read of
+the child.
+_Avoid_: badge, subagent chip.
+
+**Subtree**:
+A session together with every session below it. Its total is the sum of the child
+lines and of nothing else, so it never moves the session's own headline number.
+_Avoid_: whole tree, full history.

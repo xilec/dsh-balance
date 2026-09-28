@@ -61,6 +61,7 @@ function hostContext(options = {}) {
   if (options.readSession !== undefined) {
     services.set('sessionQuery', { readSession: (id) => options.readSession(id) })
   }
+  if (options.subagents !== undefined) services.set('subagents', options.subagents)
   const effects = []
   return {
     routes,
@@ -123,7 +124,7 @@ test('the plugin registers its routes and its projection unit', async () => {
   await withPlugin(async ({ ctx, module }) => {
     assert.deepEqual(
       [...ctx.routes.keys()].sort(),
-      ['/dsh-balance', '/dsh-balance/hello', '/dsh-balance/overrides', '/dsh-balance/refresh', '/dsh-balance/session-cost', '/dsh-balance/settings'],
+      ['/dsh-balance', '/dsh-balance/hello', '/dsh-balance/overrides', '/dsh-balance/refresh', '/dsh-balance/session-cost', '/dsh-balance/session-cost/children', '/dsh-balance/settings'],
     )
     assert.equal(ctx.projections.length, 1)
     assert.equal(ctx.projections[0].key, 'dshBalanceCost')
@@ -492,8 +493,8 @@ test('a fallback rate entered through the settings route reprices the session', 
     assert.equal(unit.wire.view(states.get('session-1')).cost, 2, 'the chip reprices with the same rule')
 
     const prefs = response()
-    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { costMetric: 'cacheRead', costAxis: 'index' }), prefs)
-    assert.deepEqual(JSON.parse(prefs.body).changed, ['costMetric', 'costAxis'])
+    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { costMetric: 'cacheRead', costAxis: 'index', costTab: 'subagents' }), prefs)
+    assert.deepEqual(JSON.parse(prefs.body).changed, ['costMetric', 'costAxis', 'costTab'])
     const badAxis = response()
     await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { costAxis: 'depth' }), badAxis)
     assert.equal(badAxis.status, 400)
@@ -502,11 +503,11 @@ test('a fallback rate entered through the settings route reprices the session', 
     const payload = response()
     await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), payload)
     const view = JSON.parse(payload.body)
-    assert.deepEqual(view.prefs, { costMetric: 'cacheRead', costAxis: 'index' }, 'the browser choices come back on the read route')
+    assert.deepEqual(view.prefs, { costMetric: 'cacheRead', costAxis: 'index', costTab: 'subagents' }, 'the browser choices come back on the read route')
     assert.deepEqual(view.fallbackRates, { 'reseller-model': { cacheHit: 0.1, cacheMiss: 2, output: 8 } })
 
     const series = await read()
-    assert.deepEqual(series.prefs, { costMetric: 'cacheRead', costAxis: 'index' }, 'and on the series route the view mounts with')
+    assert.deepEqual(series.prefs, { costMetric: 'cacheRead', costAxis: 'index', costTab: 'subagents' }, 'and on the series route the view mounts with')
   }, {
     sessionOf: () => ({ id: 'session-1' }),
     projectionState: (session, key) => (key === 'dshBalanceCost' ? states.get(session.id) : undefined),
@@ -574,4 +575,129 @@ test('a missing key is reported instead of throwing', async () => {
     else process.env.DSH_HOME = previousHome
     await rm(home, { recursive: true, force: true })
   }
+})
+
+test('the child route walks the subagent tree while the main route stays on its own session', async () => {
+  const time = Date.UTC(2026, 8, 24, 2, 0)
+  const states = new Map()
+  /** One Step of a session, priced at peak: 1M miss at 2 CNY + 1M output at 8 CNY. */
+  const stepEvents = (turn, step, input, output, offset = 0) => [
+    { type: 'step/start', seq: 1 + offset, time: time + offset, data: { turn, step } },
+    { type: 'request/header', seq: 2 + offset, time: time + offset, data: { header: { config: { model: 'deepseek-flash' } } } },
+    { type: 'assistant/message', seq: 3 + offset, time: time + offset, data: { turn, step, usage: { inputTokens: input, outputTokens: output } } },
+    { type: 'step/end', seq: 4 + offset, time: time + offset + 500, data: { turn, step } },
+  ]
+  const reads = []
+  const listings = []
+  await withPlugin(async ({ ctx }) => {
+    // A balance first, so the account currency (CNY) is the one everything is priced in.
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    const unit = ctx.projections[0]
+    const parent = [
+      ...stepEvents(1, 1, 1e6, 1e6, 0),
+      { type: 'subagent/catalog', seq: 5, time: time + 600, data: { version: 1, childId: 'child-1', childCreatedAt: time + 600, mode: 'continuable', label: 'Survey the tree' } },
+    ]
+    states.set('session-1', parent.reduce((state, event) => unit.apply(state, event), unit.init()))
+
+    const main = response()
+    await ctx.routes.get('/dsh-balance/session-cost')(request('GET', '/dsh-balance/session-cost?sessionId=session-1'), main)
+    const payload = JSON.parse(main.body)
+    assert.equal(payload.ok, true, main.body)
+    assert.equal(payload.nodes.length, 1)
+    assert.equal(payload.nodes[0].cost, 10, 'the parent total is its own Steps only')
+    assert.deepEqual(payload.nodes[0].children.map((child) => child.id), ['child-1'], 'the spawning Step carries the marker')
+    assert.deepEqual(reads, [], 'and the main route reads no other session')
+
+    const missing = response()
+    await ctx.routes.get('/dsh-balance/session-cost/children')(request('GET', '/dsh-balance/session-cost/children'), missing)
+    assert.equal(missing.status, 400)
+    assert.deepEqual(listings, [], 'a request without a session walks nothing')
+
+    const direct = response()
+    await ctx.routes.get('/dsh-balance/session-cost/children')(request('GET', '/dsh-balance/session-cost/children?sessionId=session-1'), direct)
+    const tree = JSON.parse(direct.body)
+    assert.equal(tree.ok, true, direct.body)
+    assert.equal(tree.full, false)
+    assert.deepEqual(listings, [{ kind: 'children', id: 'session-1' }], 'the first ask walks direct children only')
+    assert.equal(tree.children.length, 1)
+    assert.deepEqual(reads, ['child-1'], 'and reads exactly the child it reports')
+    assert.equal(tree.children[0].id, 'child-1')
+    assert.equal(tree.children[0].parentId, 'session-1')
+    assert.equal(tree.children[0].depth, 1)
+    assert.equal(tree.children[0].label, 'Survey the tree')
+    assert.equal(tree.children[0].cost, 10, "the child's own estimate, priced as the parent prices")
+    assert.equal(tree.children[0].costByBucket.output, 8)
+    assert.equal(tree.children[0].steps, 1)
+    assert.equal(tree.children[0].tEnd, time + 1500)
+    assert.equal(tree.total.cost, 10, 'and the subtree total is the sum of the child lines')
+    assert.deepEqual(tree.diagnostics, [])
+
+    const full = response()
+    await ctx.routes.get('/dsh-balance/session-cost/children')(request('GET', '/dsh-balance/session-cost/children?sessionId=session-1&full=1'), full)
+    const whole = JSON.parse(full.body)
+    assert.equal(whole.full, true)
+    assert.deepEqual(listings.at(-1), { kind: 'descendants', id: 'session-1' }, 'the explicit ask walks the whole tree')
+    assert.deepEqual(whole.children.map((child) => child.id), ['child-1', 'child-2', 'child-3'])
+    assert.deepEqual(whole.children.map((child) => child.depth), [1, 2, 3])
+    assert.equal(whole.children[1].parentId, 'child-1')
+    assert.equal(whole.total.cost, 13, 'and the subtree total covers every line, not the parent')
+    assert.equal(whole.total.steps, 3, 'the subtree total counts Steps, not sessions')
+    assert.deepEqual(whole.children.map((child) => child.createdAt), [null, null, null], 'a deep line carries no creation time rather than 1970')
+    assert.equal(whole.children[2].mode, 'unknown', 'a session whose mode is not supported is still read and still a line')
+    assert.deepEqual(whole.diagnostics, [{ id: 'bad-branch', parentId: 'child-2', depth: 2, reason: 'corrupt' }], 'a branch that cannot be read is reported, not fatal')
+  }, {
+    sessionOf: (id) => (id === 'session-1' ? { id } : undefined),
+    projectionState: (session, key) => (key === 'dshBalanceCost' ? states.get(session.id) : undefined),
+    readSession: async (id) => {
+      reads.push(id)
+      if (id === 'child-1') return { session: { id }, inheritedEventCount: 0, events: stepEvents(1, 1, 1e6, 1e6, 1_000) }
+      if (id === 'child-2') return { session: { id }, inheritedEventCount: 0, events: stepEvents(1, 1, 1e6, 0, 2_000) }
+      if (id === 'child-3') return { session: { id }, inheritedEventCount: 0, events: stepEvents(1, 1, 5e5, 0, 3_000) }
+      throw new Error(`unexpected session ${id}`)
+    },
+    subagents: {
+      async listChildren(id) {
+        listings.push({ kind: 'children', id })
+        return [{ id: 'child-1', createdAt: time + 600, mode: 'continuable', label: 'Survey the tree' }]
+      },
+      async listDescendants(id) {
+        listings.push({ kind: 'descendants', id })
+        return [
+          { kind: 'child', id: 'child-1', parentId: 'session-1', depth: 1, mode: 'continuable', label: 'Survey the tree', activity: 'inactive', hasChildren: true },
+          { kind: 'diagnostic', id: 'bad-branch', parentId: 'child-2', depth: 2, reason: 'corrupt' },
+          { kind: 'child', id: 'child-2', parentId: 'child-1', depth: 2, mode: 'one-shot', label: 'Read one page', activity: 'inactive', hasChildren: false },
+          { kind: 'diagnostic', id: 'child-3', parentId: 'child-2', depth: 3, reason: 'unsupported' },
+        ]
+      },
+    },
+  })
+})
+
+test('a child folded from its stored log is billed for its own work only', async () => {
+  const time = Date.UTC(2026, 8, 24, 2, 0)
+  // The child's log is seeded with the parent's completed turn (sequences 1..4),
+  // and its own turn follows from sequence 5 on.
+  const events = [
+    { type: 'step/start', seq: 1, time, data: { turn: 1, step: 1 } },
+    { type: 'request/header', seq: 2, time, data: { header: { config: { model: 'deepseek-flash' } } } },
+    { type: 'assistant/message', seq: 3, time, data: { turn: 1, step: 1, usage: { inputTokens: 1e6, outputTokens: 1e6 } } },
+    { type: 'step/end', seq: 4, time: time + 500, data: { turn: 1, step: 1 } },
+    { type: 'step/start', seq: 5, time: time + 1_000, data: { turn: 1, step: 1 } },
+    { type: 'request/header', seq: 6, time: time + 1_000, data: { header: { config: { model: 'deepseek-flash' } } } },
+    { type: 'assistant/message', seq: 7, time: time + 1_000, data: { turn: 1, step: 1, usage: { inputTokens: 1e6, outputTokens: 0 } } },
+    { type: 'step/end', seq: 8, time: time + 1_500, data: { turn: 1, step: 1 } },
+  ]
+  await withPlugin(async ({ ctx }) => {
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    const res = response()
+    await ctx.routes.get('/dsh-balance/session-cost')(request('GET', '/dsh-balance/session-cost?sessionId=child-1'), res)
+    const payload = JSON.parse(res.body)
+    assert.equal(payload.ok, true, res.body)
+    assert.equal(payload.nodes.length, 1, 'the inherited Step is not part of the child series')
+    assert.equal(payload.nodes[0].cost, 2, 'and only the child’s own Step is billed')
+    assert.equal(payload.nodes[0].tStart, time + 1_000)
+  }, {
+    sessionOf: () => undefined,
+    readSession: async (id) => ({ session: { id }, inheritedEventCount: 4, events }),
+  })
 })

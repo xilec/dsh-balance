@@ -137,6 +137,8 @@ window.__ModuleLoader__.load({
         // The Cost view: a plot drawn on a canvas with a DOM overlay for the bands,
         // the turn separators, the axis labels and the tooltip.
         '.dshb_cost{display:flex;flex-direction:column;gap:10px;box-sizing:border-box;height:100%;padding:12px 14px;overflow:auto}',
+        '.dshb_cost_sessionline{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
+        '.dshb_cost_id{font-family:var(--dsw-font-family-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:12px;color:var(--dsw-alias-label-secondary);user-select:all}',
         '.dshb_cost_head{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 12px}',
         '.dshb_cost_total{font-size:18px;font-weight:600;color:var(--dsw-alias-label-primary);font-variant-numeric:tabular-nums}',
         '.dshb_cost_sub{color:var(--dsw-alias-label-tertiary);font-size:11.5px}',
@@ -155,7 +157,7 @@ window.__ModuleLoader__.load({
         'background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1,#fff));color:var(--dsw-alias-label-secondary);',
         'box-shadow:var(--dsw-shadow-lv2,0 6px 18px rgba(0,0,0,.14));font-size:11.5px;line-height:1.45;text-align:left}',
         '.dshb_cost_split{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;align-items:start}',
-        '.dshb_cost_card{border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:10px;padding:8px 10px;font-size:12px;max-width:560px;display:flex;flex-direction:column;gap:6px}',
+        '.dshb_cost_card{border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:10px;padding:8px 10px;font-size:12px;max-width:100%;display:flex;flex-direction:column;gap:6px;flex:1 1 auto}',
         '.dshb_cost_actions{display:flex;gap:6px;align-items:center;margin-top:4px}',
         '.dshb_cost_kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:2px 10px;align-items:baseline}',
         '.dshb_cost_kv>.k{color:var(--dsw-alias-label-tertiary)}',
@@ -172,6 +174,23 @@ window.__ModuleLoader__.load({
         '.dshb_cost_mark{position:absolute;width:8px;height:8px;margin:-4px 0 0 -4px;border-radius:50%;pointer-events:none;',
         'background:var(--dsw-alias-label-primary);box-shadow:0 0 0 2px var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1,#fff))}',
         '.dshb_cost_note{color:var(--dsw-alias-label-tertiary);font-size:11.5px}',
+        // A spawn mark: a small diamond just above the Step it belongs to, so it
+        // reads as a label on the point rather than as a second data series.
+        '.dshb_cost_spawn{position:absolute;width:7px;height:7px;margin:-17px 0 0 -3.5px;transform:rotate(45deg);pointer-events:none;',
+        'background:var(--dsw-alias-state-business-primary,var(--dsw-static-blue-500,#4d6bfe));opacity:.85}',
+        '.dshb_subagents{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;border-top:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.15));padding-top:6px}',
+        '.dshb_sub_head{display:flex;gap:6px;align-items:baseline;width:100%;color:var(--dsw-alias-label-secondary);font-size:11.5px}',
+        // The group head shares the money column of its rows, so every figure in the
+        // card lines up on the right edge whether or not the row carries a button.
+        '.dshb_sub_head .dshb_sub_money{margin-left:auto}',
+        '.dshb_sub_row{display:flex;gap:8px;width:100%;font-size:11.5px;color:var(--dsw-alias-label-tertiary)}',
+        '.dshb_sub_label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+        '.dshb_kv_open{display:inline-flex;align-items:baseline;justify-content:flex-end;gap:8px;width:100%}',
+        '.dshb_kv_open .dshb_btn{flex:none}',
+        '.dshb_sub_right{margin-left:auto;display:inline-flex;align-items:baseline;gap:8px;flex:none}',
+        '.dshb_sub_reason{margin-left:auto;color:var(--dsw-alias-label-tertiary)}',
+        '.dshb_sub_money{font-variant-numeric:tabular-nums;text-align:right;min-width:132px;color:var(--dsw-alias-label-secondary)}',
+        '.dshb_sub_broken .dshb_sub_label{color:var(--dsw-alias-label-tertiary)}',
         '.dshb_cost_empty{display:flex;flex-direction:column;gap:8px;align-items:flex-start;color:var(--dsw-alias-label-tertiary);font-size:12px}',
         '.dshb_cost_controls{display:flex;flex-wrap:wrap;gap:4px 16px;align-items:center}',
         '.dshb_cost_seg{display:inline-flex;align-items:center;gap:4px}',
@@ -191,8 +210,16 @@ window.__ModuleLoader__.load({
         '.dshb_cost_turn_alt{background:rgba(128,128,128,.07)}',
         '.dshb_cost_turnLabel{position:absolute;top:0;left:3px;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-layer-1,rgba(0,0,0,0));',
         'font-size:9px;line-height:12px;padding:0 2px;border-radius:2px;white-space:nowrap}',
-        '.dshb_cost_panes{display:grid;grid-template-columns:minmax(0,560px) minmax(0,1fr);gap:10px;align-items:start}',
-        '.dshb_cost_pane{min-width:0}',
+        '.dshb_cost_tabs{display:flex;gap:2px;width:100%;max-width:1120px;box-sizing:border-box;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.25))}',
+        '.dshb_cost_tab{background:transparent;border:0;border-bottom:2px solid transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;font:var(--dsw-font-xxs-12);padding:3px 10px}',
+        '.dshb_cost_tab:hover{color:var(--dsw-alias-label-primary)}',
+        '.dshb_cost_tabOn{color:var(--dsw-alias-label-primary);border-bottom-color:var(--dsw-alias-state-business-primary,var(--dsw-static-blue-500,#4d6bfe))}',
+        // Two content columns and no more: on a wide screen a row that spans the whole
+        // window reads worse than a compact one, and the same cap keeps the tab strip
+        // aligned with the panes below it.
+        '.dshb_cost_panes{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;align-items:stretch;max-width:1120px}',
+        // Both readings are cards of the same height, so neither looks like loose text.
+        '.dshb_cost_pane{min-width:0;display:flex;flex-direction:column}',
         '@media (max-width:900px){.dshb_cost_panes{grid-template-columns:minmax(0,1fr)}}',
         '.dshb_topk{display:flex;flex-direction:column;gap:2px}',
         '.dshb_topk_row{display:grid;grid-template-columns:minmax(0,1fr) max-content;gap:0 12px;align-items:baseline;cursor:pointer;',
@@ -336,6 +363,38 @@ window.__ModuleLoader__.load({
         'cost.rates.invalid': 'every rate must be a non-negative number',
         'cost.rates.failed': 'rejected: {error}',
         'cost.steps': '{steps} steps',
+        'cost.session.label': 'session',
+        'cost.session.copy': 'copy id',
+        'cost.session.copied': 'copied',
+        'cost.session.id': 'session {id}',
+        'cost.tab.session': 'Session',
+        'cost.tab.subagents': 'Subagents ({count})',
+        'cost.tab.subagentsCount': 'Subagents',
+        'cost.tab.hint': 'the header total is this session alone under both tabs',
+        'cost.subagents.count': '{count} spawned',
+        'cost.subagents.mark': 'spawned {labels}',
+        'cost.subagents.title': 'Subagents spawned by this session',
+        'cost.subagents.hint': 'not read yet — the session total above stays this session alone',
+        'cost.subagents.include': 'Include subagents',
+        'cost.subagents.loading': 'reading the subtree…',
+        'cost.subagents.failed': 'the subtree could not be read: {error}',
+        'cost.subagents.total': 'subtree: {value}',
+        'cost.subagents.full': 'every session below is read',
+        'cost.subagents.loadFull': 'Load full history',
+        'cost.subagents.fullHint': 'walks every session below, not only the direct children',
+        'cost.subagents.step': 'Subagents spawned here',
+        'cost.subagents.stepTotal': 'subtree of this Step: {value}',
+        'cost.subagents.notLoaded': 'not read yet',
+        'cost.subagents.diagnostics': '{count} sessions below could not be read',
+        'cost.subagents.open': 'open',
+        'cost.subagents.openHint': 'open this subagent session with its Cost view',
+        'cost.subagents.totalUnknown': 'subtree: nothing read',
+        'cost.subagents.reason.corrupt': 'broken log',
+        'cost.subagents.reason.unavailable': 'not readable',
+        'cost.subagents.reason.unreadable': 'could not be priced',
+        'cost.subagents.reason.unsupported': 'mode not supported',
+        'cost.calibration': 'account-wide {value}',
+        'cost.calibration.title': 'Between {from} and {to}, from {samples} balance samples: the whole account, other activity included — not this session alone',
         'cost.unpriced': 'not priced: {models}',
         'cost.bandNote': 'shaded: peak windows',
         'cost.clip': 'clipped above {value}',
@@ -503,6 +562,38 @@ window.__ModuleLoader__.load({
         'cost.rates.invalid': 'каждая ставка должна быть неотрицательным числом',
         'cost.rates.failed': 'отклонено: {error}',
         'cost.steps': 'шагов: {steps}',
+        'cost.session.label': 'сессия',
+        'cost.session.copy': 'копировать id',
+        'cost.session.copied': 'скопировано',
+        'cost.session.id': 'сессия {id}',
+        'cost.tab.session': 'Сессия',
+        'cost.tab.subagents': 'Субагенты ({count})',
+        'cost.tab.subagentsCount': 'Субагенты',
+        'cost.tab.hint': 'итог в шапке — это только эта сессия на обоих табах',
+        'cost.subagents.count': 'порождено: {count}',
+        'cost.subagents.mark': 'породил {labels}',
+        'cost.subagents.title': 'Субагенты, порождённые этой сессией',
+        'cost.subagents.hint': 'ещё не прочитаны — итог сессии выше остаётся только её собственным',
+        'cost.subagents.include': 'Включить субагентов',
+        'cost.subagents.loading': 'читаю поддерево…',
+        'cost.subagents.failed': 'поддерево не удалось прочитать: {error}',
+        'cost.subagents.total': 'поддерево: {value}',
+        'cost.subagents.full': 'прочитаны все сессии ниже',
+        'cost.subagents.loadFull': 'Загрузить всю историю',
+        'cost.subagents.fullHint': 'читает все сессии ниже, а не только прямых детей',
+        'cost.subagents.step': 'Субагенты, порождённые здесь',
+        'cost.subagents.stepTotal': 'поддерево этого шага: {value}',
+        'cost.subagents.notLoaded': 'ещё не прочитан',
+        'cost.subagents.diagnostics': 'не удалось прочитать сессий ниже: {count}',
+        'cost.subagents.open': 'открыть',
+        'cost.subagents.openHint': 'открыть эту сессию субагента с её Cost',
+        'cost.subagents.totalUnknown': 'поддерево: ничего не прочитано',
+        'cost.subagents.reason.corrupt': 'повреждённый лог',
+        'cost.subagents.reason.unavailable': 'не читается',
+        'cost.subagents.reason.unreadable': 'не удалось оценить',
+        'cost.subagents.reason.unsupported': 'режим не поддержан',
+        'cost.calibration': 'по счёту {value}',
+        'cost.calibration.title': 'Между {from} и {to}, по {samples} сэмплам баланса: весь счёт, включая прочую активность — не только эта сессия',
         'cost.unpriced': 'без цены: {models}',
         'cost.bandNote': 'заливка — пиковые окна',
         'cost.clip': 'обрезано выше {value}',
@@ -2028,6 +2119,149 @@ window.__ModuleLoader__.load({
       return { ...snapshot, retry: () => setAttempt((value) => value + 1) }
     }
 
+    /** The shell keeps one conversation store per session under this key. */
+    const CONVERSATION_STORE_KEY = 'dsh.conversation'
+    /** This view's own id, as registered in the `conversation.view` slot. */
+    const COST_VIEW_ID = 'dsh-balance-cost'
+
+    /**
+     * Ask the shell to restore the Cost tab for a session before it is opened.
+     *
+     * Activating a binding only works for a session that is already bound, and the
+     * shell restores the view of a freshly opened session from the per-session store
+     * it hydrates on mount — so the preference is written first, with the rest of the
+     * record (the draft) left untouched. It is a browser-local preference, so a reader
+     * who prefers another tab there simply switches it back.
+     */
+    function preferCostView(storage, sessionId, viewId) {
+      const name = `${CONVERSATION_STORE_KEY}.${sessionId}`
+      try {
+        const raw = storage?.getItem?.(name)
+        const stored = raw === null || raw === undefined || raw === '' ? {} : JSON.parse(raw)
+        if (typeof stored !== 'object' || stored === null || Array.isArray(stored)) return false
+        stored.view = viewId ?? COST_VIEW_ID
+        storage.setItem(name, JSON.stringify(stored))
+        return true
+      } catch {
+        return false
+      }
+    }
+
+    /**
+     * Open another session on its Cost view.
+     *
+     * `uiWorkspace.openSession` is the documented way to open a session; on top of it
+     * the Cost tab is requested twice — as the stored preference of that session (so
+     * the shell mounts it there) and on the conversation binding once the session is
+     * bound (so an already-open session switches at once). Both are guarded and silent:
+     * if the shell offers neither, the session still opens on whichever tab it prefers,
+     * which is a degraded jump rather than a dead button.
+     */
+    function openSessionCost({ workspace, conversation, storage, sessionId, viewId, attempts, delay, schedule }) {
+      if (typeof sessionId !== 'string' || sessionId === '') return false
+      if (workspace?.openSession === undefined) return false
+      preferCostView(storage, sessionId, viewId)
+      workspace.openSession(sessionId)
+      let left = attempts ?? 20
+      const tick = delay ?? 150
+      const timer = schedule ?? setTimeout
+      const activate = () => {
+        let binding
+        try {
+          binding = conversation?.binding?.(sessionId)
+        } catch {
+          binding = undefined
+        }
+        if (binding?.activate !== undefined) {
+          binding.activate(viewId ?? COST_VIEW_ID)
+          return
+        }
+        left -= 1
+        if (left > 0) timer(activate, tick)
+      }
+      timer(activate, 0)
+      return true
+    }
+
+    /**
+     * Read the subagent tree of one session.
+     *
+     * This is the only read the view makes outside its own session, and it happens
+     * only when the reader asks: `full` walks every session below rather than the
+     * direct children. The parent's own total is never touched by the answer.
+     */
+    async function readSubtree(sessionId, full) {
+      const query = `sessionId=${encodeURIComponent(sessionId)}${full === true ? '&full=1' : ''}`
+      const response = await fetch(`/dsh-balance/session-cost/children?${query}`, {
+        cache: 'no-store',
+        headers: { accept: 'application/json' },
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const payload = await response.json()
+      if (payload?.ok === false) throw new Error(payload.error ?? 'subtree-failed')
+      return payload
+    }
+
+    /**
+     * The child lines of one Step, in spawn order.
+     *
+     * The catalog entry is what the Step carries; the money arrives only with the
+     * subtree read, so a child that has not been read stays in the list with no
+     * figure instead of disappearing or reading as free.
+     *
+     * @param node - a Step record, with `children` when it spawned subagents.
+     * @param lines - the child lines of the session (may be empty).
+     * @returns `{ lines, loaded, cost, steps }` for that Step.
+     */
+    function subtreeOf(node, lines) {
+      const all = Array.isArray(lines) ? lines : []
+      const byId = new Map(all.map((line) => [line.id, line]))
+      // The subtree is walked through the loaded lines, not through the Steps'
+      // catalog entries alone: `Load full history` returns grandchildren too, and a
+      // session that spawned children of its own must show them under its step
+      // rather than vanish from a panel whose total already counts them (D25).
+      const byParent = new Map()
+      for (const line of all) {
+        const list = byParent.get(line.parentId)
+        if (list === undefined) byParent.set(line.parentId, [line])
+        else list.push(line)
+      }
+      const merged = []
+      const seen = new Set()
+      const add = (child, depth) => {
+        if (child === null || child === undefined || seen.has(child.id)) return
+        seen.add(child.id)
+        const line = byId.get(child.id)
+        merged.push(line === undefined
+          ? { ...child, depth, loaded: false, cost: null, steps: null }
+          : { ...child, ...line, depth, loaded: true })
+        for (const grand of byParent.get(child.id) ?? []) add(grand, depth + 1)
+      }
+      for (const child of node?.children ?? []) add(child, 0)
+      const loaded = merged.filter((line) => line.loaded)
+      return {
+        lines: merged,
+        loaded: loaded.length,
+        cost: loaded.reduce((total, line) => total + line.cost, 0),
+        steps: loaded.reduce((total, line) => total + (line.steps ?? 0), 0),
+      }
+    }
+
+    /**
+     * Every Step of the session that spawned subagents, oldest first.
+     *
+     * This is what attributes a subtree cost to the Step that caused it (D25): the
+     * group's money is the sum of the child lines below it, never the parent's.
+     */
+    function stepGroups(nodes, lines) {
+      const groups = []
+      for (const node of Array.isArray(nodes) ? nodes : []) {
+        if (!Array.isArray(node.children) || node.children.length === 0) continue
+        groups.push({ key: `${node.turn}:${node.step}`, turn: node.turn, step: node.step, ...subtreeOf(node, lines) })
+      }
+      return groups
+    }
+
     /**
      * Which way an arrow key moves the selection: -1 back, 1 on, 0 for anything else.
      *
@@ -2093,8 +2327,17 @@ window.__ModuleLoader__.load({
       const axis = picked.axis ?? stored.costAxis ?? 'time'
       // A Step that reported no usage has no point to draw; the empty state below
       // is what says so, instead of a chart of zeroes.
-      const nodes = (Array.isArray(payload?.nodes) ? payload.nodes : []).filter((node) => node.hasUsage === true)
+      const allNodes = Array.isArray(payload?.nodes) ? payload.nodes : []
+      const nodes = allNodes.filter((node) => node.hasUsage === true)
       const session = seriesSummary(nodes)
+      /**
+       * The subtree read: idle until the reader asks for it, because it is the one
+       * action that reads other sessions (D26).
+       */
+      const [subtree, setSubtree] = react.useState({ status: 'idle', lines: [], total: null, diagnostics: [], full: false, error: null })
+      const [copied, setCopied] = react.useState(false)
+      const spawns = allNodes.reduce((count, node) => count + (Array.isArray(node.children) ? node.children.length : 0), 0)
+      const groups = stepGroups(allNodes, subtree.lines)
       const currency = payload?.currency ?? live?.currency ?? 'USD'
       // The three empty states and the error are properties of the session, not of the
       // window: zooming into a quiet interval must not turn the view into an empty state.
@@ -2142,6 +2385,33 @@ window.__ModuleLoader__.load({
         series.retry()
       }
 
+      /**
+       * Read the subtree, either the direct children or every session below.
+       *
+       * The reader is told while it runs: this is the only read of foreign sessions
+       * the view performs, and it can be slow on a wide tree.
+       */
+      const loadSubtree = async (full) => {
+        setSubtree((current) => ({ ...current, status: 'loading', error: null }))
+        try {
+          const answer = await readSubtree(sessionId, full)
+          setSubtree({
+            status: 'ok',
+            lines: Array.isArray(answer.children) ? answer.children : [],
+            total: answer.total ?? null,
+            diagnostics: Array.isArray(answer.diagnostics) ? answer.diagnostics : [],
+            full: answer.full === true,
+            error: null,
+          })
+        } catch (error) {
+          setSubtree((current) => ({
+            ...current,
+            status: 'error',
+            error: error instanceof Error ? error.message : String(error),
+          }))
+        }
+      }
+
       /** Move the visible window; `null` returns to the whole session. */
       const setWindow = (next) => {
         setStep(null)
@@ -2164,6 +2434,29 @@ window.__ModuleLoader__.load({
         return () => document.removeEventListener('keydown', onKey)
       })
 
+      // Which session this is, on a line of its own: the id is the handle the reader
+      // passes on — to an agent, an export or a bug report — so it is shown in full,
+      // selectable as one token, and copyable in one click.
+      const sessionIdLine = h('div', { className: 'dshb_cost_sessionline', key: 'session-line' }, [
+        h('span', { className: 'dshb_cost_sub', key: 'label' }, t('cost.session.label')),
+        h('code', { className: 'dshb_cost_id', key: 'id', title: sessionId }, sessionId),
+        h('button', {
+          key: 'copy',
+          className: 'dshb_btn',
+          onClick: () => {
+            const done = () => {
+              setCopied(true)
+              setTimeout(() => setCopied(false), 1200)
+            }
+            try {
+              void navigator.clipboard?.writeText(sessionId).then(done, () => {})
+            } catch {
+              // A shell without the clipboard API simply leaves the id to be selected.
+            }
+          },
+        }, copied ? t('cost.session.copied') : t('cost.session.copy')),
+      ])
+
       const head = h('div', { className: 'dshb_cost_head', key: 'head' }, [
         h('span', { className: 'dshb_cost_total', key: 'total' }, costText(shown, currency)),
         payload === null ? null : h('span', { className: 'dshb_cost_sub', key: 'label' }, t(`cost.proj.${projection}`)),
@@ -2180,6 +2473,22 @@ window.__ModuleLoader__.load({
         payload?.peakIntervals?.length > 0 && axis === 'time'
           ? h('span', { className: 'dshb_cost_sub', key: 'bands' }, t('cost.bandNote'))
           : null,
+        // The account-wide figure sits beside the session estimate and says what it
+        // is: the samples cover every session and every other charge (D27).
+        payload?.calibration
+          ? h('span', {
+            className: 'dshb_cost_sub',
+            key: 'calibration',
+            title: t('cost.calibration.title', {
+              from: clock(payload.calibration.from) ?? '—',
+              to: clock(payload.calibration.to) ?? '—',
+              samples: payload.calibration.samples,
+            }),
+          }, t('cost.calibration', { value: costText(payload.calibration.delta, currency) }))
+          : null,
+        spawns > 0
+          ? h('span', { className: 'dshb_cost_sub', key: 'subagents' }, t('cost.subagents.count', { count: spawns }))
+          : null,
         session.unpriced.length > 0
           ? h('span', { className: 'dshb_flag', key: 'unpriced' }, [
             t('cost.unpriced', { models: session.unpriced.join(', ') }),
@@ -2194,6 +2503,11 @@ window.__ModuleLoader__.load({
       ])
 
       const topk = picked.topk ?? stored.costTopK ?? 'steps'
+      // Which reading sits beside the inspector. A stored tab is only honoured while
+      // the session has something to show on it, so a session without subagents never
+      // opens on an empty one.
+      const storedTab = picked.tab ?? stored.costTab ?? 'session'
+      const tab = storedTab === 'subagents' && spawns === 0 ? 'session' : storedTab
       const controls = h('div', { className: 'dshb_cost_controls', key: 'controls' }, [
         h(Segmented, {
           key: 'projection',
@@ -2230,6 +2544,7 @@ window.__ModuleLoader__.load({
 
       if (state !== 'ok') {
         return h('div', { className: 'dshb_cost' }, [
+          sessionIdLine,
           head,
           controls,
           h(CostEmpty, {
@@ -2256,6 +2571,7 @@ window.__ModuleLoader__.load({
       ])
 
       return h('div', { className: 'dshb_cost' }, [
+        sessionIdLine,
         head,
         controls,
         h(CostChart, {
@@ -2276,8 +2592,21 @@ window.__ModuleLoader__.load({
           onSelect: select,
         }),
         note,
-        // The inspector and the top list describe the same selection, so they sit side
-        // by side: the Step reached from a row is read next to the row that led there.
+        // The tabs switch what the panes below the chart describe. The subtree is a
+        // tab of its own, never a row of the session's total (D25), and the strip
+        // only appears when the session actually spawned something.
+        spawns > 0
+          ? h(CostTabs, {
+            key: 'tabs',
+            t,
+            value: tab,
+            spawns,
+            onSelect: (value) => choose('tab', 'costTab', value),
+          })
+          : null,
+        // The inspector and the reading beside it describe the same selection, so they
+        // sit side by side: the Step reached from a row is read next to the row that
+        // led there, and the Step that spawned a subtree is read next to that subtree.
         h('div', { className: 'dshb_cost_panes', key: 'panes' }, [
           h('div', { className: 'dshb_cost_pane', key: 'inspector' }, h(CostInspector, {
             t,
@@ -2288,16 +2617,30 @@ window.__ModuleLoader__.load({
             peakIntervals: payload?.peakIntervals ?? [],
             inspectCall: props.inspectCall,
             loadOlder: props.loadOlder,
+            subtree,
+            onLoadSubtree: loadSubtree,
+            onOpenSubtree: props.openSessionCost,
           })),
-          h('div', { className: 'dshb_cost_pane', key: 'topk' }, h(TopK, {
-            t,
-            rows,
-            mode: topk,
-            currency,
-            total,
-            selected,
-            onSelect: select,
-          })),
+          h('div', { className: 'dshb_cost_pane', key: tab }, tab === 'subagents'
+            ? h(Subagents, {
+              t,
+              currency,
+              groups,
+              spawns,
+              state: subtree,
+              hint: t('cost.tab.hint'),
+              onLoad: loadSubtree,
+              onOpen: props.openSessionCost,
+            })
+            : h(TopK, {
+              t,
+              rows,
+              mode: topk,
+              currency,
+              total,
+              selected,
+              onSelect: select,
+            })),
         ]),
         ratesOpen && session.unpriced.length > 0
           ? h(RateEntry, { key: 'rates', t, models: session.unpriced, rates: payload?.fallbackRates, onSave: saveRates })
@@ -2313,9 +2656,9 @@ window.__ModuleLoader__.load({
     function TopK({ t, rows, mode, currency, total, selected, onSelect }) {
       const head = h('div', { className: 'dshb_cost_note', key: 'title' }, t('cost.topk.title'))
       if (rows.length === 0) {
-        return h('div', { className: 'dshb_topk' }, [head, h('div', { className: 'dshb_cost_note', key: 'empty' }, t('cost.topk.empty'))])
+        return h('div', { className: 'dshb_topk dshb_cost_card' }, [head, h('div', { className: 'dshb_cost_note', key: 'empty' }, t('cost.topk.empty'))])
       }
-      return h('div', { className: 'dshb_topk' }, [
+      return h('div', { className: 'dshb_topk dshb_cost_card' }, [
         head,
         ...rows.map((row, position) => h('div', {
           key: row.key,
@@ -2351,6 +2694,27 @@ window.__ModuleLoader__.load({
           onClick: () => onSelect(option.value),
         }, option.label)),
       ])
+    }
+
+    /**
+     * The under-chart tabs: the session's own figures, or the subagents it spawned.
+     *
+     * The choice only decides what is drawn below the chart. It never moves money:
+     * the session total stays the session's own, and the subtree keeps its own
+     * figure on its own tab (D25).
+     */
+    function CostTabs({ t, value, spawns, onSelect }) {
+      const options = [
+        { value: 'session', label: t('cost.tab.session') },
+        { value: 'subagents', label: spawns > 0 ? t('cost.tab.subagents', { count: spawns }) : t('cost.tab.subagentsCount') },
+      ]
+      return h('div', { className: 'dshb_cost_tabs', role: 'tablist' }, options.map((option) => h('button', {
+        key: option.value,
+        role: 'tab',
+        'aria-selected': option.value === value ? 'true' : 'false',
+        className: option.value === value ? 'dshb_cost_tab dshb_cost_tabOn' : 'dshb_cost_tab',
+        onClick: () => onSelect(option.value),
+      }, option.label)))
     }
 
     /** Editable text of the rate rows: a model without a rate keeps an empty field. */
@@ -2647,6 +3011,17 @@ window.__ModuleLoader__.load({
         style: { left: `${plot.points[selected].x}px`, top: `${plot.points[selected].y}px` },
       }) : null
 
+      // A Step that spawned subagents says so on the chart: the child's money never
+      // enters the plot, but the spawn is a fact about this Step.
+      const spawns = plot.points
+        .filter((point) => Array.isArray(point.node.children) && point.node.children.length > 0)
+        .map((point) => h('div', {
+          key: `spawn-${point.index}`,
+          className: 'dshb_cost_spawn',
+          title: t('cost.subagents.mark', { labels: point.node.children.map((child) => child.label === '' ? child.id.slice(0, 8) : child.label).join(', ') }),
+          style: { left: `${point.x}px`, top: `${point.y}px` },
+        }))
+
       // The brushed interval, drawn while the pointer drags it. It is discarded on
       // release (the window becomes the range) and never stored anywhere (D34).
       const selection = brush === null ? null : h('div', {
@@ -2689,6 +3064,7 @@ window.__ModuleLoader__.load({
             h('canvas', { key: 'canvas', className: 'dshb_cost_canvas', ref: canvasRef }),
             ...separators,
             selection,
+            ...spawns,
             marker,
             tooltip,
           ]),
@@ -2762,6 +3138,109 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The subagent subtree of one session, read only when asked.
+     *
+     * The panel never mixes its figures into the header: every number here belongs
+     * to the child sessions, and the header stays the session's own total (D25).
+     */
+    /**
+     * The one-click jump into a child session's own Cost view.
+     *
+     * A subagent is a session of its own, so the reader follows the money instead of
+     * retyping an id; without an owner action the button is simply absent.
+     */
+    function SubagentOpen({ t, id, onOpen }) {
+      if (typeof onOpen !== 'function' || typeof id !== 'string' || id === '') return null
+      return h('button', {
+        className: 'dshb_btn',
+        key: 'open',
+        title: t('cost.subagents.openHint'),
+        onClick: () => onOpen(id),
+      }, t('cost.subagents.open'))
+    }
+
+    function Subagents({ t, currency, groups, spawns, state, onLoad, onOpen }) {
+      const head = h('div', { className: 'dshb_cost_note', key: 'title' }, [t('cost.subagents.title'), ' ', `(${spawns})`])
+      const actions = []
+      if (state.status === 'loading') {
+        actions.push(h('span', { className: 'dshb_cost_note', key: 'loading' }, t('cost.subagents.loading')))
+      } else if (state.status === 'idle') {
+        actions.push(h('span', { className: 'dshb_cost_note', key: 'hint' }, t('cost.subagents.hint')))
+        actions.push(h('button', {
+          key: 'include',
+          className: 'dshb_btn',
+          onClick: () => { void onLoad(false) },
+        }, t('cost.subagents.include')))
+      } else if (state.status === 'error') {
+        actions.push(h('span', { className: 'dshb_flag', key: 'failed' }, t('cost.subagents.failed', { error: state.error ?? '' })))
+        actions.push(h('button', {
+          key: 'retry',
+          className: 'dshb_btn',
+          onClick: () => { void onLoad(state.full) },
+        }, t('cost.retry')))
+      } else {
+        // A zero here would claim the subtree cost nothing; the figure appears only
+        // once something was actually read (D26).
+        actions.push(h('span', { className: 'dshb_cost_sub', key: 'total' }, state.lines.length === 0
+          ? t('cost.subagents.totalUnknown')
+          : t('cost.subagents.total', { value: costText(state.total?.cost ?? 0, currency) })))
+        actions.push(state.full
+          ? h('span', { className: 'dshb_cost_note', key: 'full' }, t('cost.subagents.full'))
+          : h('button', {
+            key: 'full',
+            className: 'dshb_btn',
+            title: t('cost.subagents.fullHint'),
+            onClick: () => { void onLoad(true) },
+          }, t('cost.subagents.loadFull')))
+        if (state.diagnostics.length > 0) {
+          actions.push(h('span', { className: 'dshb_flag', key: 'diagnostics' }, t('cost.subagents.diagnostics', { count: state.diagnostics.length })))
+        }
+      }
+
+      // A branch that could not be read is named, with the reason the Host gave:
+      // "1 session could not be read" alone leaves the reader unable to tell which.
+      const broken = state.status === 'ok'
+        ? state.diagnostics.map((row) => h('div', { className: 'dshb_sub_row dshb_sub_broken', key: `broken-${row.id}` }, [
+          h('span', { className: 'dshb_sub_label', key: 'label' }, row.id.slice(0, 8)),
+          h('span', { className: 'dshb_sub_reason', key: 'reason' }, t(`cost.subagents.reason.${row.reason}`, { reason: row.reason })),
+        ]))
+        : []
+
+      // The spawn list comes from the session's own catalog facts, so it is drawn
+      // before anything is read: only the money waits for the explicit ask, and an
+      // unread child says so instead of reading as free.
+      const body = groups.flatMap((group) => [
+        h('div', { className: 'dshb_sub_head', key: `${group.key}-head` }, [
+          t('cost.tip.turn', { turn: group.turn, step: group.step }),
+          ' ',
+          // The head carries an aggregate, and nothing else: a group of one line would
+          // repeat that line's own figure right above it, and an unread group has no
+          // figure at all — its lines already say they were not read.
+          group.loaded === 0 || group.lines.length < 2
+            ? null
+            : h('span', { className: 'dshb_sub_money', key: 'money' }, costText(group.cost, currency)),
+        ]),
+        ...group.lines.map((line) => h('div', {
+          className: 'dshb_sub_row',
+          key: `${group.key}-${line.id}`,
+          style: { paddingLeft: `${line.depth * 12}px` },
+        }, [
+          h('span', { className: 'dshb_sub_label', key: 'label' }, `${line.label === '' || line.label === undefined ? line.id.slice(0, 8) : line.label} · ${line.mode}`),
+          // Money and button share one right-aligned group, so the buttons line up in
+          // a column instead of stepping in and out with the length of each figure.
+          h('span', { className: 'dshb_sub_right', key: 'right' }, [
+            h('span', { className: 'dshb_sub_money', key: 'money' }, line.loaded
+              ? `${costText(line.cost, currency)} · ${t('cost.steps', { steps: line.steps })}`
+              : t('cost.subagents.notLoaded')),
+            h(SubagentOpen, { key: 'open', t, id: line.id, onOpen }),
+          ]),
+        ])),
+      ])
+
+      return h('div', { className: 'dshb_subagents dshb_cost_card' }, [head, ...actions, ...body, ...broken])
+    }
+
+    /**
      * The inspector of one Step.
      *
      * The prompt comes from the projection, and the projection holds usage, not
@@ -2769,7 +3248,7 @@ window.__ModuleLoader__.load({
      * `Load older` action instead of loading the conversation behind the reader's
      * back.
      */
-    function CostInspector({ t, node, currency, total, projection = 'fact', peakIntervals, inspectCall, loadOlder }) {
+    function CostInspector({ t, node, currency, total, projection = 'fact', peakIntervals, inspectCall, loadOlder, subtree = null, onLoadSubtree = null, onOpenSubtree = null }) {
       const [older, setOlder] = react.useState({ status: 'idle', error: null })
       if (node === null || node === undefined) {
         return h('div', { className: 'dshb_cost_card' }, h('div', { className: 'dshb_cost_note' }, t('cost.inspector.empty')))
@@ -2872,6 +3351,35 @@ window.__ModuleLoader__.load({
             h('span', { className: 'k', key: `${call.callId}-n` }, call.name),
             h('span', { className: 'dshb_cost_preview', key: `${call.callId}-p` }, call.preview),
           ])),
+        // The Steps this one spawned: the subtree cost is attributed here, beside
+        // the Step that caused it, and never added to the Step's own figure (D25).
+        ...(Array.isArray(node.children) && node.children.length > 0 ? (() => {
+          const own = subtreeOf(node, subtree?.lines ?? [])
+          return [
+            h('div', { className: 'dshb_cost_note', key: 'subagents-title' }, t('cost.subagents.step')),
+            h('div', { className: 'dshb_cost_kv', key: 'subagents' }, own.lines.flatMap((line) => [
+              h('span', { className: 'k', key: `${line.id}-n` }, `${line.label === '' ? line.id.slice(0, 8) : line.label} · ${line.mode}`),
+              h('span', {
+                key: `${line.id}-c`,
+                className: 'dshb_kv_open',
+                title: line.id,
+              }, [
+                h('span', { key: 'money' }, line.loaded ? costText(line.cost, currency) : t('cost.subagents.notLoaded')),
+                h(SubagentOpen, { key: 'open', t, id: line.id, onOpen: onOpenSubtree }),
+              ]),
+            ])),
+            own.loaded === 0 && typeof onLoadSubtree === 'function' && subtree?.status !== 'loading'
+              ? h('button', {
+                key: 'subagents-load',
+                className: 'dshb_btn',
+                onClick: () => { void onLoadSubtree(false) },
+              }, t('cost.subagents.include'))
+              : null,
+            own.loaded > 0
+              ? h('div', { className: 'dshb_cost_note', key: 'subagents-total' }, t('cost.subagents.stepTotal', { value: costText(own.cost, currency) }))
+              : null,
+          ]
+        })() : []),
         h('div', { className: 'dshb_cost_actions', key: 'actions' }, [
           focus === null ? h('span', { className: 'dshb_cost_note', key: 'no-focus' }, t('cost.inspector.noFocus')) : focus,
         ]),
@@ -2935,6 +3443,18 @@ window.__ModuleLoader__.load({
             await session.loadOlder()
             return true
           },
+          /**
+           * Follow a spawned subagent into its own Cost view.
+           *
+           * The child is another session, so this leaves the current view: the shell
+           * opens the session and the Cost tab is activated once it is bound.
+           */
+          openSessionCost: (childId) => openSessionCost({
+            workspace: ctx.get('uiWorkspace'),
+            conversation: ctx.get('uiConversation'),
+            storage: typeof localStorage === 'undefined' ? undefined : localStorage,
+            sessionId: childId,
+          }),
         }),
       }, CostView))
 
@@ -2964,7 +3484,7 @@ window.__ModuleLoader__.load({
       plotTicks, buildPlot, bucketLine, shareOf, tooltipPlacement, costDigits, costText,
       costColumnDigits, costCell, indexTicks, projectionOf, Segmented, RateEntry, rateDraftOf,
       TopK, topRows, visibleSlice, sumBuckets, zoomWindow, panWindow, clampWindow, isFullWindow, turnSpans,
-      arrowDelta, nextSelection,
+      arrowDelta, nextSelection, subtreeOf, stepGroups, Subagents, SubagentOpen, openSessionCost, preferCostView,
       valueAxis, compactNumber, tickLabel, tooltipLines,
     }
     return module.exports

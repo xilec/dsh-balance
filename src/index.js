@@ -19,13 +19,13 @@
  */
 import Schema from '@deepseek-ai/schemastery'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
-import { buildLedger } from './history.js'
+import { buildLedger, calibrationOf } from './history.js'
 import {
   OFF_PEAK_RATIO, PUBLIC_HOLIDAYS_2026, RULE_SOURCE_URL, RULE_VERIFIED_ON,
   nextChange, peakIntervalsBetween, peakSchedule, peakState, phaseAt, priceAt, rateSchedule,
   utcWindowsLabel, windowsOfLocalDay,
 } from './pricing.js'
-import { SESSION_COST_KEY, makeFallbackResolver, makeSessionCostProjection, seriesPayload } from './session-cost.js'
+import { SESSION_COST_KEY, makeFallbackResolver, makeSessionCostProjection, seriesPayload, subtreeSummary } from './session-cost.js'
 import { appendSample, readSamplesCompacting, readState, writeState } from './store.js'
 
 export const name = 'dsh-balance'
@@ -129,16 +129,16 @@ const SETTING_SHAPES = {
 /**
  * Browser-side choices that have no runtime counterpart: they are stored and
  * echoed back to the client, never applied to the Host config. The Cost view's
- * metric, X axis, Tariff projection and top-K mode live here — brush and zoom
- * deliberately do not, so reopening the view shows the whole range.
+ * metric, X axis, Tariff projection, top-K mode and open tab live here — brush
+ * and zoom deliberately do not, so reopening the view shows the whole range.
  */
 const UI_SETTINGS = {
   costMetric: (value) => ['cost', 'output', 'cacheRead', 'cacheWrite', 'tokens'].includes(value),
   costAxis: (value) => value === 'time' || value === 'index',
   costProjection: (value) => ['fact', 'offPeak', 'peak'].includes(value),
   costTopK: (value) => value === 'steps' || value === 'turns',
+  costTab: (value) => value === 'session' || value === 'subagents',
 }
-
 export function apply(ctx, config) {
   const runtime = {
     apiKey: config.apiKey ?? '',
@@ -524,7 +524,10 @@ export function apply(ctx, config) {
       const query = ctx.get('sessionQuery')
       if (query === undefined) return { error: 'unknown-session' }
       const snapshot = await query.readSession(sessionId)
-      const state = snapshot.events.reduce((folded, event) => storedFold.apply(folded, event), storedFold.init())
+      // A forked child is seeded with its parent's turns; that prefix is the
+      // parent's work, and the fold is told to skip it exactly as the live unit is.
+      const empty = storedFold.init(undefined, snapshot.inheritedEventCount ?? 0)
+      const state = snapshot.events.reduce((folded, event) => storedFold.apply(folded, event), empty)
       return { state }
     } catch (error) {
       return { error: 'unknown-session', detail: message(error) }
@@ -573,12 +576,110 @@ export function apply(ctx, config) {
           rates: rateSchedule(currency),
         },
         peakIntervals: peakIntervalsBetween(fromMs, toMs, runtime.holidays),
+        /**
+         * What the account as a whole spent while this session was sampled, or
+         * `null` when the samples cannot express it (D27).
+         */
+        calibration: calibrationOf({ samples, fromMs, toMs, currency }),
         /** The view choices this reader saved, so the view opens as they left it. */
         prefs: browserPrefs(),
       }
     } catch (error) {
       warn(`cannot read the session series: ${message(error)}`)
       return { ok: false, error: message(error) }
+    }
+  }
+
+  /**
+   * The subagent tree of one session, each child priced by the same unit.
+   *
+   * This is the only route that reads other sessions, and it does so only when it
+   * is asked: with `full` it walks every session below through `listDescendants`,
+   * without it only the direct children are read (D26). Nothing here feeds the
+   * parent's total — a child line is a line of its own (D25) — and a child that
+   * cannot be read becomes a diagnostic line instead of failing the request, so
+   * one corrupt branch does not hide the rest of the tree.
+   *
+   * @param sessionId - the session whose subtree is requested.
+   * @param full - `true` to walk the whole tree, `false` for direct children.
+   * @returns the per-child lines, the subtree total and the diagnostics.
+   */
+  const childrenPayloadOf = async (sessionId, full, signal) => {
+    const subagents = ctx.get('subagents')
+    if (subagents === undefined) return { ok: false, error: 'subagents-unavailable' }
+    const options = {
+      currency: effectiveCurrency(),
+      holidays: runtime.holidays,
+      fallback: makeFallbackResolver(projectionConfig()),
+    }
+    let rows
+    try {
+      rows = full === true
+        ? await subagents.listDescendants(sessionId, signal)
+        : (await subagents.listChildren(sessionId, signal)).map((entry) => ({ ...entry, parentId: sessionId, depth: 1, kind: 'child' }))
+    } catch (error) {
+      return { ok: false, error: message(error) }
+    }
+    const children = []
+    const diagnostics = []
+    for (const row of rows) {
+      // An `unsupported` diagnostic means the catalog entry has an unknown mode:
+      // its own log is still readable and still counts, so it becomes a child line
+      // marked `unknown` — only a branch that cannot be read is a diagnostic.
+      const unsupported = row.kind === 'diagnostic' && row.reason === 'unsupported'
+      if (row.kind === 'diagnostic' && !unsupported) {
+        diagnostics.push({ id: row.id, parentId: row.parentId, depth: row.depth, reason: row.reason })
+        continue
+      }
+      const resolved = await projectionStateOf(row.id)
+      if (resolved.error !== undefined) {
+        diagnostics.push({ id: row.id, parentId: row.parentId, depth: row.depth, reason: 'unavailable' })
+        continue
+      }
+      try {
+        const summary = subtreeSummary(seriesPayload(resolved.state, options))
+        children.push({
+          id: row.id,
+          parentId: row.parentId,
+          depth: row.depth,
+          mode: unsupported ? 'unknown' : row.mode,
+          label: row.label ?? '',
+          // `listDescendants` strips the creation time, so a deep line has none:
+          // the client shows its id rather than a 1970 date.
+          createdAt: Number.isFinite(row.createdAt) ? row.createdAt : null,
+          ...(row.activity === undefined ? {} : { activity: row.activity }),
+          hasChildren: row.hasChildren === true,
+          ...summary,
+        })
+      } catch (error) {
+        diagnostics.push({ id: row.id, parentId: row.parentId, depth: row.depth, reason: 'unreadable' })
+        warn(`cannot price the child session ${row.id}: ${message(error)}`)
+      }
+    }
+    const total = subtreeSummary(children.map((child) => ({
+      tStart: child.tStart,
+      tEnd: child.tEnd,
+      buckets: child.tokens,
+      byModel: Object.fromEntries(child.models.map((model) => [model, { buckets: child.tokens }])),
+      cost: child.cost,
+      costByBucket: child.costByBucket,
+      offPeak: child.offPeak,
+      peak: child.peak,
+      unpriced: child.unpriced,
+    })))
+    return {
+      ok: true,
+      sessionId,
+      full: full === true,
+      currency: options.currency,
+      children,
+      diagnostics,
+      /**
+       * The subtree's own money: a child line carries exactly the shape a Step
+       * does here, so the sum is the same sum the parent's own total is. The Step
+       * count is the sum of the lines' Steps, not the number of sessions.
+       */
+      total: { ...total, steps: children.reduce((count, child) => count + child.steps, 0) },
     }
   }
 
@@ -762,6 +863,38 @@ export function apply(ctx, config) {
         sendJson(res, 200, await seriesPayloadOf(sessionId))
       },
     }), 'dsh-balance: session cost route')
+
+    // The subtree route. It is a separate registration because it is a separate
+    // question: the series route above answers for one session and enumerates
+    // nothing, while this one walks the subagent catalog on an explicit ask (D26).
+    webCtx.effect(() => webCtx.webServer.register({
+      kind: 'exact',
+      path: '/dsh-balance/session-cost/children',
+      async handler(req, res) {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          res.writeHead(405, { Allow: 'GET, HEAD' })
+          res.end()
+          return
+        }
+        const url = new URL(req.url ?? '/dsh-balance/session-cost/children', 'http://127.0.0.1')
+        const sessionId = url.searchParams.get('sessionId') ?? ''
+        if (sessionId === '') {
+          sendJson(res, 400, { ok: false, error: 'sessionId is required' })
+          return
+        }
+        if (!loaded) await ready
+        // A tree can be wide and every child is read from its own log, so the walk
+        // is cancellable: the reader closing the view stops the work on the Host.
+        const abort = new AbortController()
+        const cancel = () => abort.abort()
+        req.on?.('close', cancel)
+        try {
+          sendJson(res, 200, await childrenPayloadOf(sessionId, url.searchParams.get('full') === '1', abort.signal))
+        } finally {
+          req.off?.('close', cancel)
+        }
+      },
+    }), 'dsh-balance: session cost children route')
 
     postRoute('/dsh-balance/hello', 'dsh-balance: client hello route', async (body, res) => {
       const mount = body.phase === 'mount'

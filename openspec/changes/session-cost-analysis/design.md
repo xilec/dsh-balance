@@ -139,13 +139,20 @@ rationale. Alternatives that were considered and rejected are named.
   exactly one session - the one it was asked about - and never enumerates others. Subagent
   sessions are served by a separate route that walks `subagentCatalog`. Alternative: accept any
   `sessionId` on the main route — rejected: it turns a view into a session-reading surface.
+  `/dsh-balance/session-cost/children` takes the parent id and a `full` flag: without it the
+  direct children come from `subagents.listChildren`, with it every session below comes from
+  `listDescendants`, and every row is priced by the same fold as the parent. A branch that cannot
+  be read becomes a `diagnostic` row with its reason instead of failing the response, because one
+  corrupt child must not hide the rest of a tree the reader explicitly asked for.
 - **D22 — The route ships the rule material.** Rates with their effective dates, the absolute
   peak intervals covering the series, the holidays, the rule source and verification date and
   the currency all travel with the series. The client derives no peak, holiday or rate decision
   of its own, which is also what keeps the client free of the Tariff rule (as the existing peak
   chip already does with `peak.schedule`).
 - **D30 — First request returns the whole series.** One call, no incremental loading button;
-  `Load full history` survives only as the explicit action for a subagent subtree.
+  `Load full history` survives only as the explicit action for a subagent subtree, where it
+  means what it says: the first ask reads the direct children, and the action extends the walk
+  to every session below rather than re-reading the same one.
 - **D13 — `loadOlder()` is called only on demand.** The chart needs the projection's step data,
   not the conversation; older conversation events are loaded only when a point is clicked (for
   the inspector's prompt preview or for the Trajectory jump). This is a deliberate deviation from
@@ -196,14 +203,18 @@ rationale. Alternatives that were considered and rejected are named.
   plot.
 - **D20 — The node carries what a reader needs.** `turn`, `step`, `t_start`, `t_end`, the buckets
   per model, the retry count, the calls (`name`, `callId`, a preview of up to three lines and at
-  most 200 characters, with escaped newlines decoded) and the flags (`interrupted`, `unpriced`, `unknownModel`). Full argument text appears
+  most 200 characters, with escaped newlines decoded), the spawns of the Step (child id, mode,
+  label and creation time — the parent's own catalog facts, anchored per D41) and the flags (`interrupted`, `unpriced`, `unknownModel`). Full argument text appears
   only in the export's `full` level. The route also prices the buckets separately
   (`costByBucket`), so the inspector can show where a Step's money went as a table without the
   client touching the Tariff rule; the per-bucket figures add up to the Step's cost.
 - **D27 — The calibration line is conditional and honest.** It appears only when the session's
   interval holds at least two balance samples, and it is labelled as account-wide and including
   other activity; with fewer samples no line is offered, because a single sample cannot express a
-  delta.
+  delta. The Host computes it (`calibrationOf`) from the samples inside the series window and
+  returns `null` when there are fewer than two, so the client never derives the figure and never
+  invents one: the value is the first-in-window balance minus the last, and the two sample times
+  ride along as the tooltip's honest explanation of what was actually measured.
 - **D28 — Retries are visible but not billed.** An attempt evicted by a retry does not enter the
   cost (matching the current `dshBalanceCost` semantics) but stays in the state: the tooltip
   reports the retry count and the export emits a `retry` record with the evicted buckets.
@@ -232,7 +243,57 @@ rationale. Alternatives that were considered and rejected are named.
 ### Subagents and export
 
 - **D25 — Children never enter the session total.** "The whole session" means that session; the
-  subtree is a separate row/overlay, so a session's headline number stays comparable over time.
+  subtree lives on its own tab, so a session's headline number stays comparable over time.
+  The view marks the spawning Step on the chart, counts the spawns in the header, and shows the
+  child lines with their own estimates under the Step that caused them - a subtree total is the
+  sum of those lines and of nothing else.
+- **D43 — Including subagents is a tab, and the readings under the chart are cards.** Under the chart a tab
+  strip switches the pane beside the inspector between the session's own top list and the subtree;
+  the header total means the same thing on both, so "include subagents" is a way of looking and
+  never a redefinition of the session figure. The tab is a saved view choice like the metric (D34),
+  and it is hidden entirely for a session that spawned nothing, so a tab never opens on an empty
+  pane. The two readings under the chart share one capped band (~1120px) and are both cards of the
+  same height, because a bare list beside a bordered card reads as loose text; the chart itself
+  keeps the whole width, where a wider plot is genuinely more readable. A line of its own names the session it belongs to (monospace, in full,
+  selected as one token, with a copy button), because the view is per session and the id is the
+  handle the reader passes on - to an agent, an export, a bug report or a grep - and an id that has
+  to be selected by hand from a sentence is a poor handle.
+- **D44 — A child line jumps into the child's own Cost view.** The jump opens the child session
+  through the documented `uiWorkspace.openSession`, and it asks for the Cost tab twice, because
+  one request is not enough: the per-session view preference is written first (with the reader's
+  draft preserved), which is what the shell restores a never-bound session from, and the live
+  conversation binding is activated as well, retried briefly, which is what switches a session
+  that is already open. Both requests are guarded and silent — the shell is free to move that
+  service, and the failure mode is a session opened on its own tab (the reader picks Cost there)
+  rather than a broken button. The button is labelled `open` for the same reason: the
+  shell owns the tab, so the label promises only the jump it can always keep while the hint
+  names the Cost view. The button appears only where a session id exists and only
+  when the owner passed the action, so a line that cannot be followed shows no dead control. In a
+  card the figure and the button form one right-aligned group with a reserved money column, so the
+  buttons line up on one edge instead of stepping in and out with the length of each figure. A
+  figure appears only where it adds something: a group head carries the sum of several lines and
+  stays empty for a single line (which already shows its own figure) or for an unread group (whose
+  lines already say they were not read), because the same number twice in one row reads as noise
+  rather than as information.
+- **D41 — A spawn is anchored by the child's creation time when the series is read.** The catalog
+  fact names the child (`childId`, `childCreatedAt`, mode, label) but not the Step that caused it,
+  and the fact is not always written while the spawning tool call runs: a background child
+  (`run_in_background`) is catalogued after its `tool/result`, its `step/end` and sometimes its
+  `turn/end`, so the Step that happens to be open at fold time is the wrong one. The fold therefore
+  stores the spawn as it is (id, mode, label, creation instant, event instant) and `seriesPayload`
+  puts it on the Step whose interval holds the creation instant, else the last Step that had
+  already started, else the first - which lands on the Step that ran the call in both the
+  foreground and the background case. A spawn catalogued outside any Step is still kept, because
+  the export (D23) needs it even when no Step of this session owns it. The state gains a `spawns`
+  list, an `inheritedEventCount`, and moves to `stateVersion: 4`; a persisted row from version 3
+  is discarded by contract and the log refolds, so no migration code exists.
+- **D42 — Inherited events are the parent's, and are folded into nothing.** A forked child is
+  seeded with its parent's completed turns, and those events carry the parent's sequence numbers
+  in the child's own log. `init` keeps the harness-given `inheritedEventCount` and `apply` ignores
+  every event below it, exactly as the shipped `subagentCatalog` unit does; the stored-log path in
+  the route passes `readSession().inheritedEventCount` into the same `init`. Without it a child's
+  line would bill the parent's work a second time and adopt the parent's spawns as its own, which
+  is precisely what D25 forbids.
 - **D23 — Export defaults to the current session plus markers.** By default the export covers the
   current session and records `subagent_spawn`/`subagent_settle` markers; folding children into
   the stream is an explicit checkbox with progress, because it reads other sessions.
@@ -293,8 +354,8 @@ Client `Slots` provider) and the shipped bundles while writing this design:
   `ctx.get('sessions').get(sessionId)` exactly where `src/index.js:428` does today.
 - A `stateVersion` bump is safe by contract: a persisted checkpoint row is usable only while its
   `ver` matches the live unit's `stateVersion`, and a mismatched or absent row pulls
-  `restoreFloor` to `0`, so the unit refolds the full session log. Moving the unit to version 2
-  therefore rebuilds the new per-Step state from the log with no migration code and no loss.
+  `restoreFloor` to `0`, so the unit refolds the full session log. Moving the unit to version 2 (and again to 3 and to 4)
+  therefore rebuilds the new state from the log with no migration code and no loss.
 - Child sessions are reachable on the Host without touching their logs by hand:
   `subagents.listChildren(parentSessionId)` and `subagents.listDescendants(rootSessionId)` give
   the tree, and `sessionQuery.observeSession(sessionId)` / `readSession(sessionId)` /
@@ -317,7 +378,13 @@ Client `Slots` provider) and the shipped bundles while writing this design:
 - **Projection state growth** (every Step of every session kept in memory) → the series is an
   append-only chunked list, the wire view stays small, and the state is dropped with the session;
   the per-node record is a few hundred bytes.
-- **`stateVersion` bump and old state** → the unit moves to version 2 when the series appears.
+- **`stateVersion` bump and old state** → the unit moved to version 2 when the series appeared, to 3
+  with the fallback rates and to 4 with the spawns and the inherited-event count.
+- **A wide subtree is read sequentially** (every child log is folded one after another, on an
+  explicit ask) → the walk is cancellable: the child route aborts the catalog traversal when the
+  request closes, so a reader who leaves the view stops the work on the Host; the client shows
+  progress for the same reason. No cap is imposed, because a cap would silently answer a question
+  the reader asked in full.
   The projection contract makes this self-healing: a checkpoint row whose `ver` does not match
   the live `stateVersion` is discarded and the unit refolds the whole session log, so an
   already-open session gets its series rebuilt from its events rather than from a migration.
