@@ -25,7 +25,7 @@ import {
   nextChange, peakIntervalsBetween, peakSchedule, peakState, phaseAt, priceAt, rateSchedule,
   utcWindowsLabel, windowsOfLocalDay,
 } from './pricing.js'
-import { SESSION_COST_KEY, makeSessionCostProjection, seriesPayload } from './session-cost.js'
+import { SESSION_COST_KEY, makeFallbackResolver, makeSessionCostProjection, seriesPayload } from './session-cost.js'
 import { appendSample, readSamplesCompacting, readState, writeState } from './store.js'
 
 export const name = 'dsh-balance'
@@ -75,7 +75,38 @@ export const Config = Schema.object({
     cacheMiss: Schema.number().min(0).default(1),
     output: Schema.number().min(0).default(4),
   }).default({ cacheHit: 0.02, cacheMiss: 1, output: 4 }),
+  /**
+   * Peak rates per 1M tokens entered by the reader, keyed by model id. They win
+   * over `fallbackPrices` and price the model even when `priceUnknownModels` is
+   * off; the off-peak rate is half and cache write is billed as a cache miss.
+   */
+  fallbackRates: Schema.dict(Schema.object({
+    cacheHit: Schema.number().min(0).default(0),
+    cacheMiss: Schema.number().min(0).default(0),
+    output: Schema.number().min(0).default(0),
+  })).default({}),
 })
+
+/** A rate map is accepted only when every entry is a set of non-negative numbers. */
+function isFallbackRates(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  return Object.entries(value).every(([model, rate]) => model !== '' && rate !== null && typeof rate === 'object' &&
+    ['cacheHit', 'cacheMiss', 'output'].every((key) => Number.isFinite(Number(rate[key])) && Number(rate[key]) >= 0))
+}
+
+/** Drop the entries a hand-written settings body got wrong instead of storing them. */
+function normalizeFallbackRates(value) {
+  const next = {}
+  for (const [model, rate] of Object.entries(value ?? {})) {
+    if (!isFallbackRates({ [model]: rate })) continue
+    next[model] = {
+      cacheHit: Number(rate.cacheHit),
+      cacheMiss: Number(rate.cacheMiss),
+      output: Number(rate.output),
+    }
+  }
+  return next
+}
 
 /** Keys a runtime settings write may change, with the check each value must pass. */
 const MUTABLE_SETTINGS = {
@@ -86,6 +117,26 @@ const MUTABLE_SETTINGS = {
   warningThreshold: (value) => Number.isFinite(value) && value >= 0,
   dangerThreshold: (value) => Number.isFinite(value) && value >= 0,
   historyDays: (value) => Number.isInteger(value) && value >= 3 && value <= 400,
+  fallbackRates: isFallbackRates,
+}
+
+/** Settings whose stored value is folded into the runtime config, not kept verbatim. */
+const SETTING_SHAPES = {
+  currency: (value) => String(value).toUpperCase(),
+  fallbackRates: normalizeFallbackRates,
+}
+
+/**
+ * Browser-side choices that have no runtime counterpart: they are stored and
+ * echoed back to the client, never applied to the Host config. The Cost view's
+ * metric, X axis, Tariff projection and top-K mode live here — brush and zoom
+ * deliberately do not, so reopening the view shows the whole range.
+ */
+const UI_SETTINGS = {
+  costMetric: (value) => ['cost', 'output', 'cacheRead', 'cacheWrite', 'tokens'].includes(value),
+  costAxis: (value) => value === 'time' || value === 'index',
+  costProjection: (value) => ['fact', 'offPeak', 'peak'].includes(value),
+  costTopK: (value) => value === 'steps' || value === 'turns',
 }
 
 export function apply(ctx, config) {
@@ -105,6 +156,13 @@ export function apply(ctx, config) {
     holidays: Array.isArray(config.holidays) ? config.holidays : [...PUBLIC_HOLIDAYS_2026],
     priceUnknownModels: config.priceUnknownModels === true,
     fallbackPrices: { cacheHit: 0.02, cacheMiss: 1, output: 4, ...(config.fallbackPrices ?? {}) },
+    fallbackRates: normalizeFallbackRates(config.fallbackRates ?? {}),
+  }
+
+  /** Fold one accepted settings value into the runtime config. */
+  const assignSetting = (key, value) => {
+    const shape = SETTING_SHAPES[key]
+    runtime[key] = shape === undefined ? value : shape(value)
   }
 
   const log = (message) => {
@@ -189,9 +247,12 @@ export function apply(ctx, config) {
       const prefs = state.prefs ?? {}
       for (const [key, check] of Object.entries(MUTABLE_SETTINGS)) {
         if (prefs[key] !== undefined && check(prefs[key])) {
-          runtime[key] = key === 'currency' ? String(prefs[key]).toUpperCase() : prefs[key]
+          assignSetting(key, prefs[key])
           uiPrefs[key] = runtime[key]
         }
+      }
+      for (const [key, check] of Object.entries(UI_SETTINGS)) {
+        if (prefs[key] !== undefined && check(prefs[key])) uiPrefs[key] = prefs[key]
       }
       log(`loaded ${samples.length} samples, ${Object.keys(overrides).length} overrides, ${Object.keys(uiPrefs).length} panel settings`)
     } catch (error) {
@@ -489,7 +550,11 @@ export function apply(ctx, config) {
     try {
       const state = resolved.state
       const currency = effectiveCurrency()
-      const options = { currency, holidays: runtime.holidays, fallback: fallback() }
+      const options = {
+        currency,
+        holidays: runtime.holidays,
+        fallback: makeFallbackResolver(projectionConfig()),
+      }
       const nodes = seriesPayload(state, options)
       const first = nodes[0]
       const last = nodes[nodes.length - 1]
@@ -508,6 +573,8 @@ export function apply(ctx, config) {
           rates: rateSchedule(currency),
         },
         peakIntervals: peakIntervalsBetween(fromMs, toMs, runtime.holidays),
+        /** The view choices this reader saved, so the view opens as they left it. */
+        prefs: browserPrefs(),
       }
     } catch (error) {
       warn(`cannot read the session series: ${message(error)}`)
@@ -530,8 +597,13 @@ export function apply(ctx, config) {
     return cache.balances[0]?.currency ?? runtime.currency
   }
 
-  /** The live config the session-cost projection prices with. */
-  const projectionConfig = () => ({ ...runtime, currency: effectiveCurrency() })
+  /**
+   * The live config the session-cost projection prices with. The global fallback
+   * is handed over already gated: with `priceUnknownModels` off an unknown model
+   * must stay unpriced, which is what the Cost view flags, while a rate the reader
+   * entered for that model prices it whatever that flag says.
+   */
+  const projectionConfig = () => ({ ...runtime, currency: effectiveCurrency(), fallbackPrices: fallback() })
 
   /**
    * The same unit again, unregistered: the series route folds a stored session log
@@ -570,6 +642,14 @@ export function apply(ctx, config) {
     keepDays: runtime.keepDays,
   })
 
+  /**
+   * The browser-side choices, and only those: the settings the Host applies live
+   * in their own payload fields, so this stays the map the Cost view restores from.
+   */
+  const browserPrefs = () => Object.fromEntries(
+    Object.entries(uiPrefs).filter(([key]) => UI_SETTINGS[key] !== undefined),
+  )
+
   const buildPayload = (sessionId, zone = 'local') => ({
     host: { version: VERSION, now: Date.now(), dir, samples: samples.length, loaded },
     balance: balancePayload(),
@@ -577,6 +657,9 @@ export function apply(ctx, config) {
     peak: peakPayload(zone),
     prices: pricePayload(),
     fallbackPrices: runtime.priceUnknownModels ? runtime.fallbackPrices : null,
+    fallbackRates: runtime.fallbackRates,
+    /** Choices the panel stored, so the browser restores them on the next mount. */
+    prefs: browserPrefs(),
     sampling: {
       refreshIntervalMs: runtime.refreshIntervalMs,
       clientPollIntervalMs: runtime.clientPollIntervalMs,
@@ -734,13 +817,28 @@ export function apply(ctx, config) {
             sendJson(res, 400, { ok: false, error: `${key} rejected` })
             return
           }
-          runtime[key] = key === 'currency' ? String(body[key]).toUpperCase() : body[key]
+          assignSetting(key, body[key])
           uiPrefs[key] = runtime[key]
+          changed.push(key)
+        }
+        for (const [key, check] of Object.entries(UI_SETTINGS)) {
+          if (body[key] === undefined) continue
+          if (!check(body[key])) {
+            sendJson(res, 400, { ok: false, error: `${key} rejected` })
+            return
+          }
+          uiPrefs[key] = body[key]
           changed.push(key)
         }
         if (changed.includes('refreshIntervalMs')) resetLoop()
         if (changed.length > 0) await persist()
-        sendJson(res, 200, { ok: true, changed, sampling: { refreshIntervalMs: runtime.refreshIntervalMs, clientPollIntervalMs: runtime.clientPollIntervalMs } })
+        sendJson(res, 200, {
+          ok: true,
+          changed,
+          prefs: browserPrefs(),
+          fallbackRates: runtime.fallbackRates,
+          sampling: { refreshIntervalMs: runtime.refreshIntervalMs, clientPollIntervalMs: runtime.clientPollIntervalMs },
+        })
     })
   })
 }

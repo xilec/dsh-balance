@@ -403,10 +403,15 @@ test('the session-cost route serves one session series with the rule it priced b
     assert.equal(payload.nodes.length, 1)
     assert.equal(payload.nodes[0].cost, 10, '1M miss at 2 CNY plus 1M output at 8 CNY')
     assert.equal(payload.nodes[0].ended, false)
+    assert.equal(payload.nodes[0].offPeak.cost, 5, 'the same Step under the off-peak projection')
+    assert.equal(payload.nodes[0].peak.cost, 10, 'and under the peak one')
+    assert.equal(payload.nodes[0].offPeak.costByBucket.output, 4)
     assert.match(payload.rule.sourceUrl, /pricing/)
     assert.equal(payload.rule.verifiedOn.length, 10)
     assert.equal(payload.rule.rates.at(-1).rates.flash.cacheMiss, 2)
+    assert.ok(payload.rule.rates.every((entry) => Number.isFinite(entry.effectiveFrom)), 'every rate table carries its effective date')
     assert.ok(payload.peakIntervals.length >= 1, 'the peak window covering the series travels with it')
+    assert.deepEqual(payload.prefs, {}, 'and the saved view choices ride along, empty by default')
   }, {
     sessionOf: (id) => {
       asked.push(id)
@@ -442,6 +447,69 @@ test('a session this host does not own live is folded from its stored log', asyn
       assert.equal(id, 'session-stored')
       return { session: { id }, inheritedEventCount: 0, events }
     },
+  })
+})
+
+test('a fallback rate entered through the settings route reprices the session', async () => {
+  const states = new Map()
+  await withPlugin(async ({ ctx }) => {
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    const unit = ctx.projections[0]
+    const time = Date.UTC(2026, 8, 24, 2, 0)
+    const events = [
+      { type: 'request/header', seq: 1, time, data: { header: { config: { model: 'reseller-model' } } } },
+      { type: 'assistant/message', seq: 2, time, data: { turn: 1, step: 1, usage: { inputTokens: 1e6, outputTokens: 0 } } },
+    ]
+    states.set('session-1', events.reduce((state, event) => unit.apply(state, event), unit.init()))
+
+    const read = async () => {
+      const res = response()
+      await ctx.routes.get('/dsh-balance/session-cost')(request('GET', '/dsh-balance/session-cost?sessionId=session-1'), res)
+      return JSON.parse(res.body)
+    }
+
+    const before = await read()
+    assert.equal(before.nodes[0].unpriced, true, 'no rate applies to the model yet')
+    assert.equal(before.nodes[0].cost, 0)
+    assert.equal(unit.wire.view(states.get('session-1')).cost, 0)
+
+    const rejected = response()
+    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { fallbackRates: { 'reseller-model': { cacheMiss: -1 } } }), rejected)
+    assert.equal(rejected.status, 400, 'a negative rate is rejected')
+
+    const saved = response()
+    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', {
+      fallbackRates: { 'reseller-model': { cacheHit: 0.1, cacheMiss: 2, output: 8 } },
+    }), saved)
+    assert.equal(saved.status, 200)
+    assert.deepEqual(JSON.parse(saved.body).changed, ['fallbackRates'])
+    assert.deepEqual(JSON.parse(saved.body).fallbackRates, { 'reseller-model': { cacheHit: 0.1, cacheMiss: 2, output: 8 } })
+
+    const after = await read()
+    assert.equal(after.nodes[0].unpriced, false, 'the entered rate prices the model')
+    assert.equal(after.nodes[0].cost, 2, '1M miss at the entered 2 CNY peak rate')
+    assert.equal(after.nodes[0].offPeak.cost, 1, 'and half of it under the off-peak projection')
+    assert.equal(unit.wire.view(states.get('session-1')).cost, 2, 'the chip reprices with the same rule')
+
+    const prefs = response()
+    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { costMetric: 'cacheRead', costAxis: 'index' }), prefs)
+    assert.deepEqual(JSON.parse(prefs.body).changed, ['costMetric', 'costAxis'])
+    const badAxis = response()
+    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { costAxis: 'depth' }), badAxis)
+    assert.equal(badAxis.status, 400)
+
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    const payload = response()
+    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), payload)
+    const view = JSON.parse(payload.body)
+    assert.deepEqual(view.prefs, { costMetric: 'cacheRead', costAxis: 'index' }, 'the browser choices come back on the read route')
+    assert.deepEqual(view.fallbackRates, { 'reseller-model': { cacheHit: 0.1, cacheMiss: 2, output: 8 } })
+
+    const series = await read()
+    assert.deepEqual(series.prefs, { costMetric: 'cacheRead', costAxis: 'index' }, 'and on the series route the view mounts with')
+  }, {
+    sessionOf: () => ({ id: 'session-1' }),
+    projectionState: (session, key) => (key === 'dshBalanceCost' ? states.get(session.id) : undefined),
   })
 })
 

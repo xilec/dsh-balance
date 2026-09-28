@@ -117,8 +117,11 @@ rationale. Alternatives that were considered and rejected are named.
   export, so nothing becomes invisible; only the money metric follows the session estimate the
   chip already shows.
 - **D5 — Count each Step once.** The session estimate is the sum of the same Step nodes;
-  rounding happens only when a number is presented (the existing `round6` at the boundary), so
-  Σ parts equals the whole before rounding.
+  rounding happens only when a number is presented (the `round6` boundary), so Σ parts equals the
+  whole before rounding. The chip's aggregates and a Step's per-bucket rows are sums of the very
+  same six-decimal terms (`pricedReport`), so the chip, the series total and the table rows agree
+  to the last printed digit; the residual is binary floating point (`~1e-16`), not a rounding of
+  a rounding.
 - **D6 — `Unpriced` Steps are excluded from money, included in tokens.** A Step whose model has
   no rate adds nothing to a money metric - never a silent zero - but its tokens count in every
   token metric, and the mark is explicit in the chart, the tooltip and top-K.
@@ -209,10 +212,16 @@ rationale. Alternatives that were considered and rejected are named.
   make the estimate misleading.
 - **D36 — Entering a rate reprices the whole history.** Because the state keeps raw buckets (D8),
   a new rate recomputes every affected Step, the session estimate and the chip; the UI warns that
-  the history is being recomputed so a moving number is expected, not a bug.
+  the history is being recomputed so a moving number is expected, not a bug. The state carries the
+  rule its running aggregates were priced with (a `ruleKey` of the currency, the holidays, the
+  global fallback and the per-model rates): when the live rule stops matching, the aggregates are
+  rebuilt from the stored reports before they are read or advanced, so the chip catches up on the
+  next read without waiting for an event, and no `stateVersion` bump is needed for a rate change.
 - **D34 — View choices are global, through the existing settings route.** Metric, X axis, Tariff
-  projection and top-K mode persist via `POST /dsh-balance/settings` (new keys in
-  `MUTABLE_SETTINGS`); brush and zoom are transient and are not stored.
+  projection and top-K mode persist via `POST /dsh-balance/settings` and come back on the read
+  route as `prefs`; brush and zoom are transient and are not stored. They live in their own
+  `UI_SETTINGS` map beside `MUTABLE_SETTINGS`, because they are browser choices with no runtime
+  counterpart: the route stores and echoes them and never applies them to the Host config.
 
 ### Subagents and export
 

@@ -20,6 +20,13 @@
  * (the current node is kept aside until the next Step opens), which is what the
  * Cost view's route reads.
  *
+ * Every Step is priced under the three **Tariff projections**: `fact` (each report
+ * at the tariff in force at its own instant), `offPeak` and `peak` (every report at
+ * the off-peak or peak rate of the table in force then). The projections are derived
+ * from the stored buckets on every read rather than stored, so entering a fallback
+ * rate reprices the whole history — including the running aggregates, which carry the
+ * rule they were priced with and are rebuilt from the series when that rule changes.
+ *
  * @module dsh-balance/session-cost
  */
 import { z } from 'zod'
@@ -28,6 +35,31 @@ import { costOfTokens, modelClass, priceAt } from './pricing.js'
 
 /** Client-visible projection key carrying this session's estimated cost. */
 export const SESSION_COST_KEY = 'dshBalanceCost'
+
+/** The three Tariff projections every Step is priced under, `fact` first. */
+export const TARIFF_PROJECTIONS = Object.freeze(['fact', 'offPeak', 'peak'])
+
+/**
+ * The peak rate of one model, from the config.
+ *
+ * A rate the reader entered for a model wins, whatever the model is; otherwise the
+ * global `fallbackPrices` applies, which the Host hands over already gated by
+ * `priceUnknownModels` (`undefined` when unknown models must stay unpriced).
+ *
+ * @param config - the live plugin config.
+ * @returns `(model) => rate | undefined`, in peak rates per 1M tokens.
+ */
+export function makeFallbackResolver(config = {}) {
+  const table = new Map()
+  for (const [model, rate] of Object.entries(config.fallbackRates ?? {})) {
+    if (rate !== null && typeof rate === 'object') table.set(String(model).toLowerCase(), rate)
+  }
+  return (model) => {
+    const own = table.get(typeof model === 'string' ? model.toLowerCase() : '')
+    if (own !== undefined) return own
+    return config.fallbackPrices
+  }
+}
 
 const bucketsSchema = z.object({
   uncachedInput: z.number().int().nonnegative(),
@@ -76,6 +108,12 @@ const stateSchema = z.object({
   series: chunkedListSchema(nodeSchema).optional(),
   pending: nodeSchema.nullable(),
   committed: z.number().int().nonnegative(),
+  /**
+   * The Tariff rule the aggregates below were priced with. When the live rule no
+   * longer matches, the aggregates are rebuilt from the series before they are
+   * read or advanced, which is how a fallback rate reprices the whole history.
+   */
+  ruleKey: z.string(),
   totals: bucketsSchema,
   cost: z.number(),
   byModel: z.record(z.string(), z.object({ buckets: bucketsSchema, cost: z.number() })),
@@ -132,6 +170,25 @@ const bucketsOf = (usage) => ({
 
 const round6 = (n) => Math.round(n * 1e6) / 1e6
 
+/**
+ * The money of one usage report, split per bucket and rounded once per bucket.
+ *
+ * Both the running aggregates and the series describe a Step through this helper,
+ * so the chip's total, a node's total and a node's per-bucket rows are sums of the
+ * very same six-decimal terms and agree exactly instead of to within a rounding
+ * of a rounding (the invariant the Cost view's table relies on).
+ *
+ * @returns `{ buckets, cost }`, or null when no rate prices the report.
+ */
+function pricedReport(report, rate) {
+  if (rate === null) return null
+  const buckets = zero()
+  for (const key of BUCKET_KEYS) {
+    buckets[key] = round6(costOfTokens({ ...zero(), [key]: report.buckets[key] ?? 0 }, rate))
+  }
+  return { buckets, cost: round6(BUCKET_KEYS.reduce((total, key) => total + buckets[key], 0)) }
+}
+
 /** The last `usage` chunk of a streamed assistant settlement, if any. */
 function lastUsageChunk(stream) {
   if (!Array.isArray(stream)) return null
@@ -174,13 +231,26 @@ function previewOf(text, limit = 200, maxLines = 3) {
  * @returns a projection unit ready for `ctx.sessionProjections.register`.
  */
 export function makeSessionCostProjection(getConfig) {
-  const priceOf = (model, timeMs) => {
+  const fallbackFor = () => makeFallbackResolver(getConfig())
+  const priceOf = (model, timeMs, phase = 'fact') => {
     const config = getConfig()
     return priceAt(model, timeMs, {
       currency: config.currency,
       holidays: config.holidays,
-      fallback: config.fallbackPrices,
+      fallback: fallbackFor()(model),
+      phase,
     })
+  }
+
+  /** Everything a price depends on, as one comparable value. */
+  const ruleKeyOf = () => {
+    const config = getConfig()
+    return JSON.stringify([
+      config.currency ?? null,
+      config.holidays ?? null,
+      config.fallbackPrices ?? null,
+      config.fallbackRates ?? null,
+    ])
   }
 
   const init = () => ({
@@ -188,6 +258,7 @@ export function makeSessionCostProjection(getConfig) {
     series: undefined,
     pending: null,
     committed: 0,
+    ruleKey: ruleKeyOf(),
     totals: zero(),
     cost: 0,
     byModel: {},
@@ -198,8 +269,8 @@ export function makeSessionCostProjection(getConfig) {
 
   /** Add or subtract one report's attribution in the client-visible aggregates. */
   const shift = (state, report, sign) => {
-    const rate = priceOf(report.model, report.time)
-    const cost = rate === null ? 0 : costOfTokens(report.buckets, rate)
+    const priced = pricedReport(report, priceOf(report.model, report.time))
+    const cost = priced === null ? 0 : priced.cost
     const entry = state.byModel[report.model]
     let byModel = state.byModel
     if (sign > 0) {
@@ -219,7 +290,7 @@ export function makeSessionCostProjection(getConfig) {
       }
     }
     const isNew = sign > 0 && entry === undefined && !state.order.includes(report.model)
-    const unpriced = rate === null && !state.unpriced.includes(report.model)
+    const unpriced = priced === null && !state.unpriced.includes(report.model)
     return {
       ...state,
       totals: sign > 0 ? add(state.totals, report.buckets) : sub(state.totals, report.buckets),
@@ -340,6 +411,26 @@ export function makeSessionCostProjection(getConfig) {
     }
   }
 
+  /**
+   * Rebuild the running aggregates from the stored reports under the live rule.
+   *
+   * The state keeps raw buckets and event times (decision D8), so repricing after
+   * a fallback-rate change is exact rather than approximate: only the aggregates
+   * are rewritten, the series itself is untouched.
+   */
+  const reprice = (state) => {
+    const fresh = {
+      ...state, ruleKey: ruleKeyOf(), totals: zero(), cost: 0, byModel: {}, order: [], unpriced: [],
+    }
+    return seriesNodes(state).reduce(
+      (carried, node) => node.reports.reduce((inner, report) => shift(inner, report, 1), carried),
+      fresh,
+    )
+  }
+
+  /** The state priced with the live rule; the aggregates are rebuilt when it moved. */
+  const current = (state) => (state.ruleKey === ruleKeyOf() ? state : reprice(state))
+
   /** The fold proper; `apply` stamps `seq` on every state it actually changes. */
   const reduce = (state, event) => {
     if (event.type === 'request/header') {
@@ -381,33 +472,35 @@ export function makeSessionCostProjection(getConfig) {
   }
 
   const apply = (state, event) => {
-    const next = reduce(state, event)
-    if (next === state) return state
+    const base = current(state)
+    const next = reduce(base, event)
+    if (next === base) return base
     return { ...next, seq: typeof event.seq === 'number' ? event.seq : next.seq }
   }
 
   const view = (state) => {
     const config = getConfig()
+    const priced = current(state)
     const costByModel = {}
-    for (const [model, entry] of Object.entries(state.byModel)) {
+    for (const [model, entry] of Object.entries(priced.byModel)) {
       if (entry.cost > 0) costByModel[model] = round6(entry.cost)
     }
     return {
-      cost: round6(Math.max(0, state.cost)),
+      cost: round6(Math.max(0, priced.cost)),
       currency: config.currency,
-      models: state.order,
+      models: priced.order,
       costByModel,
-      tokens: state.totals,
-      unpriced: state.unpriced,
+      tokens: priced.totals,
+      unpriced: priced.unpriced,
       peakNow: priceOf('deepseek-flash', Date.now())?.peak ?? false,
-      seq: state.seq,
-      steps: state.committed + (state.pending === null ? 0 : 1),
+      seq: priced.seq,
+      steps: priced.committed + (priced.pending === null ? 0 : 1),
     }
   }
 
   return {
     key: SESSION_COST_KEY,
-    stateVersion: 2,
+    stateVersion: 3,
     stateSchema,
     init,
     apply,
@@ -425,43 +518,68 @@ function seriesNodes(state) {
 
 /**
  * The per-Step series as the Cost view consumes it: every node priced under the
- * live rule, with its buckets, its calls and its flags.
+ * live rule and under the two other Tariff projections, with its buckets, its
+ * calls and its flags.
  *
  * @param state - the projection state (`sessionProjections.stateOf`).
- * @param options - `currency`, `holidays` and `fallback` of the Tariff rule.
+ * @param options - `currency`, `holidays` of the Tariff rule and `fallback`:
+ * either a `(model) => peak rates | undefined` resolver or one rate object.
  * @returns an array of step records, oldest first.
  */
 export function seriesPayload(state, options = {}) {
   return seriesNodes(state).map((node) => describeNode(node, options))
 }
 
+/** One report's rate under a projection, with the fallback already resolved. */
+function rateFor(report, options, fallback, phase) {
+  return priceAt(report.model, report.time, {
+    currency: options.currency,
+    holidays: options.holidays,
+    fallback,
+    phase,
+  })
+}
+
 function describeNode(node, options) {
+  const resolve = typeof options.fallback === 'function' ? options.fallback : () => options.fallback
   const byModel = {}
   let buckets = zero()
-  let cost = 0
   let unpriced = false
   let unknownModel = false
-  const costByBucket = zero()
+  const bucketCost = { fact: zero(), offPeak: zero(), peak: zero() }
   for (const report of node.reports) {
-    const rate = priceAt(report.model, report.time, options)
-    const reportCost = rate === null ? 0 : costOfTokens(report.buckets, rate)
+    const fallback = resolve(report.model)
+    const rate = rateFor(report, options, fallback, 'fact')
     if (rate === null) unpriced = true
     if (modelClass(report.model) === null) unknownModel = true
-    cost += reportCost
     buckets = add(buckets, report.buckets)
     // The table in the Cost view shows where the money went per bucket, and the
     // rate that priced the Step is the host's: the client never splits it itself.
-    for (const key of BUCKET_KEYS) {
-      costByBucket[key] += rate === null ? 0 : costOfTokens({ ...zero(), [key]: report.buckets[key] ?? 0 }, rate)
+    // Every projection is priced here for the same reason — the client only draws.
+    for (const projection of TARIFF_PROJECTIONS) {
+      const projected = pricedReport(report, projection === 'fact' ? rate : rateFor(report, options, fallback, projection))
+      if (projected === null) continue
+      bucketCost[projection] = add(bucketCost[projection], projected.buckets)
     }
     const previous = byModel[report.model] ?? { buckets: zero(), cost: 0 }
-    byModel[report.model] = { buckets: add(previous.buckets, report.buckets), cost: round6(previous.cost + reportCost) }
+    byModel[report.model] = {
+      buckets: add(previous.buckets, report.buckets),
+      cost: round6(previous.cost + (pricedReport(report, rate)?.cost ?? 0)),
+    }
   }
   const last = node.reports[node.reports.length - 1]
-  // The per-bucket figures are rounded once, and the Step's cost is their exact
-  // sum: the table in the Cost view then adds up line by line instead of showing
-  // a total that its own rows cannot reproduce.
-  const roundedBuckets = BUCKET_KEYS.reduce((acc, key) => ({ ...acc, [key]: round6(costByBucket[key]) }), zero())
+  // The per-report figures are already rounded, so summing them and rounding the
+  // result changes nothing: a Step's cost is exactly the sum of its printed rows,
+  // and the session total is exactly the sum of its Steps.
+  const rounded = {}
+  const costs = {}
+  for (const projection of TARIFF_PROJECTIONS) {
+    rounded[projection] = BUCKET_KEYS.reduce(
+      (acc, key) => ({ ...acc, [key]: round6(bucketCost[projection][key]) }),
+      zero(),
+    )
+    costs[projection] = round6(BUCKET_KEYS.reduce((total, key) => total + rounded[projection][key], 0))
+  }
   return {
     turn: node.turn,
     step: node.step,
@@ -475,8 +593,10 @@ function describeNode(node, options) {
     calls: node.calls,
     buckets,
     byModel,
-    cost: round6(BUCKET_KEYS.reduce((total, key) => total + roundedBuckets[key], 0)),
-    costByBucket: roundedBuckets,
+    cost: costs.fact,
+    costByBucket: rounded.fact,
+    offPeak: { cost: costs.offPeak, costByBucket: rounded.offPeak },
+    peak: { cost: costs.peak, costByBucket: rounded.peak },
     unpriced,
     unknownModel,
   }

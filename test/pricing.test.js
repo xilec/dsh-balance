@@ -99,6 +99,23 @@ test('a fallback rate can price an unknown model', () => {
   assert.equal(rate.class, 'fallback')
 })
 
+test('a Tariff projection forces the phase without changing the rate table', () => {
+  const peak = bjt(2026, 9, 24, 10, 0)
+  const off = bjt(2026, 9, 24, 13, 0)
+  const factPeak = priceAt('deepseek-flash', peak, { currency: 'CNY' })
+  const factOff = priceAt('deepseek-flash', off, { currency: 'CNY' })
+  assert.equal(factPeak.cacheMiss, 2)
+  assert.equal(factOff.cacheMiss, 1)
+  // Off-peak is half of the peak rate, in both directions and at either instant.
+  assert.equal(priceAt('deepseek-flash', off, { currency: 'CNY', phase: 'peak' }).cacheMiss, 2)
+  assert.equal(priceAt('deepseek-flash', peak, { currency: 'CNY', phase: 'offPeak' }).cacheMiss, 1)
+  assert.equal(priceAt('deepseek-flash', off, { currency: 'CNY', phase: 'peak' }).peak, true)
+  assert.equal(priceAt('deepseek-flash', peak, { currency: 'CNY', phase: 'offPeak' }).peak, false)
+  // The projection still reads the table in force at the event, not the current one.
+  const oldPeak = priceAt('deepseek-flash', bjt(2026, 9, 1, 10, 0), { currency: 'CNY', phase: 'offPeak' })
+  assert.equal(oldPeak.cacheMiss, 1.5)
+})
+
 test('token cost adds cache writes to the miss bucket', () => {
   const rate = { cacheHit: 0.02, cacheMiss: 1, output: 4 }
   const cost = costOfTokens({ uncachedInput: 1e6, cacheRead: 1e6, cacheWrite: 1e6, output: 1e6 }, rate)

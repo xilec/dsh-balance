@@ -420,7 +420,11 @@ export function rateSchedule(currency) {
  *
  * @param model - model id.
  * @param tsMs - epoch milliseconds of the billable event.
- * @param options - `currency` (CNY/USD) and `holidays`.
+ * @param options - `currency` (CNY/USD), `holidays`, `fallback` (peak rates for a
+ * model the table does not know) and `phase`: `fact` bills the instant as it was,
+ * `peak` forces the peak rate and `offPeak` the off-peak one, which is what the
+ * two Tariff projections show. The rate table itself still comes from `tsMs`, so
+ * a projection over an old session uses the rates that were in force then.
  * @returns `{ cacheHit, cacheMiss, output, peak, reason, currency, class }`, or
  * null when neither the config nor the built-in tables know the model.
  */
@@ -432,12 +436,14 @@ export function priceAt(model, tsMs, options = {}) {
   if (kind === null) return null
   const peak = kind === 'fallback' ? options.fallback : (table[kind] ?? options.fallback)
   if (peak === undefined || peak === null) return null
-  const ratio = state.peak ? 1 : OFF_PEAK_RATIO
+  const projected = options.phase === 'peak' || options.phase === 'offPeak'
+  const atPeak = projected ? options.phase === 'peak' : state.peak
+  const ratio = atPeak ? 1 : OFF_PEAK_RATIO
   return {
     cacheHit: peak.cacheHit * ratio,
     cacheMiss: peak.cacheMiss * ratio,
     output: peak.output * ratio,
-    peak: state.peak,
+    peak: atPeak,
     reason: state.reason,
     currency,
     class: kind,

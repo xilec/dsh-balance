@@ -597,6 +597,8 @@ test('a day row saves and clears a manual correction through the Host', async ()
 /** One Step record as the session-cost route serves it. */
 const costNode = (over = {}) => {
   const buckets = { uncachedInput: 1e6, cacheRead: 0, cacheWrite: 0, output: 1e6, ...(over.buckets ?? {}) }
+  const costByBucket = { uncachedInput: 2, cacheRead: 0, cacheWrite: 0, output: 8, ...(over.costByBucket ?? {}) }
+  const half = Object.fromEntries(Object.entries(costByBucket).map(([key, value]) => [key, value / 2]))
   return {
     turn: 1,
     step: 1,
@@ -611,7 +613,9 @@ const costNode = (over = {}) => {
     buckets,
     byModel: { 'deepseek-flash': { buckets, cost: 10 } },
     cost: 10,
-    costByBucket: { uncachedInput: 2, cacheRead: 0, cacheWrite: 0, output: 8, ...(over.costByBucket ?? {}) },
+    costByBucket,
+    offPeak: { cost: 5, costByBucket: half },
+    peak: { cost: 10, costByBucket: { ...costByBucket } },
     unpriced: false,
     unknownModel: false,
     ...over,
@@ -668,7 +672,10 @@ test('the chart marks peak windows, turn boundaries and the axis', async () => {
     const text = textOf(tree)
     assert.match(text, /¥30\.00/, 'the header leads with the session estimate')
     assert.match(text, /cost\.steps/)
-    assert.match(text, /cost\.totalLabel/)
+    assert.match(text, /cost\.proj\.fact/)
+    assert.match(text, /cost\.control\.projection/, 'the projection, metric and axis controls are offered')
+    assert.match(text, /cost\.metric\.cacheRead/)
+    assert.match(text, /cost\.axis\.index/)
     assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_canvas').length, 1)
     assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_band').length, 1, 'one peak window is shaded')
     assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_sep').length, 2, 'a separator per Turn')
@@ -729,6 +736,83 @@ test('the Cost view states its three empty and error states in place', async () 
     second()
   }
   react.stop()
+})
+
+/** A fetch stub answering the series route and recording every settings write. */
+function stubSeriesAndWrites(series, posts) {
+  const previous = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    if (String(url).startsWith('/dsh-balance/session-cost')) {
+      return { ok: true, status: 200, json: async () => series }
+    }
+    if (options?.method === 'POST') {
+      posts.push({ url: String(url), body: options.body === undefined ? undefined : JSON.parse(options.body) })
+      return { ok: true, status: 200, json: async () => ({ ok: true, sampling: payload.sampling }) }
+    }
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  return () => {
+    globalThis.fetch = previous
+  }
+}
+
+test('the metric and the Tariff projection move every figure together', async () => {
+  const { exported } = await loadClient()
+  const { buildPlot, metricOf, seriesSummary } = exported.__internals
+  const nodes = [
+    costNode(),
+    costNode({
+      turn: 1,
+      step: 2,
+      tStart: NOW - HOUR,
+      tEnd: NOW - HOUR + MINUTE,
+      cost: 4,
+      costByBucket: { uncachedInput: 1, cacheRead: 0, cacheWrite: 0, output: 3 },
+      offPeak: { cost: 2, costByBucket: { uncachedInput: 0.5, cacheRead: 0, cacheWrite: 0, output: 1.5 } },
+      peak: { cost: 4, costByBucket: { uncachedInput: 1, cacheRead: 0, cacheWrite: 0, output: 3 } },
+    }),
+  ]
+
+  // The same buckets, priced three ways: the chart and every total move with it.
+  assert.equal(metricOf(nodes[0], 'cost'), 10, 'fact is the default')
+  assert.equal(metricOf(nodes[0], 'cost', 'offPeak'), 5)
+  assert.equal(metricOf(nodes[0], 'cost', 'peak'), 10)
+  assert.equal(metricOf(nodes[0], 'tokens', 'peak'), 2e6, 'a token metric ignores the projection')
+
+  const fact = buildPlot(nodes, { width: 300, height: 100, clip: false })
+  const offPeak = buildPlot(nodes, { width: 300, height: 100, clip: false, projection: 'offPeak' })
+  assert.deepEqual(fact.points.map((point) => point.value), [10, 4])
+  assert.deepEqual(offPeak.points.map((point) => point.value), [5, 2])
+  assert.notEqual(fact.digest, offPeak.digest, 'the canvas redraws when the projection moves')
+  const output = buildPlot(nodes, { width: 300, height: 100, clip: false, metric: 'output' })
+  assert.deepEqual(output.points.map((point) => point.value), [1e6, 1e6])
+  assert.notEqual(output.digest, fact.digest, 'and when the metric does')
+
+  const summary = seriesSummary(nodes)
+  assert.equal(summary.total, 14, 'the fact figure stays available whatever is shown')
+  assert.deepEqual(summary.totals, { fact: 14, offPeak: 7, peak: 14 })
+})
+
+test('the Step-index axis is labelled by (Turn, Step)', async () => {
+  const { exported } = await loadClient()
+  const { indexTicks, buildPlot } = exported.__internals
+  const nodes = Array.from({ length: 9 }, (_, index) => costNode({
+    turn: 2,
+    step: index + 1,
+    tStart: NOW - (9 - index) * MINUTE,
+    tEnd: NOW - (8 - index) * MINUTE,
+  }))
+  const ticks = indexTicks(nodes, 4)
+  assert.equal(ticks.length, 5)
+  assert.deepEqual(ticks.map((tick) => tick.x), [0, 0.25, 0.5, 0.75, 1])
+  assert.deepEqual(ticks.map((tick) => tick.label), ['2.1', '2.3', '2.5', '2.7', '2.9'])
+  assert.deepEqual(indexTicks([], 4), [])
+  assert.deepEqual(
+    buildPlot(nodes, { width: 80, axis: 'index' }).points.map((point) => point.x),
+    [0, 10, 20, 30, 40, 50, 60, 70, 80],
+    'points are spaced by index, not by time',
+  )
+  assert.equal(buildPlot(nodes, { axis: 'index' }).mode, 'index')
 })
 
 test('the chart data helpers decimate, clip and band without a DOM', async () => {
@@ -991,4 +1075,189 @@ test('the cost column of the inspector adds up to its total', async () => {
   assert.equal(textOf(rows[0]), 'cost.bucket.in 1000000 $0.000175', 'a row reads bucket, tokens, cost')
   assert.equal(textOf(rows[4]).startsWith('cost.bucket.total 2000000'), true, 'the total row sums the tokens too')
   react.stop()
+})
+
+test('a stored projection and metric come back on mount, and a click is written through', async () => {
+  const { exported, react } = await loadClient()
+  const posts = []
+  const nodes = [costNode(), costNode({ turn: 1, step: 2, tStart: NOW - HOUR, tEnd: NOW - HOUR + MINUTE })]
+  const restore = stubSeriesAndWrites(costPayload(nodes, {
+    prefs: { costProjection: 'offPeak', costMetric: 'output', costAxis: 'index' },
+  }), posts)
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => ({ seq: 5, currency: 'CNY' }) }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    const tree = react.createElement(exported.__internals.CostView, props)
+    const text = textOf(tree)
+    // The peak bands and Turn separators are time facts: the Step-index axis drops them.
+    assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_band').length, 0)
+    assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_sep').length, 0)
+    assert.match(text, /1\.2/, 'the axis is labelled by (Turn, Step)')
+    // The headline follows the stored projection and the fact figure stays beside it.
+    assert.match(text, /¥10\.00/, 'the off-peak total leads')
+    assert.match(text, /cost\.fact/, 'and the fact figure is still labelled beside it')
+    assert.match(text, /cost\.proj\.offPeak/)
+
+    const metric = find(tree, (element) => element.type === 'button' && element.children?.join('') === 'cost.metric.cost')[0]
+    assert.ok(metric !== undefined, 'the metric control is on screen')
+    await metric.props.onClick()
+    const settings = posts.filter((post) => post.url === '/dsh-balance/settings')
+    assert.equal(settings.length, 1)
+    assert.deepEqual(settings[0].body, { costMetric: 'cost' })
+  } finally {
+    react.stop()
+    restore()
+  }
+})
+
+test('an unpriced Step offers its rate, and saving it writes through the settings route', async () => {
+  const { exported, react } = await loadClient()
+  const posts = []
+  const unpriced = costNode({
+    cost: 0,
+    unpriced: true,
+    unknownModel: true,
+    buckets: { uncachedInput: 1e6, cacheRead: 0, cacheWrite: 0, output: 0 },
+    byModel: { 'reseller-model': { buckets: { uncachedInput: 1e6, cacheRead: 0, cacheWrite: 0, output: 0 }, cost: 0 } },
+  })
+  const restore = stubSeriesAndWrites(costPayload([unpriced]), posts)
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => undefined }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    let tree = react.createElement(exported.__internals.CostView, props)
+    assert.match(textOf(tree), /cost\.empty\.rates/, 'no rate applies to the only model')
+    assert.match(textOf(tree), /reseller-model/, 'the model to price is named')
+
+    const inputs = find(tree, (element) => element.type === 'input')
+    assert.equal(inputs.length, 3, 'one field per rate')
+    const values = ['2', '0.1', '8']
+    inputs.forEach((input, index) => input.props.onChange({ target: { value: values[index] } }))
+
+    // The save closure reads the draft of the render it was taken from, so the tree
+    // is traversed once more before the button is pressed.
+    react.beginRender()
+    tree = react.createElement(exported.__internals.CostView, props)
+    textOf(tree)
+    react.beginRender()
+    tree = react.createElement(exported.__internals.CostView, props)
+    const save = find(tree, (element) => element.props?.className === 'dshb_btn dshb_btn_primary dshb_rates_save')[0]
+    assert.ok(save !== undefined, 'the rate editor has its own save')
+    await save.props.onClick()
+    const settings = posts.filter((post) => post.url === '/dsh-balance/settings')
+    assert.equal(settings.length, 1)
+    assert.deepEqual(settings[0].body, {
+      fallbackRates: { 'reseller-model': { cacheMiss: 2, cacheHit: 0.1, output: 8 } },
+    })
+  } finally {
+    react.stop()
+    restore()
+  }
+})
+
+test('the settings tab shows a rate block for an unpriced model, and its own save writes them', async () => {
+  const { exported, react } = await loadClient()
+  const posts = []
+  const restore = stubFetch({ posts })
+  try {
+    const withRates = {
+      ...payload,
+      fallbackRates: { 'reseller-model': { cacheHit: 0.1, cacheMiss: 2, output: 8 } },
+      session: { ...(payload.session ?? {}), unpriced: ['reseller-model'] },
+    }
+    react.beginRender()
+    const tree = react.createElement(exported.__internals.Settings, {
+      t: (key) => key,
+      state: { status: 'ok', payload: withRates, error: null, at: Date.now() },
+    })
+    const text = textOf(tree)
+    assert.match(text, /settings\.fallbackRates/, 'the rates have their own block')
+    assert.match(text, /reseller-model/, 'the model the session could not price is offered')
+    assert.match(text, /cost\.rates\.note/, 'the block warns that saving reprices the history')
+    assert.equal(find(tree, (element) => element.props?.className === 'dshb_btn dshb_btn_primary dshb_rates_save').length, 1)
+
+    const apply = find(tree, (element) => element.props?.className === 'dshb_btn dshb_btn_primary')[0]
+    assert.ok(apply !== undefined, 'the panel keeps its own Apply button')
+    await apply.props.onClick()
+    const panel = posts.filter((post) => post.url === '/dsh-balance/settings').at(-1)
+    assert.equal(typeof panel.body.currency, 'string', 'Apply still writes the panel fields')
+  } finally {
+    react.stop()
+    restore()
+  }
+})
+
+test('the rate editor writes the rates it holds, and an empty row clears one', async () => {
+  const { exported, react } = await loadClient()
+  const RateEntry = exported.__internals.RateEntry
+  const writes = []
+  const onSave = async (next) => {
+    writes.push(next)
+  }
+  const rates = { 'reseller-model': { cacheHit: 0.1, cacheMiss: 2, output: 8 } }
+  react.beginRender()
+  let tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
+  const text = textOf(tree)
+  assert.match(text, /cost\.rates\.miss/)
+  assert.match(text, /cost\.rates\.hit/)
+  assert.match(text, /cost\.rates\.output/)
+  const inputs = find(tree, (element) => element.type === 'input')
+  assert.deepEqual(inputs.map((input) => input.props.value), ['2', '0.1', '8'], 'the stored rates fill the fields')
+
+  // Clearing every field means "no rate for this model", not a rate of zero.
+  inputs.forEach((input) => input.props.onChange({ target: { value: '' } }))
+  react.beginRender()
+  tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
+  textOf(tree)
+  react.beginRender()
+  tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
+  await find(tree, (element) => element.props?.className?.includes?.('dshb_rates_save') === true)[0].props.onClick()
+  assert.deepEqual(writes, [{}], 'an empty row drops the model')
+
+  react.beginRender()
+  tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
+  find(tree, (element) => element.type === 'input').forEach((input, index) => {
+    input.props.onChange({ target: { value: ['1', '0.02', '4'][index] } })
+  })
+  react.beginRender()
+  tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
+  textOf(tree)
+  react.beginRender()
+  tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
+  await find(tree, (element) => element.props?.className?.includes?.('dshb_rates_save') === true)[0].props.onClick()
+  assert.deepEqual(writes.at(-1), { 'reseller-model': { cacheMiss: 1, cacheHit: 0.02, output: 4 } })
+
+  // A negative rate is refused before anything is written.
+  react.beginRender()
+  tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
+  find(tree, (element) => element.type === 'input')[0].props.onChange({ target: { value: '-1' } })
+  react.beginRender()
+  tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
+  textOf(tree)
+  react.beginRender()
+  tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
+  await find(tree, (element) => element.props?.className?.includes?.('dshb_rates_save') === true)[0].props.onClick()
+  assert.equal(writes.length, 2, 'a negative rate is not written')
+  assert.equal(exported.__internals.RateEntry({ t: (key) => key, models: [], rates: {}, onSave }), null, 'no model, no editor')
+  react.stop()
+})
+
+test('the tooltip names the projection it prices under and marks an unpriced Step', async () => {
+  const { exported } = await loadClient()
+  const { tooltipLines } = exported.__internals
+  const node = costNode({ retries: 2 })
+  const lines = tooltipLines(node, { t: (key) => key, currency: 'CNY', total: 20, intervals: [], projection: 'offPeak' })
+  assert.equal(lines.length, 6, 'four facts, the fact figure and the retry count')
+  assert.match(lines[3], /¥5\.00 · cost\.tip\.share/)
+  assert.match(lines[4], /cost\.proj\.fact: ¥10\.00/)
+  assert.match(lines[5], /cost\.inspector\.retries/)
+
+  const unpriced = tooltipLines(costNode({ cost: 0, unpriced: true }), { t: (key) => key, currency: 'CNY', total: 20 })
+  assert.equal(unpriced.at(-1), 'cost.tip.unpriced')
+  assert.equal(tooltipLines(node, { t: (key) => key, currency: 'CNY', total: 20 }).length, 5, 'the fact line only appears under a projection')
 })

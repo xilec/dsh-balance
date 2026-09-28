@@ -148,6 +148,7 @@ and a value written there outranks the row for that key only.
 | `warningThreshold` / `dangerThreshold` | `10` / `5` | Balance colouring |
 | `holidays` | 2026 list | Chinese public holidays (Beijing dates) |
 | `priceUnknownModels` / `fallbackPrices` | `false` / — | Price models outside the built-in table |
+| `fallbackRates` | `{}` | Peak rates per 1M tokens keyed by model id, for a model the table does not price; they win over `fallbackPrices` and can be entered from the Cost view or the panel. Off-peak is half, a cache write is billed as a cache miss |
 
 State lives in `$DSH_HOME/dsh-balance/`: `samples.ndjson` is the append-only
 sample log (thinned to one sample per hour beyond `keepDays`), `state.json` holds

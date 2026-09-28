@@ -173,6 +173,18 @@ window.__ModuleLoader__.load({
         'background:var(--dsw-alias-label-primary);box-shadow:0 0 0 2px var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1,#fff))}',
         '.dshb_cost_note{color:var(--dsw-alias-label-tertiary);font-size:11.5px}',
         '.dshb_cost_empty{display:flex;flex-direction:column;gap:8px;align-items:flex-start;color:var(--dsw-alias-label-tertiary);font-size:12px}',
+        '.dshb_cost_controls{display:flex;flex-wrap:wrap;gap:4px 16px;align-items:center}',
+        '.dshb_cost_seg{display:inline-flex;align-items:center;gap:4px}',
+        '.dshb_cost_segLabel{color:var(--dsw-alias-label-tertiary);font-size:11px;margin-right:2px}',
+        '.dshb_seg{border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.25));background:transparent;color:var(--dsw-alias-label-secondary);',
+        'border-radius:6px;padding:1px 7px;font-size:11px;line-height:1.6;cursor:pointer}',
+        '.dshb_seg:hover{color:var(--dsw-alias-label-primary)}',
+        '.dshb_seg_on{background:var(--dsw-alias-state-info-primary,#3b82f6);border-color:transparent;color:#fff}',
+        '.dshb_rates{display:flex;flex-direction:column;gap:6px;border:1px dashed var(--dsw-alias-border-l2,rgba(128,128,128,.3));border-radius:10px;padding:8px 10px}',
+        '.dshb_rates_row{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end}',
+        '.dshb_rates_model{font-size:12px;color:var(--dsw-alias-label-primary);min-width:120px}',
+        '.dshb_settings_block{display:flex;flex-direction:column;gap:8px;margin-top:10px}',
+        '.dshb_settings_title{color:var(--dsw-alias-label-secondary);font-size:12px}',
       ].join('')
       document.head.appendChild(tag)
     }
@@ -240,6 +252,7 @@ window.__ModuleLoader__.load({
         'settings.saved': 'saved',
         'settings.failed': 'rejected: {error}',
         'settings.note': 'The Host samples the balance on its own schedule — the chip only reads its cached payload.',
+        'settings.fallbackRates': 'Fallback rates for unpriced models',
         'footer.rule': 'Rates and tariff rule',
         'footer.ruleLink': 'official page',
         'footer.usage': 'Platform usage',
@@ -271,7 +284,29 @@ window.__ModuleLoader__.load({
         'view.cost': 'Cost',
         'cost.title': 'Session cost estimate',
         'cost.sub': 'per Step, priced at the tariff in force when the tokens were reported',
-        'cost.totalLabel': 'Fact',
+        'cost.proj.fact': 'Fact',
+        'cost.proj.offPeak': 'off-peak',
+        'cost.proj.peak': 'peak',
+        'cost.fact': 'Fact: {value}',
+        'cost.control.projection': 'Tariff',
+        'cost.control.metric': 'Metric',
+        'cost.control.axis': 'X axis',
+        'cost.metric.cost': 'cost',
+        'cost.metric.output': 'output',
+        'cost.metric.cacheRead': 'cache read',
+        'cost.metric.cacheWrite': 'cache write',
+        'cost.metric.tokens': 'tokens',
+        'cost.axis.time': 'time',
+        'cost.axis.index': 'Step',
+        'cost.rates.enter': 'enter rates',
+        'cost.rates.note': 'peak rates per 1M tokens: the off-peak rate is half and a cache write is billed as a cache miss. Saving reprices this session’s whole history.',
+        'cost.rates.miss': 'cache miss / in',
+        'cost.rates.hit': 'cache hit / read',
+        'cost.rates.output': 'output',
+        'cost.rates.save': 'Save rates',
+        'cost.rates.saved': 'saved — the history was repriced',
+        'cost.rates.invalid': 'every rate must be a non-negative number',
+        'cost.rates.failed': 'rejected: {error}',
         'cost.steps': '{steps} steps',
         'cost.unpriced': 'not priced: {models}',
         'cost.bandNote': 'shaded: peak windows',
@@ -291,6 +326,7 @@ window.__ModuleLoader__.load({
         'cost.bucket.total': 'Σ',
         'cost.tip.phase.peak': 'peak rates',
         'cost.tip.phase.off-peak': 'off-peak rates',
+        'cost.tip.unpriced': 'unpriced — no rate applies to this model',
         'cost.tip.share': '{share} of the session',
         'cost.tip.interval': '{from}–{to}',
         'cost.inspector.title': 'Step {turn}.{step}',
@@ -373,6 +409,7 @@ window.__ModuleLoader__.load({
         'settings.saved': 'сохранено',
         'settings.failed': 'отклонено: {error}',
         'settings.note': 'Хост опрашивает баланс по своему расписанию — чип только читает его кэш.',
+        'settings.fallbackRates': 'Запасные ставки для моделей без цены',
         'footer.rule': 'Тарифы и правило峰/谷',
         'footer.ruleLink': 'официальная страница',
         'footer.usage': 'Расход на платформе',
@@ -404,7 +441,29 @@ window.__ModuleLoader__.load({
         'view.cost': 'Стоимость',
         'cost.title': 'Оценка стоимости сессии',
         'cost.sub': 'по шагам, по тарифу на момент отчёта о токенах',
-        'cost.totalLabel': 'Факт',
+        'cost.proj.fact': 'Факт',
+        'cost.proj.offPeak': 'льготный',
+        'cost.proj.peak': 'пиковый',
+        'cost.fact': 'Факт: {value}',
+        'cost.control.projection': 'Тариф',
+        'cost.control.metric': 'Метрика',
+        'cost.control.axis': 'Ось X',
+        'cost.metric.cost': 'стоимость',
+        'cost.metric.output': 'выход',
+        'cost.metric.cacheRead': 'чтение кэша',
+        'cost.metric.cacheWrite': 'запись кэша',
+        'cost.metric.tokens': 'токены',
+        'cost.axis.time': 'время',
+        'cost.axis.index': 'шаг',
+        'cost.rates.enter': 'ввести ставки',
+        'cost.rates.note': 'пиковые ставки за 1M токенов: льготная — половина, запись кэша считается промахом кэша. Сохранение пересчитывает всю историю сессии.',
+        'cost.rates.miss': 'промах / вход',
+        'cost.rates.hit': 'попадание / чтение',
+        'cost.rates.output': 'выход',
+        'cost.rates.save': 'Сохранить ставки',
+        'cost.rates.saved': 'сохранено — история пересчитана',
+        'cost.rates.invalid': 'каждая ставка должна быть неотрицательным числом',
+        'cost.rates.failed': 'отклонено: {error}',
         'cost.steps': 'шагов: {steps}',
         'cost.unpriced': 'без цены: {models}',
         'cost.bandNote': 'заливка — пиковые окна',
@@ -424,6 +483,7 @@ window.__ModuleLoader__.load({
         'cost.bucket.total': 'Σ',
         'cost.tip.phase.peak': 'пиковый тариф',
         'cost.tip.phase.off-peak': 'льготный тариф',
+        'cost.tip.unpriced': 'без цены — для модели нет ставки',
         'cost.tip.share': '{share} от сессии',
         'cost.tip.interval': '{from}–{to}',
         'cost.inspector.title': 'Шаг {turn}.{step}',
@@ -1271,6 +1331,13 @@ window.__ModuleLoader__.load({
       const [status, setStatus] = react.useState('')
       const [busy, setBusy] = react.useState(false)
 
+      // The models worth a rate: the ones the reader already priced and the ones the
+      // open session could not price. Anything else would be a guess about the future.
+      const rateModels = [...new Set([
+        ...Object.keys(state.payload?.fallbackRates ?? {}),
+        ...(state.payload?.session?.unpriced ?? []),
+      ])]
+
       react.useEffect(() => {
         if (state.payload !== null) setDraft(settingsOf(state.payload))
       }, [state.payload])
@@ -1315,6 +1382,18 @@ window.__ModuleLoader__.load({
           field('dangerThreshold', t('settings.danger')),
           field('historyDays', t('settings.historyDays'), 1),
         ]),
+        rateModels.length === 0 ? null : h('div', { className: 'dshb_settings_block', key: 'rates' }, [
+          h('div', { className: 'dshb_settings_title', key: 'title' }, t('settings.fallbackRates')),
+          h(RateEntry, {
+            key: `rates-${rateModels.join('|')}`,
+            t,
+            models: rateModels,
+            rates: state.payload?.fallbackRates ?? {},
+            // Rates are their own write: they are keyed by model and repriced at once,
+            // so they do not wait for the Apply button above.
+            onSave: (next) => store.saveSettings({ fallbackRates: next }),
+          }),
+        ]),
         h('div', { className: 'dshb_footer', key: 'foot' }, [
           h('span', { key: 'note' }, t('settings.note')),
           h('span', { key: 'actions' }, [
@@ -1327,8 +1406,20 @@ window.__ModuleLoader__.load({
     //#endregion
 
     //#region cost view
-    /** The figure one Step contributes to a metric. */
-    function metricOf(node, metric = 'cost') {
+    /** The three Tariff projections the Host prices every Step under. */
+    const PROJECTIONS = ['fact', 'offPeak', 'peak']
+
+    /** The rate fields of a fallback rate, in the order the editor shows them. */
+    const RATE_KEYS = ['cacheMiss', 'cacheHit', 'output']
+
+    /** The money of one Step under a Tariff projection; `fact` is the Step itself. */
+    function projectionOf(node, projection = 'fact') {
+      if (projection === 'offPeak' || projection === 'peak') return node?.[projection] ?? node
+      return node
+    }
+
+    /** The figure one Step contributes to a metric, under a Tariff projection. */
+    function metricOf(node, metric = 'cost', projection = 'fact') {
       const buckets = node?.buckets ?? {}
       if (metric === 'output') return buckets.output ?? 0
       if (metric === 'cacheRead') return buckets.cacheRead ?? 0
@@ -1336,7 +1427,7 @@ window.__ModuleLoader__.load({
       if (metric === 'tokens') {
         return (buckets.uncachedInput ?? 0) + (buckets.cacheRead ?? 0) + (buckets.cacheWrite ?? 0) + (buckets.output ?? 0)
       }
-      return node?.cost ?? 0
+      return projectionOf(node, projection)?.cost ?? 0
     }
 
     /** A linear map from a data domain onto a pixel range. */
@@ -1478,19 +1569,19 @@ window.__ModuleLoader__.load({
 
     /** The totals the header and the tooltip shares are computed from. */
     function seriesSummary(nodes) {
-      let total = 0
+      const totals = { fact: 0, offPeak: 0, peak: 0 }
       let tokens = 0
       const models = []
       const unpriced = []
       for (const node of nodes) {
-        total += node.cost ?? 0
+        for (const projection of PROJECTIONS) totals[projection] += projectionOf(node, projection)?.cost ?? 0
         tokens += metricOf(node, 'tokens')
         for (const model of Object.keys(node.byModel ?? {})) if (!models.includes(model)) models.push(model)
         if (node.unpriced === true) {
           for (const model of Object.keys(node.byModel ?? {})) if (!unpriced.includes(model)) unpriced.push(model)
         }
       }
-      return { total, tokens, steps: nodes.length, models, unpriced }
+      return { total: totals.fact, totals, tokens, steps: nodes.length, models, unpriced }
     }
 
     /**
@@ -1521,17 +1612,33 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Label positions for the Step-index axis: points are spaced by index and each
+     * tick is named by its `(Turn, Step)`, which is the only identity a Step has
+     * once the chart stops being a timeline.
+     */
+    function indexTicks(nodes, count = 4) {
+      if (nodes.length === 0) return []
+      const ticks = []
+      for (let index = 0; index <= count; index += 1) {
+        const at = Math.round(((nodes.length - 1) * index) / count)
+        const node = nodes[Math.min(nodes.length - 1, at)]
+        ticks.push({ at, x: index / count, label: node === undefined ? '' : `${node.turn}.${node.step}` })
+      }
+      return ticks
+    }
+
+    /**
      * The pixel-space model of the chart.
      *
      * @param nodes - the per-Step records the route served.
-     * @param options - `width`, `height`, `metric`, `clip` and `axis`.
+     * @param options - `width`, `height`, `metric`, `projection`, `clip` and `axis`.
      * @returns points (with their Step), the decimated bars and marks, the
      * clipping threshold and the value the Y axis tops out at.
      */
     function buildPlot(nodes, options = {}) {
-      const { width = 720, height = 240, metric = 'cost', clip = true, axis = 'time' } = options
+      const { width = 720, height = 240, metric = 'cost', projection = 'fact', clip = true, axis = 'time' } = options
       const { fromMs, toMs } = seriesWindow(nodes)
-      const values = nodes.map((node) => metricOf(node, metric))
+      const values = nodes.map((node) => metricOf(node, metric, projection))
       const threshold = clip ? clipThreshold(values) : null
       const capped = values.map((value) => (threshold !== null && value > threshold ? threshold : value))
       const scale = valueAxis(Math.max(0, ...capped))
@@ -1544,11 +1651,11 @@ window.__ModuleLoader__.load({
         const value = values[index]
         const clipped = threshold !== null && value > threshold
         const x = axis === 'index' ? xOf(index) : xOf(node.tStart)
-        return { index, node, value, clipped, x, y: yOf(clipped ? threshold : value) }
+        return { index, node, value, clipped, unpriced: node.unpriced === true, x, y: yOf(clipped ? threshold : value) }
       })
       const { bars, marks } = decimatePoints(points, Math.max(1, Math.floor(width)))
-      const digest = `${points.length}:${Math.round(points.reduce((sum, point) => sum + point.value, 0) * 1e6)}`
-      return { points, bars, marks, threshold, max, axis: scale, metric, fromMs, toMs, width, height, xOf, yOf, digest }
+      const digest = `${axis}:${metric}:${projection}:${points.length}:${Math.round(points.reduce((sum, point) => sum + point.value, 0) * 1e6)}`
+      return { points, bars, marks, threshold, max, axis: scale, mode: axis, metric, projection, fromMs, toMs, width, height, xOf, yOf, digest }
     }
 
     /** The colors the plot paints with, read from the theme tokens when available. */
@@ -1623,6 +1730,18 @@ window.__ModuleLoader__.load({
         context.fillStyle = mark.clipped ? colors.clipped : colors.accent
         context.fill()
       }
+
+      // Unpriced Steps: a warning square where they would sit, so "no rate applies"
+      // is visible in the chart itself and not only in the header flag. A token
+      // metric still plots its value; the square is drawn on top of it.
+      context.strokeStyle = colors.clipped
+      context.lineWidth = 1.5
+      for (const point of plot.points) {
+        if (point.unpriced !== true) continue
+        context.beginPath()
+        context.rect(point.x - 2.5, Math.min(point.y, baseline - 2.5) - 2.5, 5, 5)
+        context.stroke()
+      }
     }
 
     /**
@@ -1691,36 +1810,110 @@ window.__ModuleLoader__.load({
     function CostView(props) {
       const t = props.t
       const sessionId = typeof props.sessionId === 'string' ? props.sessionId : ''
-      const projection = typeof props.useProjection === 'function' ? props.useProjection('dshBalanceCost') : undefined
-      const series = useCostSeries(sessionId, projection?.seq ?? 0)
+      const live = typeof props.useProjection === 'function' ? props.useProjection('dshBalanceCost') : undefined
+      const series = useCostSeries(sessionId, live?.seq ?? 0)
       const [selected, setSelected] = react.useState(-1)
       const [clip, setClip] = react.useState(true)
+      const [ratesOpen, setRatesOpen] = react.useState(false)
+      // Stored choices arrive with the payload; a click in this mount wins over them
+      // and is written straight through the settings route.
+      const [picked, setPicked] = react.useState({})
       const payload = series.payload
+      const stored = payload?.prefs ?? {}
+      const projection = picked.projection ?? stored.costProjection ?? 'fact'
+      const metric = picked.metric ?? stored.costMetric ?? 'cost'
+      const axis = picked.axis ?? stored.costAxis ?? 'time'
       // A Step that reported no usage has no point to draw; the empty state below
       // is what says so, instead of a chart of zeroes.
       const nodes = (Array.isArray(payload?.nodes) ? payload.nodes : []).filter((node) => node.hasUsage === true)
       const summary = seriesSummary(nodes)
-      const currency = payload?.currency ?? projection?.currency ?? 'USD'
+      const currency = payload?.currency ?? live?.currency ?? 'USD'
       const state = seriesState(series.status, payload, nodes, summary)
       // Without a payload there is no figure to lead with: a dash beats a `$0.00`
       // that would read as "this session cost nothing".
       const total = payload === null ? null : summary.total
+      // The headline follows the selected projection; the `fact` figure stays beside
+      // it whenever that is not the one shown, so a projection never hides the estimate.
+      const shown = payload === null ? null : summary.totals[projection] ?? summary.total
+
+      const choose = (pick, key, value) => {
+        setPicked((current) => ({ ...current, [pick]: value }))
+        // Persisting is a convenience, never a gate: a failed write must not cost the
+        // reader the choice they just made in this mount.
+        void Promise.resolve(store.saveSettings({ [key]: value })).catch(() => {})
+      }
+
+      /** Write fallback rates and re-read the series, which is priced by them. */
+      const saveRates = async (next) => {
+        await store.saveSettings({ fallbackRates: next })
+        series.retry()
+      }
 
       const head = h('div', { className: 'dshb_cost_head', key: 'head' }, [
-        h('span', { className: 'dshb_cost_total', key: 'total' }, costText(total, currency)),
-        payload === null ? null : h('span', { className: 'dshb_cost_sub', key: 'label' }, t('cost.totalLabel')),
+        h('span', { className: 'dshb_cost_total', key: 'total' }, costText(shown, currency)),
+        payload === null ? null : h('span', { className: 'dshb_cost_sub', key: 'label' }, t(`cost.proj.${projection}`)),
+        payload === null || projection === 'fact'
+          ? null
+          : h('span', { className: 'dshb_cost_sub', key: 'fact' }, t('cost.fact', { value: costText(total, currency) })),
         payload === null ? null : h('span', { className: 'dshb_cost_sub', key: 'steps' }, t('cost.steps', { steps: summary.steps })),
-        payload?.peakIntervals?.length > 0 ? h('span', { className: 'dshb_cost_sub', key: 'bands' }, t('cost.bandNote')) : null,
+        payload?.peakIntervals?.length > 0 && axis === 'time'
+          ? h('span', { className: 'dshb_cost_sub', key: 'bands' }, t('cost.bandNote'))
+          : null,
         summary.unpriced.length > 0
-          ? h('span', { className: 'dshb_flag', key: 'unpriced' }, t('cost.unpriced', { models: summary.unpriced.join(', ') }))
+          ? h('span', { className: 'dshb_flag', key: 'unpriced' }, [
+            t('cost.unpriced', { models: summary.unpriced.join(', ') }),
+            ' ',
+            h('button', {
+              key: 'rates',
+              className: 'dshb_btn',
+              onClick: () => setRatesOpen((open) => !open),
+            }, t('cost.rates.enter')),
+          ])
           : null,
       ])
 
+      const controls = h('div', { className: 'dshb_cost_controls', key: 'controls' }, [
+        h(Segmented, {
+          key: 'projection',
+          label: t('cost.control.projection'),
+          value: projection,
+          onSelect: (value) => choose('projection', 'costProjection', value),
+          options: PROJECTIONS.map((value) => ({ value, label: t(`cost.proj.${value}`) })),
+        }),
+        h(Segmented, {
+          key: 'metric',
+          label: t('cost.control.metric'),
+          value: metric,
+          onSelect: (value) => choose('metric', 'costMetric', value),
+          options: ['cost', 'output', 'cacheRead', 'cacheWrite', 'tokens'].map((value) => ({ value, label: t(`cost.metric.${value}`) })),
+        }),
+        h(Segmented, {
+          key: 'axis',
+          label: t('cost.control.axis'),
+          value: axis,
+          onSelect: (value) => choose('axis', 'costAxis', value),
+          options: [{ value: 'time', label: t('cost.axis.time') }, { value: 'index', label: t('cost.axis.index') }],
+        }),
+      ])
+
       if (state !== 'ok') {
-        return h('div', { className: 'dshb_cost' }, [head, h(CostEmpty, { t, key: 'empty', state, error: series.error, onRetry: series.retry })])
+        return h('div', { className: 'dshb_cost' }, [
+          head,
+          controls,
+          h(CostEmpty, {
+            key: 'empty',
+            t,
+            state,
+            error: series.error,
+            onRetry: series.retry,
+            models: summary.unpriced,
+            rates: payload?.fallbackRates,
+            onRates: saveRates,
+          }),
+        ])
       }
 
-      const plot = buildPlot(nodes, { clip, axis: 'time' })
+      const plot = buildPlot(nodes, { clip, axis, metric, projection })
       const clipped = plot.points.some((point) => point.clipped)
       const note = h('div', { className: 'dshb_cost_note', key: 'note' }, [
         h('span', { key: 'clip' }, clipped ? `${t('cost.clip', { value: costText(plot.threshold, currency) })} ` : ''),
@@ -1729,24 +1922,32 @@ window.__ModuleLoader__.load({
 
       return h('div', { className: 'dshb_cost' }, [
         head,
+        controls,
         h(CostChart, {
           key: 'chart',
           t,
           nodes,
           payload,
           clip,
+          axis,
+          metric,
+          projection,
           currency,
-          total,
+          total: shown,
           selected,
           onSelect: setSelected,
         }),
         note,
+        ratesOpen && summary.unpriced.length > 0
+          ? h(RateEntry, { key: 'rates', t, models: summary.unpriced, rates: payload?.fallbackRates, onSave: saveRates })
+          : null,
         h(CostInspector, {
           key: 'inspector',
           t,
           node: selected >= 0 && selected < nodes.length ? nodes[selected] : null,
           currency,
-          total,
+          total: shown,
+          projection,
           peakIntervals: payload?.peakIntervals ?? [],
           inspectCall: props.inspectCall,
           loadOlder: props.loadOlder,
@@ -1754,8 +1955,111 @@ window.__ModuleLoader__.load({
       ])
     }
 
+    /** One segmented control: a button per choice, the selected one on. */
+    function Segmented({ label, options, value, onSelect }) {
+      return h('span', { className: 'dshb_cost_seg' }, [
+        h('span', { className: 'dshb_cost_segLabel', key: 'label' }, label),
+        ...options.map((option) => h('button', {
+          key: option.value,
+          className: option.value === value ? 'dshb_seg dshb_seg_on' : 'dshb_seg',
+          onClick: () => onSelect(option.value),
+        }, option.label)),
+      ])
+    }
+
+    /** Editable text of the rate rows: a model without a rate keeps an empty field. */
+    function rateDraftOf(models, rates) {
+      const draft = {}
+      for (const model of models ?? []) {
+        const rate = rates?.[model] ?? {}
+        draft[model] = Object.fromEntries(RATE_KEYS.map((key) => [key, Number.isFinite(rate[key]) ? String(rate[key]) : '']))
+      }
+      return draft
+    }
+
+    /**
+     * The fallback-rate editor: one row per model, peak rates per 1M tokens.
+     *
+     * A rate entered here reprices the whole history — the note says so before the
+     * save, and the caller re-reads the series afterwards. Off-peak is half of these
+     * and a cache write is billed as a cache miss, which is what the Host applies.
+     */
+    function RateEntry({ t, models, rates, onSave }) {
+      const [draft, setDraft] = react.useState(() => rateDraftOf(models, rates))
+      const [status, setStatus] = react.useState('')
+      const [busy, setBusy] = react.useState(false)
+      const list = models ?? []
+      // Nothing to price: an editor without a model row would only be a stray button.
+      if (list.length === 0) return null
+
+      const field = (model, key, label) => h('label', { className: 'dshb_field', key }, [
+        h('span', { key: 'l' }, label),
+        h('input', {
+          key: 'i',
+          type: 'number',
+          step: '0.001',
+          value: draft?.[model]?.[key] ?? '',
+          onChange: (event) => setDraft((current) => ({
+            ...current,
+            [model]: { ...(current?.[model] ?? {}), [key]: event.target.value },
+          })),
+        }),
+      ])
+
+      const save = async () => {
+        const next = { ...(rates ?? {}) }
+        for (const model of list) {
+          const row = draft?.[model] ?? {}
+          const filled = RATE_KEYS.filter((key) => String(row[key] ?? '').trim() !== '')
+          if (filled.length === 0) {
+            delete next[model]
+            continue
+          }
+          const rate = {}
+          for (const key of RATE_KEYS) {
+            const value = Number(row[key])
+            if (!Number.isFinite(value) || value < 0) {
+              setStatus(t('cost.rates.invalid'))
+              return
+            }
+            rate[key] = value
+          }
+          next[model] = rate
+        }
+        setBusy(true)
+        setStatus('')
+        try {
+          await onSave(next)
+          setStatus(t('cost.rates.saved'))
+        } catch (cause) {
+          setStatus(t('cost.rates.failed', { error: cause instanceof Error ? cause.message : String(cause) }))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      return h('div', { className: 'dshb_rates' }, [
+        h('div', { className: 'dshb_cost_note', key: 'note' }, t('cost.rates.note')),
+        ...list.map((model) => h('div', { className: 'dshb_rates_row', key: model }, [
+          h('span', { className: 'dshb_rates_model', key: 'm' }, model),
+          field(model, 'cacheMiss', t('cost.rates.miss')),
+          field(model, 'cacheHit', t('cost.rates.hit')),
+          field(model, 'output', t('cost.rates.output')),
+        ])),
+        h('div', { className: 'dshb_cost_actions', key: 'actions' }, [
+          status === '' ? null : h('span', { className: 'dshb_cost_note', key: 's' }, status),
+          h('button', {
+            key: 'save',
+            className: 'dshb_btn dshb_btn_primary dshb_rates_save',
+            disabled: busy,
+            onClick: () => { void save() },
+          }, t('cost.rates.save')),
+        ]),
+      ])
+    }
+
     /** The in-place empty and error states: they explain themselves, no blank plot. */
-    function CostEmpty({ t, state, error, onRetry }) {
+    function CostEmpty({ t, state, error, onRetry, models, rates, onRates }) {
       const message = state === 'error'
         ? `${t('cost.empty.error')}${error === null || error === undefined ? '' : ` (${error})`}`
         : state === 'empty-rates'
@@ -1764,17 +2068,20 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'dshb_cost_empty' }, [
         h('span', { key: 'text' }, message),
         state === 'error' ? h('button', { key: 'retry', className: 'dshb_btn', onClick: onRetry }, t('cost.retry')) : null,
+        state === 'empty-rates' && (models ?? []).length > 0
+          ? h(RateEntry, { key: 'rates', t, models, rates, onSave: onRates })
+          : null,
       ])
     }
 
-    function CostChart({ t, nodes, payload, clip, currency, total, selected, onSelect }) {
+    function CostChart({ t, nodes, payload, clip, currency, total, axis, metric, projection, selected, onSelect }) {
       const boxRef = react.useRef(null)
       const canvasRef = react.useRef(null)
       const tooltipRef = react.useRef(null)
       const [size, setSize] = react.useState({ width: 720, height: 240 })
       const [tip, setTip] = react.useState({ width: 0, height: 0 })
       const [hover, setHover] = react.useState(-1)
-      const plot = buildPlot(nodes, { width: size.width, height: size.height, clip, axis: 'time' })
+      const plot = buildPlot(nodes, { width: size.width, height: size.height, clip, axis, metric, projection })
       const intervals = payload?.peakIntervals ?? []
 
       react.useEffect(() => {
@@ -1827,16 +2134,18 @@ window.__ModuleLoader__.load({
         return distance <= 24 ? best : -1
       }
 
-      const bands = bandRanges(intervals, plot.fromMs, plot.toMs).map((band, index) => h('div', {
+      // Peak bands and Turn separators are facts about time: on the Step-index axis
+      // they would place a window at a Step count, which means nothing.
+      const bands = axis === 'time' ? bandRanges(intervals, plot.fromMs, plot.toMs).map((band, index) => h('div', {
         key: `band-${index}`,
         className: 'dshb_cost_band',
         style: { left: `${band.from * 100}%`, width: `${(band.to - band.from) * 100}%` },
-      }))
-      const separators = turnSeparators(nodes, plot.fromMs, plot.toMs).map((separator, index) => h('div', {
+      })) : []
+      const separators = axis === 'time' ? turnSeparators(nodes, plot.fromMs, plot.toMs).map((separator, index) => h('div', {
         key: `sep-${index}`,
         className: 'dshb_cost_sep',
         style: { left: `${separator.x * 100}%` },
-      }))
+      })) : []
       const gridlines = plot.axis.ticks.map((tick, index) => h('div', {
         key: `grid-${index}`,
         className: 'dshb_cost_grid',
@@ -1849,13 +2158,15 @@ window.__ModuleLoader__.load({
         // inside instead of hanging half outside the axis column.
         style: { top: `${Math.min(Math.max(plot.yOf(tick.value), 7), Math.max(7, plot.height - 7))}px` },
       }, tickLabel(tick.value, plot.metric, currency)))
-      const ticks = plotTicks(plot.fromMs, plot.toMs).map((tick, index) => h('span', {
+      const ticks = (axis === 'index' ? indexTicks(nodes) : plotTicks(plot.fromMs, plot.toMs)).map((tick, index) => h('span', {
         key: `tick-${index}`,
         className: 'dshb_cost_tick',
         style: { left: `${tick.x * 100}%` },
-      }, clock(tick.at) ?? ''))
+      }, tick.label ?? clock(tick.at) ?? ''))
 
-      const hovered = hover >= 0 && hover < plot.points.length ? plot.points[hover] : null
+      // A hover index that is not an integer cannot name a point: the view is driven
+      // by pointer events, but it must never index the array with a stray value.
+      const hovered = Number.isInteger(hover) && hover >= 0 && hover < plot.points.length ? plot.points[hover] : null
       const placement = hovered === null ? null : tooltipPlacement(hovered, {
         width: plot.width,
         height: plot.height,
@@ -1867,7 +2178,7 @@ window.__ModuleLoader__.load({
         ref: tooltipRef,
         className: 'dshb_cost_tooltip',
         style: { left: `${placement.left}px`, top: `${placement.top}px`, transform: placement.transform },
-      }, tooltipLines(hovered.node, { t, currency, total, intervals })
+      }, tooltipLines(hovered.node, { t, currency, total, intervals, projection })
         .map((line, index) => h('div', { key: `line-${index}` }, line)))
 
       const marker = selected >= 0 && selected < plot.points.length ? h('div', {
@@ -1916,19 +2227,27 @@ window.__ModuleLoader__.load({
      * it cost vertical space and read as a separator rather than a fact.
      *
      * @param node - the Step record the tooltip describes.
-     * @param options - `t`, `currency`, the session total and the peak intervals.
+     * @param options - `t`, `currency`, the session total, the peak intervals and
+     * the Tariff projection the money is shown under.
      * @returns one string per line.
      */
     function tooltipLines(node, options = {}) {
-      const { t = (key) => key, currency = 'USD', total = 0, intervals = [] } = options
+      const { t = (key) => key, currency = 'USD', total = 0, intervals = [], projection = 'fact' } = options
       const models = Object.keys(node.byModel ?? {}).join(', ')
       const head = t('cost.tip.turn', { turn: node.turn, step: node.step })
-      return [
+      const money = projectionOf(node, projection)?.cost ?? 0
+      const lines = [
         models === '' ? head : `${head} · ${models}`,
         `${clock(node.tStart) ?? ''} · ${t(nodePhase(node, intervals))}`,
         bucketLine(node.buckets),
-        `${costText(node.cost, currency)} · ${t('cost.tip.share', { share: shareOf(node.cost, total) })}`,
+        `${costText(money, currency)} · ${t('cost.tip.share', { share: shareOf(money, total) })}`,
       ]
+      // The `fact` figure never disappears behind a projection, the retry count is
+      // the one thing the money deliberately drops, and an unpriced Step says so.
+      if (projection !== 'fact') lines.push(`${t('cost.proj.fact')}: ${costText(node.cost ?? 0, currency)}`)
+      if (node.unpriced === true) lines.push(t('cost.tip.unpriced'))
+      if (node.retries > 0) lines.push(t('cost.inspector.retries', { count: node.retries }))
+      return lines
     }
 
     /**
@@ -1966,7 +2285,7 @@ window.__ModuleLoader__.load({
      * `Load older` action instead of loading the conversation behind the reader's
      * back.
      */
-    function CostInspector({ t, node, currency, total, peakIntervals, inspectCall, loadOlder }) {
+    function CostInspector({ t, node, currency, total, projection = 'fact', peakIntervals, inspectCall, loadOlder }) {
       const [older, setOlder] = react.useState({ status: 'idle', error: null })
       if (node === null || node === undefined) {
         return h('div', { className: 'dshb_cost_card' }, h('div', { className: 'dshb_cost_note' }, t('cost.inspector.empty')))
@@ -1999,7 +2318,9 @@ window.__ModuleLoader__.load({
       }
 
       // The token/cost table: one column per bucket, in and out first, and the
-      // money the Step paid for each of them underneath its token count.
+      // money the Step paid for each of them underneath its token count. The money
+      // follows the selected Tariff projection, so the Σ row equals the figure the
+      // chart and the header lead with.
       const rows = [
         { key: 'uncachedInput', label: t('cost.bucket.in') },
         { key: 'output', label: t('cost.bucket.out') },
@@ -2007,9 +2328,11 @@ window.__ModuleLoader__.load({
         { key: 'cacheWrite', label: t('cost.bucket.cacheWrite') },
       ]
       const buckets = node.buckets ?? {}
-      const costs = node.costByBucket ?? {}
+      const money = projectionOf(node, projection)
+      const costs = money?.costByBucket ?? {}
+      const stepCost = money?.cost ?? 0
       const totalTokens = (buckets.uncachedInput ?? 0) + (buckets.cacheRead ?? 0) + (buckets.cacheWrite ?? 0) + (buckets.output ?? 0)
-      const digits = costColumnDigits([...rows.map((row) => costs[row.key] ?? 0), node.cost])
+      const digits = costColumnDigits([...rows.map((row) => costs[row.key] ?? 0), stepCost])
       const line = (key, label, tokens, cost) => h('tr', { key }, [
         h('td', { key: 'label' }, label),
         h('td', { key: 'tokens' }, String(tokens)),
@@ -2023,7 +2346,7 @@ window.__ModuleLoader__.load({
         ])),
         h('tbody', { key: 'body' }, [
           ...rows.map((row) => line(row.key, row.label, buckets[row.key] ?? 0, costs[row.key] ?? 0)),
-          line('total', t('cost.bucket.total'), totalTokens, node.cost),
+          line('total', t('cost.bucket.total'), totalTokens, stepCost),
         ]),
       ])
 
@@ -2036,7 +2359,9 @@ window.__ModuleLoader__.load({
             to: clock(node.tEnd) ?? '—',
           })),
           h('span', { className: 'k', key: 'sk' }, t('cost.inspector.share')),
-          h('span', { key: 'sv' }, shareOf(node.cost, total)),
+          h('span', { key: 'sv' }, shareOf(stepCost, total)),
+          projection === 'fact' ? null : h('span', { className: 'k', key: 'pk' }, t('cost.control.projection')),
+          projection === 'fact' ? null : h('span', { key: 'pv' }, t(`cost.proj.${projection}`)),
         ]),
         table,
         flags.length === 0 ? null : h('div', { className: 'dshb_flag', key: 'flags' }, flags.join(' · ')),
@@ -2153,7 +2478,7 @@ window.__ModuleLoader__.load({
       CostView, CostChart, CostInspector, CostEmpty, drawPlot, metricOf, linearScale, clipThreshold,
       decimatePoints, seriesWindow, phaseOf, bandRanges, turnSeparators, seriesSummary, seriesState,
       plotTicks, buildPlot, bucketLine, shareOf, tooltipPlacement, costDigits, costText,
-      costColumnDigits, costCell,
+      costColumnDigits, costCell, indexTicks, projectionOf, Segmented, RateEntry, rateDraftOf,
       valueAxis, compactNumber, tickLabel, tooltipLines,
     }
     return module.exports
