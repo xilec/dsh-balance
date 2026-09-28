@@ -214,7 +214,9 @@ Below the chart the view SHALL list the top ten Steps or the top ten Turns (swit
 visible range, ranked by the selected metric. Every row MUST identify itself: Turn and Step,
 time and phase, model, the tool name with a short argument preview when the Step holds calls,
 the bucket breakdown, the cost and the share of the session. Selecting a row SHALL select the
-corresponding point.
+corresponding point, and the selected Step SHALL stay selected while the reader visits another
+view. When the list is grouped by Turns, the chart SHALL band each Turn so the span of a Turn
+and the boundary between two of them are visible on the plot itself.
 
 #### Scenario: Ranking follows the metric
 
@@ -225,6 +227,18 @@ corresponding point.
 
 - **WHEN** the reader selects a top-K row
 - **THEN** the corresponding point on the chart is selected and its inspector is available
+
+#### Scenario: Turns are banded on the chart
+
+- **WHEN** the reader groups the top list by Turns
+- **THEN** each Turn covers its own band on the chart, labelled with the Turn and alternating
+  with its neighbour, so the reader can see where a Turn starts and ends
+
+#### Scenario: The selected Step survives a trip to Trajectory
+
+- **WHEN** the reader follows the Trajectory action of a Step and then returns to the Cost view
+- **THEN** that Step is still the selected one, with its point, its row and its inspector shown
+  again, while a new window and a reload start with nothing selected
 
 ### Requirement: Visible-range interaction
 

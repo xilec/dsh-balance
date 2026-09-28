@@ -1077,6 +1077,324 @@ test('the cost column of the inspector adds up to its total', async () => {
   react.stop()
 })
 
+test('the top rows follow the metric and always carry their cost', async () => {
+  const { exported } = await loadClient()
+  const { topRows, sumBuckets } = exported.__internals
+  const nodes = [
+    costNode({ turn: 1, step: 1, tStart: NOW - 3 * HOUR, tEnd: NOW - 3 * HOUR + MINUTE, cost: 1, buckets: { uncachedInput: 10, cacheRead: 0, cacheWrite: 0, output: 100 } }),
+    costNode({
+      turn: 1, step: 2, tStart: NOW - 2 * HOUR, tEnd: NOW - 2 * HOUR + MINUTE, cost: 4,
+      buckets: { uncachedInput: 0, cacheRead: 4000, cacheWrite: 0, output: 0 },
+      calls: [{ name: 'bash', callId: 'call-1', preview: 'git status\nsecond line' }],
+    }),
+    costNode({ turn: 2, step: 1, tStart: NOW - HOUR, tEnd: NOW - HOUR + MINUTE, cost: 2, buckets: { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 2000 } }),
+  ]
+
+  const byCost = topRows(nodes, { metric: 'cost' })
+  assert.deepEqual(byCost.map((row) => row.step), [2, 1, 1], 'ranked by cost, best first')
+  assert.deepEqual(byCost.map((row) => row.index), [1, 2, 0], 'each row selects its own Step')
+  assert.ok(byCost.every((row) => typeof row.cost === 'number'), 'the cost stays in every row')
+  assert.deepEqual(byCost[0].buckets, nodes[1].buckets)
+  assert.equal(byCost[0].call.name, 'bash', 'a row names the tool it called')
+
+  const byCacheRead = topRows(nodes, { metric: 'cacheRead' })
+  assert.deepEqual(byCacheRead.map((row) => row.index), [1], 'only the Step with cache reads ranks')
+  assert.equal(byCacheRead[0].cost, 4, 'and it still shows its cost')
+  assert.deepEqual(topRows(nodes, { metric: 'output' }).map((row) => row.index), [2, 0], 'output ranks the other way')
+
+  // Top Turns fold their Steps and name the Step that drove the Turn's rank.
+  const turns = topRows(nodes, { metric: 'cost', mode: 'turns' })
+  assert.deepEqual(turns.map((row) => row.turn), [1, 2])
+  assert.equal(turns[0].steps, 2, 'both Steps of Turn 1 are in one row')
+  assert.equal(turns[0].step, 2, 'the heaviest Step of the Turn is the one named')
+  assert.equal(turns[0].index, 1, 'and it is what the row selects')
+  assert.equal(turns[0].cost, 5, 'the Turn row sums its Steps')
+  assert.equal(turns[0].value, 5)
+  assert.deepEqual(turns[1].buckets, nodes[2].buckets)
+
+  assert.equal(topRows(nodes, { metric: 'cost', count: 2 }).length, 2, 'the list is capped')
+  assert.deepEqual(topRows([], { metric: 'cost' }), [])
+  const zero = costNode({ cost: 0, buckets: { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0 } })
+  assert.deepEqual(topRows([zero], { metric: 'cost' }), [], 'a Step with nothing to rank is not a top row')
+  assert.deepEqual(sumBuckets(nodes).output, 2100)
+})
+
+test('the visible window zooms, pans and slices the series', async () => {
+  const { exported } = await loadClient()
+  const { zoomWindow, panWindow, clampWindow, isFullWindow, visibleSlice, seriesWindow } = exported.__internals
+  const nodes = Array.from({ length: 11 }, (_, index) => costNode({
+    turn: 1,
+    step: index + 1,
+    tStart: NOW - (11 - index) * MINUTE,
+    tEnd: NOW - (10 - index) * MINUTE,
+  }))
+
+  assert.equal(isFullWindow(null), true)
+  assert.equal(isFullWindow({ from: 0.2, to: 0.4 }), false)
+  assert.equal(isFullWindow(clampWindow(0, 1)), true)
+
+  // Zoom in holds the anchored fraction, zoom out walks back towards the whole series.
+  assert.deepEqual(zoomWindow(null, 0.8, 0.5), { from: 0.1, to: 0.9 })
+  assert.deepEqual(zoomWindow({ from: 0.2, to: 0.6 }, 0.5, 0), { from: 0.2, to: 0.4 })
+  assert.deepEqual(zoomWindow({ from: 0.2, to: 0.6 }, 0.5, 1), { from: 0.4, to: 0.6 })
+  assert.deepEqual(zoomWindow(null, 4, 0.5), { from: 0, to: 1 }, 'zooming out past the series is clamped')
+  const floor = zoomWindow({ from: 0.2, to: 0.4 }, 1e-6, 0.5)
+  assert.equal(Number((floor.to - floor.from).toFixed(6)), 0.004, 'and zooming in stops at the floor')
+  assert.ok(Math.abs(floor.from - 0.3) < 1e-6, 'which stays centred on the anchor')
+
+  assert.deepEqual(panWindow({ from: 0.2, to: 0.4 }, -0.5), { from: 0.1, to: 0.3 })
+  assert.deepEqual(panWindow({ from: 0.2, to: 0.4 }, 5), { from: 0.8, to: 1 }, 'panning stops at the right edge')
+  assert.deepEqual(panWindow(null, 0.5), { from: 0, to: 1 }, 'the whole series cannot slide')
+
+  const full = visibleSlice(nodes, null, 'time')
+  assert.equal(full.nodes.length, 11)
+  assert.deepEqual({ fromMs: full.fromMs, toMs: full.toMs }, seriesWindow(nodes))
+
+  const half = visibleSlice(nodes, { from: 0, to: 0.5 }, 'time')
+  assert.equal(half.nodes.length, 6, 'half the time span, the first six Steps')
+  assert.equal(half.fromMs, seriesWindow(nodes).fromMs, 'the axis spans the window, not the slice')
+  assert.ok(half.toMs < seriesWindow(nodes).toMs)
+  assert.equal(half.nodes[0].step, 1)
+
+  assert.deepEqual(visibleSlice(nodes, { from: 0.8, to: 1 }, 'index').nodes.map((node) => node.step), [9, 10, 11], 'the index axis slices Steps, not instants')
+  assert.deepEqual(visibleSlice(nodes, { from: 0.2, to: 0.4 }, 'index').nodes.map((node) => node.step), [3, 4, 5])
+  assert.deepEqual(visibleSlice([], { from: 0.2, to: 0.4 }, 'time').nodes, [])
+})
+
+test('the chart zooms with the wheel, pans on the right button and brushes a range', async () => {
+  const { exported, react } = await loadClient()
+  const windows = []
+  const selected = []
+  const nodes = Array.from({ length: 20 }, (_, index) => costNode({
+    turn: 1,
+    step: index + 1,
+    tStart: NOW - (20 - index) * MINUTE,
+    tEnd: NOW - (19 - index) * MINUTE,
+    cost: index + 1,
+  }))
+  // The stub keeps hook state in flat slots, so every gesture is taken from the render
+  // that follows the last one: a handler closes over the state of its own render.
+  const render = (range) => {
+    react.beginRender()
+    const tree = react.createElement(exported.__internals.CostChart, {
+      t: (key) => key,
+      nodes,
+      payload: costPayload(nodes),
+      clip: false,
+      currency: 'CNY',
+      total: 20,
+      axis: 'time',
+      metric: 'cost',
+      projection: 'fact',
+      range,
+      onWindow: (next) => windows.push(next),
+      selected: -1,
+      onSelect: (index) => selected.push(index),
+    })
+    textOf(tree)
+    return { plot: find(tree, (element) => element.props?.className === 'dshb_cost_plot')[0], tree }
+  }
+
+  // Wheel: an 0.8 factor anchored at the pointer, `preventDefault` so the page does not scroll.
+  let prevented = 0
+  render(null).plot.props.onWheel({ deltaY: -1, clientX: 360, preventDefault: () => { prevented += 1 } })
+  assert.equal(prevented, 1)
+  assert.deepEqual(windows.at(-1), { from: 0.1, to: 0.9 })
+
+  // Right-drag pans by the pixel distance, as a fraction of the window on screen.
+  let pan = render({ from: 0.2, to: 0.4 }).plot
+  pan.props.onMouseDown({ button: 2, clientX: 300 })
+  pan.props.onMouseMove({ button: 2, clientX: 372 })
+  assert.deepEqual(windows.at(-1), { from: 0.18, to: 0.38 })
+
+  // Left-drag brushes: the interval is drawn while it is dragged and becomes the window.
+  let brush = render(null).plot
+  brush.props.onMouseDown({ button: 0, clientX: 100 })
+  brush = render(null).plot
+  brush.props.onMouseMove({ clientX: 200 })
+  const drawn = render(null).tree
+  const selection = find(drawn, (element) => element.props?.className === 'dshb_cost_brush')
+  assert.equal(selection.length, 1, 'the dragged interval is drawn')
+  assert.equal(selection[0].props.style.left, '100px')
+  assert.equal(selection[0].props.style.width, '100px')
+  const plot = find(drawn, (element) => element.props?.className === 'dshb_cost_plot')[0]
+  plot.props.onMouseUp()
+  const range = windows.at(-1)
+  assert.ok(Math.abs(range.from - 100 / 720) < 1e-5 && Math.abs(range.to - 200 / 720) < 1e-5, 'the brushed columns become the window')
+  // The click that follows the brush must not select a point of the range that just left.
+  plot.props.onClick({ clientX: 150 })
+  assert.deepEqual(selected, [])
+
+  // A click that did not drag still selects the nearest point.
+  const single = render(null).plot
+  single.props.onClick({ clientX: single ? 0 : 0 })
+  assert.deepEqual(selected, [0])
+  react.stop()
+})
+
+test('the Turns top-K mode bands the chart by Turn', async () => {
+  const { exported, react } = await loadClient()
+  const { turnSpans } = exported.__internals
+  const nodes = [
+    costNode({ turn: 1, step: 1, tStart: NOW - 4 * HOUR, tEnd: NOW - 4 * HOUR + MINUTE }),
+    costNode({ turn: 1, step: 2, tStart: NOW - 3 * HOUR, tEnd: NOW - 3 * HOUR + MINUTE }),
+    costNode({ turn: 2, step: 1, tStart: NOW - 2 * HOUR, tEnd: NOW - 2 * HOUR + MINUTE }),
+    costNode({ turn: 3, step: 1, tStart: NOW - HOUR, tEnd: NOW }),
+  ]
+  const points = nodes.map((node, index) => ({ index, node, x: index * 100 }))
+  assert.deepEqual(turnSpans(points, 320), [
+    { turn: 1, from: 0, to: 200 },
+    { turn: 2, from: 200, to: 300 },
+    { turn: 3, from: 300, to: 320 },
+  ], 'a Turn runs up to where the next one starts, so the bands tile the axis')
+  assert.deepEqual(turnSpans([], 320), [])
+
+  const render = (topk) => {
+    react.beginRender()
+    const tree = react.createElement(exported.__internals.CostChart, {
+      t: (key) => key,
+      nodes,
+      payload: costPayload(nodes),
+      clip: false,
+      currency: 'CNY',
+      total: 40,
+      axis: 'time',
+      metric: 'cost',
+      projection: 'fact',
+      range: null,
+      topk,
+      onWindow: () => {},
+      selected: -1,
+      onSelect: () => {},
+    })
+    textOf(tree)
+    return tree
+  }
+
+  const banded = render('turns')
+  const bands = find(banded, (element) => element.props?.className?.includes?.('dshb_cost_turn') === true &&
+    element.props?.className?.includes?.('Label') !== true)
+  assert.equal(bands.length, 3, 'one band per Turn')
+  // The four Steps sit at 0, 180, 360 and 540 of the 720px plot: Turn 1 owns the span
+  // up to where Turn 2 begins, and the last band reaches the right edge.
+  assert.deepEqual(bands.map((band) => band.props.style.left), ['0px', '360px', '540px'])
+  assert.deepEqual(bands.map((band) => band.props.style.width), ['360px', '180px', '180px'])
+  assert.equal(textOf(find(banded, (element) => element.props?.className === 'dshb_cost_turnLabel')[0]), 'T1')
+  const plain = find(render('steps'), (element) => element.props?.className?.includes?.('dshb_cost_turn') === true &&
+    element.props?.className?.includes?.('Label') !== true)
+  assert.equal(plain.length, 0, 'the Step mode leaves the chart unbanded')
+  react.stop()
+})
+
+test('the inspector sits beside the top list, not below it', async () => {
+  const { exported, react } = await loadClient()
+  const nodes = [
+    costNode({ cost: 10, calls: [{ name: 'bash', callId: 'call-1', preview: 'ls' }] }),
+    costNode({ turn: 1, step: 2, tStart: NOW - HOUR, tEnd: NOW - HOUR + MINUTE, cost: 4 }),
+  ]
+  const restore = stubSeriesAndWrites(costPayload(nodes), [])
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => undefined, inspectCall: () => {} }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    const tree = react.createElement(exported.__internals.CostView, props)
+    textOf(tree)
+    const panes = find(tree, (element) => element.props?.className === 'dshb_cost_panes')
+    assert.equal(panes.length, 1, 'the two cards share one grid')
+    const listed = panes[0].children ?? []
+    const children = Array.isArray(listed[0]) ? listed[0] : listed
+    assert.equal(children.length, 2, 'exactly the inspector and the top list')
+    assert.equal(children[0].props.className, 'dshb_cost_pane', 'inspector first, so it is the left column')
+    assert.match(textOf(children[0]), /cost\.inspector\.empty/)
+    assert.match(textOf(children[1]), /cost\.topk\.title/)
+    assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_card').length, 1)
+  } finally {
+    react.stop()
+    restore()
+  }
+})
+
+test('the Step reached from Trajectory is still marked when the view comes back', async () => {
+  const { exported, react } = await loadClient()
+  const jumped = []
+  const nodes = [
+    costNode({ turn: 1, step: 1, cost: 10, calls: [{ name: 'bash', callId: 'call-1', preview: 'ls' }] }),
+    costNode({ turn: 2, step: 1, tStart: NOW - HOUR, tEnd: NOW - HOUR + MINUTE, cost: 4 }),
+  ]
+  const restore = stubSeriesAndWrites(costPayload(nodes), [])
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => undefined, inspectCall: (id) => jumped.push(id) }
+    const mount = async () => {
+      react.beginRender()
+      textOf(react.createElement(exported.__internals.CostView, props))
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      react.beginRender()
+      const tree = react.createElement(exported.__internals.CostView, props)
+      textOf(tree)
+      return tree
+    }
+
+    let tree = await mount()
+    const row = find(tree, (element) => element.props?.className?.includes?.('dshb_topk_row') === true)[0]
+    assert.ok(row !== undefined, 'the top list has rows')
+    row.props.onClick()
+    react.beginRender()
+    tree = react.createElement(exported.__internals.CostView, props)
+    textOf(tree)
+    assert.match(textOf(tree), /cost\.inspector\.title/, 'the row opened its Step')
+    assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_mark').length, 1, 'and the chart marks it')
+    assert.match(textOf(find(tree, (element) => element.props?.className?.includes?.('dshb_topk_row_on') === true)[0]), /¥10\.00/)
+    const focus = find(tree, (element) => element.props?.className === 'dshb_btn' && element.children?.join('') === 'cost.inspector.focus')[0]
+    await focus.props.onClick()
+    assert.deepEqual(jumped, ['call-1'], 'the jump carries the call')
+
+    // The conversation unmounts the Cost view when Trajectory becomes active, so the
+    // Step has to be remembered outside it: coming back must mark the same one.
+    const back = await mount()
+    assert.match(textOf(back), /cost\.inspector\.title/, 'the Step is still open after the round trip')
+    assert.equal(find(back, (element) => element.props?.className === 'dshb_cost_mark').length, 1)
+    const onRow = find(back, (element) => element.props?.className?.includes?.('dshb_topk_row_on') === true)
+    assert.equal(onRow.length, 1, 'and its row is still the one marked')
+    assert.match(textOf(onRow[0]), /¥10\.00/, 'which is the Step that was open, not just any Step')
+
+    // Zooming is a deliberate change of what is on screen: it drops the selection.
+    const plot = find(back, (element) => element.props?.className === 'dshb_cost_plot')[0]
+    plot.props.onWheel({ deltaY: -1, clientX: 200, preventDefault: () => {} })
+    react.beginRender()
+    const zoomed = react.createElement(exported.__internals.CostView, props)
+    textOf(zoomed)
+    assert.doesNotMatch(textOf(zoomed), /cost\.inspector\.title/, 'a new window starts with nothing selected')
+  } finally {
+    react.stop()
+    restore()
+  }
+})
+
+test('the arrow keys walk the Steps of the visible slice', async () => {
+  const { exported } = await loadClient()
+  const { arrowDelta, nextSelection } = exported.__internals
+
+  assert.equal(arrowDelta({ key: 'ArrowRight' }), 1)
+  assert.equal(arrowDelta({ key: 'ArrowLeft' }), -1)
+  assert.equal(arrowDelta({ key: 'ArrowUp' }), 0)
+  assert.equal(arrowDelta({ key: 'ArrowRight', ctrlKey: true }), 0, 'a modifier means the shell, not the chart')
+  assert.equal(arrowDelta({ key: 'ArrowRight', target: { tagName: 'INPUT' } }), 0, 'a caret keeps its arrows')
+  assert.equal(arrowDelta({ key: 'ArrowLeft', target: { tagName: 'textarea' } }), 0)
+  assert.equal(arrowDelta({ key: 'ArrowLeft', target: { isContentEditable: true } }), 0)
+  assert.equal(arrowDelta(null), 0)
+
+  assert.equal(nextSelection(-1, 1, 5), 0, 'the right arrow enters at the first Step')
+  assert.equal(nextSelection(-1, -1, 5), 4, 'the left arrow enters at the last')
+  assert.equal(nextSelection(2, 1, 5), 3)
+  assert.equal(nextSelection(2, -1, 5), 1)
+  assert.equal(nextSelection(0, -1, 5), 0, 'and neither end wraps around')
+  assert.equal(nextSelection(4, 1, 5), 4)
+  assert.equal(nextSelection(3, 1, 0), -1, 'nothing on screen means nothing to select')
+  assert.equal(nextSelection(9, 1, 5), 0, 'a stale index starts over instead of pointing nowhere')
+})
+
 test('a stored projection and metric come back on mount, and a click is written through', async () => {
   const { exported, react } = await loadClient()
   const posts = []
@@ -1107,6 +1425,16 @@ test('a stored projection and metric come back on mount, and a click is written 
     const settings = posts.filter((post) => post.url === '/dsh-balance/settings')
     assert.equal(settings.length, 1)
     assert.deepEqual(settings[0].body, { costMetric: 'cost' })
+
+    // Zoom and brush are transient: they must never reach the settings route (D34).
+    const plot = find(tree, (element) => element.props?.className === 'dshb_cost_plot')[0]
+    plot.props.onWheel({ deltaY: -1, clientX: 200, preventDefault: () => {} })
+    react.beginRender()
+    const zoomed = react.createElement(exported.__internals.CostView, props)
+    textOf(zoomed)
+    assert.match(textOf(zoomed), /cost\.session/, 'the header now speaks for the visible range')
+    assert.match(textOf(zoomed), /cost\.zoom\.reset/, 'and offers a way back to the whole session')
+    assert.equal(posts.filter((post) => post.url === '/dsh-balance/settings').length, 1, 'no window was persisted')
   } finally {
     react.stop()
     restore()

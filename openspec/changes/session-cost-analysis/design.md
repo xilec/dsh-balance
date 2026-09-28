@@ -181,7 +181,13 @@ rationale. Alternatives that were considered and rejected are named.
 
 - **D17 — Top-K follows the metric, but always shows cost.** Rows are ranked by the selected
   metric (so the driver of a peak is visible) while the cost stays in every row; a ranking by
-  tokens never hides money.
+  tokens never hides money. The Turn mode also bands the chart: each Turn owns the span up to
+  where the next one starts, alternating shades keep the boundary readable, and the Step named
+  in a Turn row is the one that drove the Turn's rank.
+- **D40 — The selected Step is remembered across views, not across reloads.** The conversation
+  mounts only the selected view, so a jump to Trajectory unmounts the Cost view; the Step the
+  jump came from is remembered as `(turn, step)` (never as an index, which a new window would
+  move) and is marked again on return, while brush and zoom stay transient (D34).
 - **D18 — An in-progress Step is drawn immediately.** A Step whose usage has arrived but whose
   turn has not ended appears as a semi-transparent "in progress" mark and counts in top-K and in
   the totals, so a running session is never blank.
@@ -353,8 +359,14 @@ serve a stale row. The settings file gains keys that older builds simply ignore.
 
 ## Open Questions
 
-Deferrable, and neither of them changes the specs, the approach or the task breakdown:
+Deferrable, and none of them changes the specs, the approach or the task breakdown:
 
 1. The exact log-scale parameters (which base, what minimum) when the deferred log toggle returns
    (D14).
 2. Whether the calibration overlay is on by default or behind a toggle once the line exists.
+3. The Trajectory view highlights the row it was asked to focus only when the focused call is
+   among the records it has built: it looks the id up in its flattened turns, and a collapsed Turn
+   or a record outside the loaded history window makes that lookup miss, in which case the request
+   is dropped silently and nothing is highlighted (the plugin can only pass a `callId` — see D15's
+   note on what a view definition offers). Highlighting a Step there rather than a call needs a
+   change in that view, not in this plugin.

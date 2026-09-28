@@ -185,6 +185,24 @@ window.__ModuleLoader__.load({
         '.dshb_rates_model{font-size:12px;color:var(--dsw-alias-label-primary);min-width:120px}',
         '.dshb_settings_block{display:flex;flex-direction:column;gap:8px;margin-top:10px}',
         '.dshb_settings_title{color:var(--dsw-alias-label-secondary);font-size:12px}',
+        '.dshb_cost_brush{position:absolute;top:0;bottom:0;background:rgba(59,130,246,.18);border-left:1px solid rgba(59,130,246,.5);',
+        'border-right:1px solid rgba(59,130,246,.5);pointer-events:none}',
+        '.dshb_cost_turn{position:absolute;top:0;bottom:0;pointer-events:none;border-left:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.28))}',
+        '.dshb_cost_turn_alt{background:rgba(128,128,128,.07)}',
+        '.dshb_cost_turnLabel{position:absolute;top:0;left:3px;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-layer-1,rgba(0,0,0,0));',
+        'font-size:9px;line-height:12px;padding:0 2px;border-radius:2px;white-space:nowrap}',
+        '.dshb_cost_panes{display:grid;grid-template-columns:minmax(0,560px) minmax(0,1fr);gap:10px;align-items:start}',
+        '.dshb_cost_pane{min-width:0}',
+        '@media (max-width:900px){.dshb_cost_panes{grid-template-columns:minmax(0,1fr)}}',
+        '.dshb_topk{display:flex;flex-direction:column;gap:2px}',
+        '.dshb_topk_row{display:grid;grid-template-columns:minmax(0,1fr) max-content;gap:0 12px;align-items:baseline;cursor:pointer;',
+        'border-radius:6px;padding:2px 6px}',
+        '.dshb_topk_row:hover{background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.08))}',
+        '.dshb_topk_row_on{background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.12))}',
+        '.dshb_topk_head{color:var(--dsw-alias-label-secondary);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+        '.dshb_topk_rank{color:var(--dsw-alias-label-tertiary);margin-right:6px;font-size:11px}',
+        '.dshb_topk_money{color:var(--dsw-alias-label-primary);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}',
+        '.dshb_topk_body{grid-column:1 / -1;color:var(--dsw-alias-label-tertiary);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
       ].join('')
       document.head.appendChild(tag)
     }
@@ -291,6 +309,7 @@ window.__ModuleLoader__.load({
         'cost.control.projection': 'Tariff',
         'cost.control.metric': 'Metric',
         'cost.control.axis': 'X axis',
+        'cost.control.topk': 'Top',
         'cost.metric.cost': 'cost',
         'cost.metric.output': 'output',
         'cost.metric.cacheRead': 'cache read',
@@ -298,6 +317,15 @@ window.__ModuleLoader__.load({
         'cost.metric.tokens': 'tokens',
         'cost.axis.time': 'time',
         'cost.axis.index': 'Step',
+        'cost.topk.title': 'Heaviest over the visible range',
+        'cost.topk.empty': 'no Steps in this range',
+        'cost.topk.steps': 'Steps',
+        'cost.topk.turns': 'Turns',
+        'cost.topk.ofSteps': '{steps} steps',
+        'cost.topk.unpriced': 'unpriced',
+        'cost.session': 'session: {value}',
+        'cost.zoom.reset': 'Reset zoom',
+        'cost.zoom.hint': 'wheel zooms · right-drag pans · drag selects a range · ←/→ walk the Steps · double-click resets',
         'cost.rates.enter': 'enter rates',
         'cost.rates.note': 'peak rates per 1M tokens: the off-peak rate is half and a cache write is billed as a cache miss. Saving reprices this session’s whole history.',
         'cost.rates.miss': 'cache miss / in',
@@ -448,6 +476,7 @@ window.__ModuleLoader__.load({
         'cost.control.projection': 'Тариф',
         'cost.control.metric': 'Метрика',
         'cost.control.axis': 'Ось X',
+        'cost.control.topk': 'Топ',
         'cost.metric.cost': 'стоимость',
         'cost.metric.output': 'выход',
         'cost.metric.cacheRead': 'чтение кэша',
@@ -455,6 +484,15 @@ window.__ModuleLoader__.load({
         'cost.metric.tokens': 'токены',
         'cost.axis.time': 'время',
         'cost.axis.index': 'шаг',
+        'cost.topk.title': 'Самые дорогие на видимом отрезке',
+        'cost.topk.empty': 'на этом отрезке нет шагов',
+        'cost.topk.steps': 'шаги',
+        'cost.topk.turns': 'ходы',
+        'cost.topk.ofSteps': 'шагов: {steps}',
+        'cost.topk.unpriced': 'без цены',
+        'cost.session': 'вся сессия: {value}',
+        'cost.zoom.reset': 'Сбросить масштаб',
+        'cost.zoom.hint': 'колесо — масштаб · правая кнопка — сдвиг · выделение — отрезок · ←/→ — шаги · двойной клик — сброс',
         'cost.rates.enter': 'ввести ставки',
         'cost.rates.note': 'пиковые ставки за 1M токенов: льготная — половина, запись кэша считается промахом кэша. Сохранение пересчитывает всю историю сессии.',
         'cost.rates.miss': 'промах / вход',
@@ -1412,6 +1450,9 @@ window.__ModuleLoader__.load({
     /** The rate fields of a fallback rate, in the order the editor shows them. */
     const RATE_KEYS = ['cacheMiss', 'cacheHit', 'output']
 
+    /** How many rows the top list shows (D17). */
+    const TOP_K = 10
+
     /** The money of one Step under a Tariff projection; `fact` is the Step itself. */
     function projectionOf(node, projection = 'fact') {
       if (projection === 'offPeak' || projection === 'peak') return node?.[projection] ?? node
@@ -1567,6 +1608,32 @@ window.__ModuleLoader__.load({
       return separators
     }
 
+    /**
+     * The Turns of the plot as pixel spans, for the band overlay the Turns top-K mode
+     * shows. A Turn runs up to where the next one starts, so the bands tile the axis
+     * and the edge between two of them is exactly the Turn boundary.
+     *
+     * @param points - the plotted points, in order, with their `x` in pixels.
+     * @param width - the plot width, which bounds the last Turn.
+     * @returns `[{ turn, from, to }]` in pixels.
+     */
+    function turnSpans(points, width) {
+      const spans = []
+      for (const point of points) {
+        const last = spans[spans.length - 1]
+        if (last === undefined || last.turn !== point.node.turn) {
+          spans.push({ turn: point.node.turn, from: point.x, to: point.x })
+        } else {
+          last.to = point.x
+        }
+      }
+      return spans.map((span, index) => ({
+        turn: span.turn,
+        from: span.from,
+        to: spans[index + 1] === undefined ? width : spans[index + 1].from,
+      }))
+    }
+
     /** The totals the header and the tooltip shares are computed from. */
     function seriesSummary(nodes) {
       const totals = { fact: 0, offPeak: 0, peak: 0 }
@@ -1582,6 +1649,161 @@ window.__ModuleLoader__.load({
         }
       }
       return { total: totals.fact, totals, tokens, steps: nodes.length, models, unpriced }
+    }
+
+    /** The smallest share of the series a zoom may leave on screen. */
+    const MIN_WINDOW = 0.004
+
+    /** Whether a window still covers the whole series. */
+    function isFullWindow(window) {
+      return window === null || window === undefined || (window.from <= 0 && window.to >= 1)
+    }
+
+    /** A window as `{ from, to }` fractions of the series, never narrower than the floor. */
+    function clampWindow(from, to) {
+      // Snapped to a millionth: a window is compared, drawn and re-derived from the
+      // pointer, and 0.09999999999999998 is not a fraction anyone wants to see.
+      const snap = (value) => Math.round(value * 1e6) / 1e6
+      const width = snap(Math.min(1, Math.max(MIN_WINDOW, to - from)))
+      const start = snap(Math.min(Math.max(0, from), 1 - width))
+      return { from: start, to: snap(start + width) }
+    }
+
+    /**
+     * Zoom a window around a fraction of itself.
+     *
+     * @param window - the current window, `null` for the whole series.
+     * @param factor - below 1 zooms in, above 1 zooms out.
+     * @param anchor - where the zoom holds its place, 0 at the left edge, 1 at the right.
+     */
+    function zoomWindow(window, factor, anchor = 0.5) {
+      const current = isFullWindow(window) ? { from: 0, to: 1 } : window
+      const width = (current.to - current.from) * factor
+      const at = current.from + (current.to - current.from) * anchor
+      return clampWindow(at - width * anchor, at + width * (1 - anchor))
+    }
+
+    /** Slide a window by a fraction of its own width, clamped to the series. */
+    function panWindow(window, delta) {
+      const current = isFullWindow(window) ? { from: 0, to: 1 } : window
+      const width = current.to - current.from
+      return clampWindow(current.from + delta * width, current.to + delta * width)
+    }
+
+    /**
+     * The slice of the series a window covers.
+     *
+     * The window is kept in fractions rather than instants so it survives an axis
+     * switch: on the time axis it becomes an interval, on the Step-index axis a
+     * contiguous run of Steps, and the totals and top-K always describe the same
+     * part of the session.
+     *
+     * @returns `{ nodes, fromMs, toMs }` — the covered nodes and the time range the
+     * plot spans (the window itself on the time axis, the slice's own extent otherwise).
+     */
+    function visibleSlice(nodes, window, axis = 'time') {
+      const full = seriesWindow(nodes)
+      if (isFullWindow(window) || nodes.length === 0) return { nodes, fromMs: full.fromMs, toMs: full.toMs }
+      if (axis === 'index') {
+        const last = nodes.length - 1
+        const start = Math.max(0, Math.min(last, Math.round(window.from * last)))
+        const end = Math.max(start, Math.min(last, Math.round(window.to * last)))
+        return { nodes: nodes.slice(start, end + 1), fromMs: full.fromMs, toMs: full.toMs }
+      }
+      const span = full.toMs - full.fromMs
+      const fromMs = full.fromMs + span * window.from
+      const toMs = full.fromMs + span * window.to
+      return { nodes: nodes.filter((node) => node.tStart >= fromMs && node.tStart <= toMs), fromMs, toMs }
+    }
+
+    /** The token buckets of several nodes, added up. */
+    function sumBuckets(nodes) {
+      const total = { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
+      for (const node of nodes) {
+        const buckets = node.buckets ?? {}
+        for (const key of Object.keys(total)) total[key] += buckets[key] ?? 0
+      }
+      return total
+    }
+
+    /**
+     * The top rows of a visible range, ranked by the selected metric.
+     *
+     * `mode: 'turns'` folds the Steps of a Turn into one row and names the Step
+     * that drove the Turn's rank, so a Turn row still answers "which Step was it".
+     * A Step with nothing to rank (a zero under the metric) is not a top row.
+     *
+     * @param nodes - the Steps of the visible range.
+     * @param options - `metric`, `projection`, `mode` (`steps`/`turns`) and `count`.
+     * @returns rows, best first, each with the index of the Step it selects.
+     */
+    function topRows(nodes, options = {}) {
+      const { metric = 'cost', projection = 'fact', mode = 'steps', count = 10 } = options
+      const costOf = (node) => projectionOf(node, projection)?.cost ?? 0
+      const rows = []
+      if (mode === 'turns') {
+        const groups = []
+        const byTurn = new Map()
+        nodes.forEach((node, index) => {
+          let group = byTurn.get(node.turn)
+          if (group === undefined) {
+            group = { turn: node.turn, nodes: [], driver: index, driverValue: -1, tStart: node.tStart, tEnd: node.tEnd }
+            byTurn.set(node.turn, group)
+            groups.push(group)
+          }
+          group.nodes.push(node)
+          if (node.tEnd !== null && node.tEnd !== undefined) group.tEnd = node.tEnd
+          const value = metricOf(node, metric, projection)
+          if (value > group.driverValue) {
+            group.driverValue = value
+            group.driver = index
+          }
+        })
+        for (const group of groups) {
+          const driver = nodes[group.driver]
+          rows.push({
+            key: `turn-${group.turn}`,
+            index: group.driver,
+            turn: group.turn,
+            step: driver.step,
+            tStart: group.tStart,
+            tEnd: group.tEnd,
+            steps: group.nodes.length,
+            value: group.nodes.reduce((total, node) => total + metricOf(node, metric, projection), 0),
+            cost: group.nodes.reduce((total, node) => total + costOf(node), 0),
+            buckets: sumBuckets(group.nodes),
+            models: [...new Set(group.nodes.flatMap((node) => Object.keys(node.byModel ?? {})))],
+            call: (driver.calls ?? [])[0] ?? null,
+            unpriced: group.nodes.some((node) => node.unpriced === true),
+            inProgress: group.nodes.some((node) => node.ended === false),
+          })
+        }
+        return rank(rows, count)
+      }
+      return rank(nodes.map((node, index) => ({
+        key: `${node.turn}.${node.step}`,
+        index,
+        turn: node.turn,
+        step: node.step,
+        tStart: node.tStart,
+        tEnd: node.tEnd,
+        steps: 1,
+        value: metricOf(node, metric, projection),
+        cost: costOf(node),
+        buckets: node.buckets ?? {},
+        models: Object.keys(node.byModel ?? {}),
+        call: (node.calls ?? [])[0] ?? null,
+        unpriced: node.unpriced === true,
+        inProgress: node.ended === false,
+      })), count)
+    }
+
+    /** Best first, the oldest first among equals, at most `count` rows. */
+    function rank(rows, count) {
+      return rows
+        .filter((row) => row.value > 0)
+        .sort((a, b) => b.value - a.value || a.tStart - b.tStart)
+        .slice(0, Math.max(0, count))
     }
 
     /**
@@ -1631,13 +1853,15 @@ window.__ModuleLoader__.load({
      * The pixel-space model of the chart.
      *
      * @param nodes - the per-Step records the route served.
-     * @param options - `width`, `height`, `metric`, `projection`, `clip` and `axis`.
+     * @param options - `width`, `height`, `metric`, `projection`, `clip`, `axis` and
+     * `window`: the `{ fromMs, toMs }` the X axis spans, which is the zoom window and
+     * not necessarily the extent of `nodes`.
      * @returns points (with their Step), the decimated bars and marks, the
      * clipping threshold and the value the Y axis tops out at.
      */
     function buildPlot(nodes, options = {}) {
       const { width = 720, height = 240, metric = 'cost', projection = 'fact', clip = true, axis = 'time' } = options
-      const { fromMs, toMs } = seriesWindow(nodes)
+      const { fromMs, toMs } = options.window ?? seriesWindow(nodes)
       const values = nodes.map((node) => metricOf(node, metric, projection))
       const threshold = clip ? clipThreshold(values) : null
       const capped = values.map((value) => (threshold !== null && value > threshold ? threshold : value))
@@ -1805,16 +2029,60 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The Cost view: the per-Step chart with its tooltip and inspector.
+     * Which way an arrow key moves the selection: -1 back, 1 on, 0 for anything else.
+     *
+     * The keys belong to the view, but a reader typing in the composer or in a settings
+     * field must keep their caret, so a focused input leaves the arrows alone.
+     */
+    function arrowDelta(event) {
+      if (event === null || event === undefined) return 0
+      if (event.altKey === true || event.ctrlKey === true || event.metaKey === true) return 0
+      const target = event.target ?? {}
+      const tag = String(target.tagName ?? '').toLowerCase()
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || target.isContentEditable === true) return 0
+      if (event.key === 'ArrowLeft') return -1
+      if (event.key === 'ArrowRight') return 1
+      return 0
+    }
+
+    /**
+     * Where an arrow key lands, clamped to the visible slice.
+     *
+     * With nothing selected yet the right arrow enters at the first Step and the left
+     * arrow at the last: the keys have to work before the reader clicks anything.
+     */
+    function nextSelection(index, delta, count) {
+      if (count <= 0) return -1
+      if (index < 0 || index >= count) return delta > 0 ? 0 : count - 1
+      return Math.max(0, Math.min(count - 1, index + delta))
+    }
+
+    /**
+     * The Step the reader last opened, per session.
+     *
+     * The conversation mounts only the selected view, so jumping to Trajectory and
+     * coming back rebuilds the Cost view from scratch — and the Step the jump came
+     * from must still be the one that is marked, or the reader has to find it again.
+     * This is page memory, not a setting: nothing here is written to the Host.
+     */
+    const lastStep = new Map()
+
+    /**
+     * The Cost view: the per-Step chart with its tooltip, the top list and the inspector.
      */
     function CostView(props) {
       const t = props.t
       const sessionId = typeof props.sessionId === 'string' ? props.sessionId : ''
       const live = typeof props.useProjection === 'function' ? props.useProjection('dshBalanceCost') : undefined
       const series = useCostSeries(sessionId, live?.seq ?? 0)
-      const [selected, setSelected] = react.useState(-1)
+      // The selection is the Step, not an index: the window can change under it and the
+      // view can be rebuilt, and `{ turn, step }` still names the same Step.
+      const [step, setStep] = react.useState(() => lastStep.get(sessionId) ?? null)
       const [clip, setClip] = react.useState(true)
       const [ratesOpen, setRatesOpen] = react.useState(false)
+      // The visible window as fractions of the series; `null` means the whole session.
+      // It is deliberately not persisted (D34): reopening the view shows everything.
+      const [range, setRange] = react.useState(null)
       // Stored choices arrive with the payload; a click in this mount wins over them
       // and is written straight through the settings route.
       const [picked, setPicked] = react.useState({})
@@ -1826,15 +2094,27 @@ window.__ModuleLoader__.load({
       // A Step that reported no usage has no point to draw; the empty state below
       // is what says so, instead of a chart of zeroes.
       const nodes = (Array.isArray(payload?.nodes) ? payload.nodes : []).filter((node) => node.hasUsage === true)
-      const summary = seriesSummary(nodes)
+      const session = seriesSummary(nodes)
       const currency = payload?.currency ?? live?.currency ?? 'USD'
-      const state = seriesState(series.status, payload, nodes, summary)
+      // The three empty states and the error are properties of the session, not of the
+      // window: zooming into a quiet interval must not turn the view into an empty state.
+      const state = seriesState(series.status, payload, nodes, session)
+      // The window is a fraction of the series, so the totals, the chart and top-K all
+      // describe the same part of it and the axis switch keeps the same window.
+      const slice = visibleSlice(nodes, range, axis)
+      const summary = seriesSummary(slice.nodes)
       // Without a payload there is no figure to lead with: a dash beats a `$0.00`
       // that would read as "this session cost nothing".
-      const total = payload === null ? null : summary.total
-      // The headline follows the selected projection; the `fact` figure stays beside
-      // it whenever that is not the one shown, so a projection never hides the estimate.
+      const total = payload === null ? null : session.totals[projection] ?? session.total
+      // The headline follows the selected projection and the visible range; the session
+      // and the `fact` figures stay beside it, so neither is ever hidden by the other.
       const shown = payload === null ? null : summary.totals[projection] ?? summary.total
+      const windowed = !isFullWindow(range)
+      // Where the remembered Step sits in what is on screen; -1 when the window or the
+      // series no longer holds it, which is how a stale memory simply stops marking.
+      const selected = step === null
+        ? -1
+        : slice.nodes.findIndex((node) => node.turn === step.turn && node.step === step.step)
 
       const choose = (pick, key, value) => {
         setPicked((current) => ({ ...current, [pick]: value }))
@@ -1843,25 +2123,66 @@ window.__ModuleLoader__.load({
         void Promise.resolve(store.saveSettings({ [key]: value })).catch(() => {})
       }
 
+      /** Select a Step by its place in the visible slice, and remember which one it is. */
+      const select = (index) => {
+        const node = slice.nodes[index]
+        if (node === undefined) {
+          setStep(null)
+          lastStep.delete(sessionId)
+          return
+        }
+        const named = { turn: node.turn, step: node.step }
+        lastStep.set(sessionId, named)
+        setStep(named)
+      }
+
       /** Write fallback rates and re-read the series, which is priced by them. */
       const saveRates = async (next) => {
         await store.saveSettings({ fallbackRates: next })
         series.retry()
       }
 
+      /** Move the visible window; `null` returns to the whole session. */
+      const setWindow = (next) => {
+        setStep(null)
+        lastStep.delete(sessionId)
+        setRange(isFullWindow(next) ? null : next)
+      }
+
+      // Left/right walk the Steps of the visible slice. The listener sits on the
+      // document because the plot is a canvas and never takes focus itself; it is
+      // re-registered every render so it always closes over the current selection.
+      react.useEffect(() => {
+        if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return undefined
+        const onKey = (event) => {
+          const delta = arrowDelta(event)
+          if (delta === 0 || slice.nodes.length === 0) return
+          if (typeof event.preventDefault === 'function') event.preventDefault()
+          select(nextSelection(selected, delta, slice.nodes.length))
+        }
+        document.addEventListener('keydown', onKey)
+        return () => document.removeEventListener('keydown', onKey)
+      })
+
       const head = h('div', { className: 'dshb_cost_head', key: 'head' }, [
         h('span', { className: 'dshb_cost_total', key: 'total' }, costText(shown, currency)),
         payload === null ? null : h('span', { className: 'dshb_cost_sub', key: 'label' }, t(`cost.proj.${projection}`)),
+        payload === null || windowed
+          ? null
+          : h('span', { className: 'dshb_cost_sub', key: 'steps' }, t('cost.steps', { steps: summary.steps })),
+        windowed
+          ? h('span', { className: 'dshb_cost_sub', key: 'range' }, t('cost.steps', { steps: summary.steps }))
+          : null,
+        windowed ? h('span', { className: 'dshb_cost_sub', key: 'session' }, t('cost.session', { value: costText(total, currency) })) : null,
         payload === null || projection === 'fact'
           ? null
-          : h('span', { className: 'dshb_cost_sub', key: 'fact' }, t('cost.fact', { value: costText(total, currency) })),
-        payload === null ? null : h('span', { className: 'dshb_cost_sub', key: 'steps' }, t('cost.steps', { steps: summary.steps })),
+          : h('span', { className: 'dshb_cost_sub', key: 'fact' }, t('cost.fact', { value: costText(session.totals.fact, currency) })),
         payload?.peakIntervals?.length > 0 && axis === 'time'
           ? h('span', { className: 'dshb_cost_sub', key: 'bands' }, t('cost.bandNote'))
           : null,
-        summary.unpriced.length > 0
+        session.unpriced.length > 0
           ? h('span', { className: 'dshb_flag', key: 'unpriced' }, [
-            t('cost.unpriced', { models: summary.unpriced.join(', ') }),
+            t('cost.unpriced', { models: session.unpriced.join(', ') }),
             ' ',
             h('button', {
               key: 'rates',
@@ -1872,6 +2193,7 @@ window.__ModuleLoader__.load({
           : null,
       ])
 
+      const topk = picked.topk ?? stored.costTopK ?? 'steps'
       const controls = h('div', { className: 'dshb_cost_controls', key: 'controls' }, [
         h(Segmented, {
           key: 'projection',
@@ -1894,6 +2216,16 @@ window.__ModuleLoader__.load({
           onSelect: (value) => choose('axis', 'costAxis', value),
           options: [{ value: 'time', label: t('cost.axis.time') }, { value: 'index', label: t('cost.axis.index') }],
         }),
+        h(Segmented, {
+          key: 'topk',
+          label: t('cost.control.topk'),
+          value: topk,
+          onSelect: (value) => choose('topk', 'costTopK', value),
+          options: [
+            { value: 'steps', label: t('cost.topk.steps') },
+            { value: 'turns', label: t('cost.topk.turns') },
+          ],
+        }),
       ])
 
       if (state !== 'ok') {
@@ -1906,18 +2238,21 @@ window.__ModuleLoader__.load({
             state,
             error: series.error,
             onRetry: series.retry,
-            models: summary.unpriced,
+            models: session.unpriced,
             rates: payload?.fallbackRates,
             onRates: saveRates,
           }),
         ])
       }
 
-      const plot = buildPlot(nodes, { clip, axis, metric, projection })
+      const plot = buildPlot(slice.nodes, { clip, axis, metric, projection, window: { fromMs: slice.fromMs, toMs: slice.toMs } })
       const clipped = plot.points.some((point) => point.clipped)
+      const rows = topRows(slice.nodes, { metric, projection, mode: topk, count: TOP_K })
       const note = h('div', { className: 'dshb_cost_note', key: 'note' }, [
         h('span', { key: 'clip' }, clipped ? `${t('cost.clip', { value: costText(plot.threshold, currency) })} ` : ''),
         clipped ? h('button', { key: 'unclip', className: 'dshb_btn', onClick: () => setClip(false) }, t('cost.unclip')) : null,
+        windowed ? h('button', { key: 'reset', className: 'dshb_btn', onClick: () => setWindow(null) }, t('cost.zoom.reset')) : null,
+        h('span', { key: 'hint' }, t('cost.zoom.hint')),
       ])
 
       return h('div', { className: 'dshb_cost' }, [
@@ -1926,32 +2261,83 @@ window.__ModuleLoader__.load({
         h(CostChart, {
           key: 'chart',
           t,
-          nodes,
+          nodes: slice.nodes,
           payload,
           clip,
           axis,
           metric,
           projection,
           currency,
+          range,
+          topk,
+          onWindow: setWindow,
           total: shown,
           selected,
-          onSelect: setSelected,
+          onSelect: select,
         }),
         note,
-        ratesOpen && summary.unpriced.length > 0
-          ? h(RateEntry, { key: 'rates', t, models: summary.unpriced, rates: payload?.fallbackRates, onSave: saveRates })
+        // The inspector and the top list describe the same selection, so they sit side
+        // by side: the Step reached from a row is read next to the row that led there.
+        h('div', { className: 'dshb_cost_panes', key: 'panes' }, [
+          h('div', { className: 'dshb_cost_pane', key: 'inspector' }, h(CostInspector, {
+            t,
+            node: selected >= 0 && selected < slice.nodes.length ? slice.nodes[selected] : null,
+            currency,
+            total,
+            projection,
+            peakIntervals: payload?.peakIntervals ?? [],
+            inspectCall: props.inspectCall,
+            loadOlder: props.loadOlder,
+          })),
+          h('div', { className: 'dshb_cost_pane', key: 'topk' }, h(TopK, {
+            t,
+            rows,
+            mode: topk,
+            currency,
+            total,
+            selected,
+            onSelect: select,
+          })),
+        ]),
+        ratesOpen && session.unpriced.length > 0
+          ? h(RateEntry, { key: 'rates', t, models: session.unpriced, rates: payload?.fallbackRates, onSave: saveRates })
           : null,
-        h(CostInspector, {
-          key: 'inspector',
-          t,
-          node: selected >= 0 && selected < nodes.length ? nodes[selected] : null,
-          currency,
-          total: shown,
-          projection,
-          peakIntervals: payload?.peakIntervals ?? [],
-          inspectCall: props.inspectCall,
-          loadOlder: props.loadOlder,
-        }),
+      ])
+    }
+
+    /**
+     * The top rows below the chart: the ten heaviest Steps or Turns of the visible
+     * range, each saying what it is — when it ran, which model paid, what it called,
+     * where the tokens went, what it cost and how much of the session that is.
+     */
+    function TopK({ t, rows, mode, currency, total, selected, onSelect }) {
+      const head = h('div', { className: 'dshb_cost_note', key: 'title' }, t('cost.topk.title'))
+      if (rows.length === 0) {
+        return h('div', { className: 'dshb_topk' }, [head, h('div', { className: 'dshb_cost_note', key: 'empty' }, t('cost.topk.empty'))])
+      }
+      return h('div', { className: 'dshb_topk' }, [
+        head,
+        ...rows.map((row, position) => h('div', {
+          key: row.key,
+          className: row.index === selected ? 'dshb_topk_row dshb_topk_row_on' : 'dshb_topk_row',
+          onClick: () => onSelect(row.index),
+          role: 'button',
+        }, [
+          h('span', { className: 'dshb_topk_head', key: 'head' }, [
+            h('span', { className: 'dshb_topk_rank', key: 'rank' }, `#${position + 1}`),
+            h('span', { key: 'turn' }, t('cost.tip.turn', { turn: row.turn, step: row.step })),
+            mode === 'turns' ? h('span', { className: 'dshb_cost_sub', key: 'steps' }, ` · ${t('cost.topk.ofSteps', { steps: row.steps })}`) : null,
+            h('span', { className: 'dshb_cost_sub', key: 'when' }, ` · ${clock(row.tStart) ?? ''}`),
+          ]),
+          h('span', { className: 'dshb_topk_money', key: 'money' }, `${costText(row.cost, currency)} · ${shareOf(row.cost, total)}`),
+          h('span', { className: 'dshb_topk_body', key: 'body' }, [
+            (row.models ?? []).join(', '),
+            bucketLine(row.buckets),
+            row.call === null || row.call === undefined ? '' : `${row.call.name} ${row.call.preview.split('\n')[0]}`,
+            row.unpriced ? t('cost.topk.unpriced') : '',
+            row.inProgress ? t('cost.inspector.inProgress') : '',
+          ].filter((part) => part !== '').join(' · ')),
+        ])),
       ])
     }
 
@@ -2074,15 +2460,85 @@ window.__ModuleLoader__.load({
       ])
     }
 
-    function CostChart({ t, nodes, payload, clip, currency, total, axis, metric, projection, selected, onSelect }) {
+    function CostChart({ t, nodes, payload, clip, currency, total, axis, metric, projection, range, topk, onWindow, selected, onSelect }) {
       const boxRef = react.useRef(null)
       const canvasRef = react.useRef(null)
       const tooltipRef = react.useRef(null)
+      const dragRef = react.useRef(null)
+      const squelchRef = react.useRef(false)
       const [size, setSize] = react.useState({ width: 720, height: 240 })
       const [tip, setTip] = react.useState({ width: 0, height: 0 })
       const [hover, setHover] = react.useState(-1)
+      const [brush, setBrush] = react.useState(null)
       const plot = buildPlot(nodes, { width: size.width, height: size.height, clip, axis, metric, projection })
       const intervals = payload?.peakIntervals ?? []
+
+      /** The plot's box: the measured one when the DOM gives it, a left edge at 0 otherwise. */
+      const boxRect = () => {
+        const box = boxRef.current
+        if (box !== null && box !== undefined && typeof box.getBoundingClientRect === 'function') {
+          return box.getBoundingClientRect()
+        }
+        return { left: 0, width: plot.width, height: plot.height }
+      }
+
+      /** The pointer's position inside the plot, in pixels. */
+      const localX = (event) => Math.max(0, Math.min(plot.width, event.clientX - boxRect().left))
+
+      /** A pixel column as a fraction of the whole series, whatever the window shows. */
+      const toFraction = (x) => {
+        const width = plot.width > 0 ? plot.width : 1
+        const current = isFullWindow(range) ? { from: 0, to: 1 } : range
+        return current.from + (current.to - current.from) * (x / width)
+      }
+
+      const startDrag = (event) => {
+        const x = localX(event)
+        if (event.button === 2) {
+          dragRef.current = { kind: 'pan', last: x }
+          return
+        }
+        if (event.button !== 0) return
+        dragRef.current = { kind: 'brush', start: x, moved: false }
+        setBrush({ from: x, to: x })
+      }
+
+      const moveDrag = (event) => {
+        const x = localX(event)
+        setHover(nearest(event))
+        const drag = dragRef.current
+        if (drag === null || drag === undefined) return
+        if (drag.kind === 'pan') {
+          const width = plot.width > 0 ? plot.width : 1
+          onWindow(panWindow(range, -(x - drag.last) / width))
+          drag.last = x
+          return
+        }
+        drag.moved = Math.abs(x - drag.start) > 4
+        setBrush({ from: drag.start, to: x })
+      }
+
+      const endDrag = () => {
+        const drag = dragRef.current
+        dragRef.current = null
+        const current = brush
+        setBrush(null)
+        if (drag === null || drag === undefined) return
+        if (drag.kind !== 'brush' || drag.moved !== true || current === null) return
+        // A brushed interval becomes the new window; the click that follows the drag
+        // is squelched, because it would select a point of the range that just went away.
+        squelchRef.current = true
+        onWindow(clampWindow(
+          Math.min(toFraction(Math.min(current.from, current.to)), toFraction(Math.max(current.from, current.to))),
+          Math.max(toFraction(Math.min(current.from, current.to)), toFraction(Math.max(current.from, current.to))),
+        ))
+      }
+
+      const wheel = (event) => {
+        if (typeof event.preventDefault === 'function') event.preventDefault()
+        const width = plot.width > 0 ? plot.width : 1
+        onWindow(zoomWindow(range, event.deltaY > 0 ? 1.25 : 0.8, localX(event) / width))
+      }
 
       react.useEffect(() => {
         const box = boxRef.current
@@ -2118,10 +2574,7 @@ window.__ModuleLoader__.load({
 
       /** The plotted point nearest to the pointer, within a small radius. */
       const nearest = (event) => {
-        const box = boxRef.current
-        if (box === null || box === undefined || typeof box.getBoundingClientRect !== 'function') return -1
-        const rect = box.getBoundingClientRect()
-        const x = event.clientX - rect.left
+        const x = localX(event)
         let best = -1
         let distance = Infinity
         plot.points.forEach((point, index) => {
@@ -2146,6 +2599,13 @@ window.__ModuleLoader__.load({
         className: 'dshb_cost_sep',
         style: { left: `${separator.x * 100}%` },
       })) : []
+      // Turn bands answer "where does this Turn start and end" while the top list is
+      // grouped by Turn; alternating shades keep the boundary readable without a legend.
+      const turnBands = topk === 'turns' ? turnSpans(plot.points, plot.width).map((span, index) => h('div', {
+        key: `turn-${span.turn}`,
+        className: index % 2 === 0 ? 'dshb_cost_turn dshb_cost_turn_alt' : 'dshb_cost_turn',
+        style: { left: `${span.from}px`, width: `${Math.max(0, span.to - span.from)}px` },
+      }, h('span', { className: 'dshb_cost_turnLabel', key: 'label' }, `T${span.turn}`))) : []
       const gridlines = plot.axis.ticks.map((tick, index) => h('div', {
         key: `grid-${index}`,
         className: 'dshb_cost_grid',
@@ -2187,6 +2647,17 @@ window.__ModuleLoader__.load({
         style: { left: `${plot.points[selected].x}px`, top: `${plot.points[selected].y}px` },
       }) : null
 
+      // The brushed interval, drawn while the pointer drags it. It is discarded on
+      // release (the window becomes the range) and never stored anywhere (D34).
+      const selection = brush === null ? null : h('div', {
+        key: 'brush',
+        className: 'dshb_cost_brush',
+        style: {
+          left: `${Math.min(brush.from, brush.to)}px`,
+          width: `${Math.abs(brush.to - brush.from)}px`,
+        },
+      })
+
       return h('div', null, [
         h('div', { key: 'chart', className: 'dshb_cost_chart' }, [
           h('div', { key: 'yaxis', className: 'dshb_cost_yaxis' }, yLabels),
@@ -2194,17 +2665,30 @@ window.__ModuleLoader__.load({
             key: 'plot',
             className: 'dshb_cost_plot',
             ref: boxRef,
-            onMouseMove: (event) => setHover(nearest(event)),
+            onMouseMove: moveDrag,
             onMouseLeave: () => setHover(-1),
+            onMouseDown: startDrag,
+            onMouseUp: endDrag,
+            onWheel: wheel,
+            onContextMenu: (event) => { if (typeof event.preventDefault === 'function') event.preventDefault() },
+            onDoubleClick: () => onWindow(null),
             onClick: (event) => {
+              // A click that ended a brush must not also select a point of the range
+              // that the brush just replaced.
+              if (squelchRef.current) {
+                squelchRef.current = false
+                return
+              }
               const index = nearest(event)
               if (index >= 0) onSelect(index)
             },
           }, [
+            ...turnBands,
             ...bands,
             ...gridlines,
             h('canvas', { key: 'canvas', className: 'dshb_cost_canvas', ref: canvasRef }),
             ...separators,
+            selection,
             marker,
             tooltip,
           ]),
@@ -2479,6 +2963,8 @@ window.__ModuleLoader__.load({
       decimatePoints, seriesWindow, phaseOf, bandRanges, turnSeparators, seriesSummary, seriesState,
       plotTicks, buildPlot, bucketLine, shareOf, tooltipPlacement, costDigits, costText,
       costColumnDigits, costCell, indexTicks, projectionOf, Segmented, RateEntry, rateDraftOf,
+      TopK, topRows, visibleSlice, sumBuckets, zoomWindow, panWindow, clampWindow, isFullWindow, turnSpans,
+      arrowDelta, nextSelection,
       valueAxis, compactNumber, tickLabel, tooltipLines,
     }
     return module.exports
