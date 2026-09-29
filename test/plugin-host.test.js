@@ -57,18 +57,27 @@ function request(method, url, body) {
   return req
 }
 
-/** A response stub capturing status and body. */
+/**
+ * A response stub capturing status and body.
+ *
+ * It also carries what a real `ServerResponse` carries for the one thing the subtree
+ * route reads: `writableEnded`, and the `close` event a lost connection emits. A stub
+ * without them cannot tell a reader that went away from a request that was answered.
+ */
 function response() {
-  const res = {
+  const res = new EventEmitter()
+  Object.assign(res, {
     status: 0,
     body: '',
+    writableEnded: false,
     writeHead(status) {
       res.status = status
     },
     end(text) {
       res.body = text ?? ''
+      res.writableEnded = true
     },
-  }
+  })
   return res
 }
 
@@ -1432,5 +1441,210 @@ test('a stored log with one malformed event is still a session with a cost, and 
         return [{ id: 'child-1', createdAt: time, mode: 'continuable', label: 'Survey the tree' }]
       },
     },
+  })
+})
+
+test('the sampling loop asks again after a poll that rejected', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
+  const previousHome = process.env.DSH_HOME
+  const previousFetch = globalThis.fetch
+  const previousRef = process.env.DSH_BALANCE_ABSENT_KEY
+  process.env.DSH_HOME = home
+  delete process.env.DSH_BALANCE_ABSENT_KEY
+  let polls = 0
+  globalThis.fetch = async () => ({ ok: true, json: async () => balanceBody(1) })
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const ctx = hostContext()
+  // The credentials service cannot be read, so resolving the key throws before the
+  // request is even built. That rejection used to be the end of the loop: `refresh()`
+  // never resolved, nothing rescheduled, and sampling stopped for the rest of the
+  // process's life behind an unhandled rejection.
+  const get = ctx.get
+  ctx.get = (key) => {
+    if (key === 'credentials') {
+      polls += 1
+      throw new Error('the credentials service is not readable')
+    }
+    return get(key)
+  }
+  try {
+    const module = await import(`../src/index.js?rejected-tick=${encodeURIComponent(home)}`)
+    module.apply(ctx, module.Config({ apiKey: '', apiKeyRef: 'DSH_BALANCE_ABSENT_KEY', refreshIntervalMs: 15000 }))
+    const settle = async (until) => {
+      for (let index = 0; index < 400 && !until(); index += 1) {
+        t.mock.timers.tick(1000)
+        await new Promise((resolve) => setImmediate(resolve))
+      }
+    }
+    await settle(() => polls > 0)
+    assert.equal(polls, 1, 'the first tick resolved the key and failed')
+    await settle(() => polls > 1)
+    assert.equal(polls, 2, 'the loop re-armed after the failed tick')
+    assert.ok(
+      ctx.warns.some((line) => line.includes('the credentials service is not readable')),
+      `the failure is still reported: ${ctx.warns.join('; ')}`,
+    )
+  } finally {
+    ctx.dispose()
+    t.mock.timers.reset()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    if (previousRef !== undefined) process.env.DSH_BALANCE_ABSENT_KEY = previousRef
+    globalThis.fetch = previousFetch
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a settings write that lands after the plugin was disposed arms no timer', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
+  const previousHome = process.env.DSH_HOME
+  const previousFetch = globalThis.fetch
+  process.env.DSH_HOME = home
+  let polls = 0
+  globalThis.fetch = async () => {
+    polls += 1
+    return { ok: true, json: async () => balanceBody(1) }
+  }
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const ctx = hostContext()
+  try {
+    const module = await import(`../src/index.js?disposed-settings=${encodeURIComponent(home)}`)
+    module.apply(ctx, module.Config({ apiKey: 'test-key', currency: 'CNY' }))
+    // The write is taken before the disposal and run after it: that is the race this is
+    // about, a settings request that was already in flight when the plugin went away.
+    const settings = ctx.routes.get('/dsh-balance/settings')
+    ctx.dispose()
+    const res = response()
+    await settings(request('POST', '/dsh-balance/settings', { refreshIntervalMs: 15000 }), res)
+    assert.equal(res.status, 200, res.body)
+    assert.deepEqual(JSON.parse(res.body).changed, ['refreshIntervalMs'], 'the setting itself is still stored')
+    for (let index = 0; index < 20; index += 1) {
+      t.mock.timers.tick(60_000)
+      await new Promise((resolve) => setImmediate(resolve))
+    }
+    assert.equal(polls, 0, 'a disposed plugin is not woken up by a late settings write')
+  } finally {
+    ctx.dispose()
+    t.mock.timers.reset()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    globalThis.fetch = previousFetch
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a refresh answered during the load reports the history on disk', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
+  const previousHome = process.env.DSH_HOME
+  const previousFetch = globalThis.fetch
+  const previousRef = process.env.DSH_BALANCE_ABSENT_KEY
+  process.env.DSH_HOME = home
+  delete process.env.DSH_BALANCE_ABSENT_KEY
+  let polls = 0
+  globalThis.fetch = async () => {
+    polls += 1
+    return { ok: true, json: async () => balanceBody(12.34) }
+  }
+  const ctx = hostContext()
+  try {
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    await mkdir(join(home, 'dsh-balance'), { recursive: true })
+    const now = Date.now()
+    const line = (offset, total) => `${JSON.stringify({ t: now - offset, currency: 'CNY', total, granted: 0, toppedUp: total })}\n`
+    await writeFile(join(home, 'dsh-balance', 'samples.ndjson'), [line(60_000, 10), line(0, 9)].join(''), 'utf8')
+    const module = await import(`../src/index.js?startup-refresh=${encodeURIComponent(home)}`)
+    // No key anywhere, which is the case where `refresh()` returns before its own wait
+    // for the load: the route then used to build its payload from an empty in-memory
+    // history and report `samples: 0` and an all-zero ledger over two real samples.
+    module.apply(ctx, module.Config({ apiKey: '', apiKeyRef: 'DSH_BALANCE_ABSENT_KEY', currency: 'CNY' }))
+    const res = response()
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), res)
+    assert.equal(res.status, 200, res.body)
+    const payload = JSON.parse(res.body)
+    assert.equal(payload.host.loaded, true, 'the answer was built after the load finished')
+    assert.equal(payload.host.samples, 2)
+    assert.equal(payload.ledger.sampleCount, 2, 'and the ledger is the one the log holds')
+    assert.equal(payload.ledger.totals.d1.amount, 1, 'the minute of spend between the two samples')
+    assert.equal(payload.balance.error, 'api-key-missing')
+    assert.equal(polls, 0, 'and no request was made without a key')
+  } finally {
+    ctx.dispose()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    if (previousRef !== undefined) process.env.DSH_BALANCE_ABSENT_KEY = previousRef
+    globalThis.fetch = previousFetch
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a HEAD read costs no payload build', async () => {
+  await withPlugin(async ({ ctx }) => {
+    const head = response()
+    await ctx.routes.get('/dsh-balance')(request('HEAD', '/dsh-balance?sessionId=session-1'), head)
+    assert.equal(head.status, 200)
+    assert.equal(head.body, '', 'a HEAD answers no body')
+    // The session read is the observable side effect of building the payload, which is
+    // why this drives the HEAD with a session id and an unreadable session store.
+    assert.deepEqual(ctx.warns, [], 'and builds nothing it would have to throw away')
+
+    const get = response()
+    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance?sessionId=session-1'), get)
+    assert.equal(get.status, 200, get.body)
+    assert.equal(ctx.warns.length, 1, 'the same read with a body does build the payload')
+  }, { sessionOf: () => { throw new Error('the session store is closed') } })
+})
+
+test('the subtree walk stops when the reader goes away, and only then', async () => {
+  const signals = []
+  const children = '/dsh-balance/session-cost/children?sessionId=session-1'
+  await withPlugin(async ({ ctx }) => {
+    const route = ctx.routes.get('/dsh-balance/session-cost/children')
+    const res = response()
+    const req = request('GET', children)
+    const pending = route(req, res)
+    for (let index = 0; index < 20 && signals.length === 0; index += 1) await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(signals.length, 1, 'the walk runs under a signal of its own')
+    assert.equal(signals[0].aborted, false, 'which starts out live')
+    // What a real `IncomingMessage` emits once its request body is consumed — about a
+    // millisecond into the walk, long before the answer. The walk used to cancel itself
+    // here and to run to the end when a GET had no body to consume at all.
+    req.emit('close')
+    assert.equal(signals[0].aborted, false, 'a consumed request is not a reader who went away')
+    // What a lost connection emits: the response closes with nothing written.
+    res.emit('close')
+    assert.equal(signals[0].aborted, true, 'the disconnect cancels the walk')
+    await pending
+    assert.equal(res.status, 200, res.body)
+
+    const answered = response()
+    const finished = request('GET', children)
+    await route(finished, answered)
+    assert.equal(answered.writableEnded, true, 'the answer was written')
+    finished.emit('close')
+    answered.emit('close')
+    assert.equal(signals.at(-1).aborted, false, 'a read that was answered is not a disconnect')
+  }, {
+    subagents: {
+      async listChildren(id, signal) {
+        signals.push(signal)
+        for (let step = 0; step < 5; step += 1) await new Promise((resolve) => setImmediate(resolve))
+        return [{ id: 'child-1', createdAt: Date.now(), mode: 'continuable', label: 'Survey the tree' }]
+      },
+    },
+  })
+})
+
+test('a body limit that counted characters let four times the text through', async () => {
+  await withPlugin(async ({ ctx }) => {
+    // Three bytes per character, so 400 000 of them are 1.2 MB of text in 400 000
+    // characters: under a 1 MB limit measured in characters, over it in bytes.
+    const big = response()
+    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { currency: '€'.repeat(400_000) }), big)
+    assert.equal(big.status, 400)
+    assert.match(JSON.parse(big.body).error, /payload too large/, big.body)
+    // The limit is the number of bytes on the wire, and a body inside it is still read.
+    const small = response()
+    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { dayZone: 'Europe/Berlin' }), small)
+    assert.equal(small.status, 200, small.body)
   })
 })

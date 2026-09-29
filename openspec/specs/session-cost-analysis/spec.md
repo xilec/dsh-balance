@@ -370,7 +370,9 @@ for the child's id, label and mode and the child's own session cost estimate for
 cost of a subagent session MUST NOT be folded into the session total of the parent, which
 covers that session only. Expanding the subtree SHALL be an explicit action with progress that
 reads the child sessions through a separate route walking the subagent catalog; the main series
-route MUST NOT serve any child session. Per-child lines and the subtree cost attributed to the
+route MUST NOT serve any child session. That walk MUST stop when the reader's connection closes
+before the answer has been written, and MUST NOT stop for any other signal: a request whose
+body has already been consumed is a finished request, not a reader who went away. Per-child lines and the subtree cost attributed to the
 spawning Step SHALL be shown only after that action: the first ask reads the direct children,
 and the explicit "load full history" action — which exists for the subtree only — extends the
 read to every session below the session. Reading the subtree SHALL be a tab of the view beside
@@ -411,6 +413,13 @@ steered through its stored preference.
   tab
 - **THEN** the shell switches to that session with its Cost view active, or — if the shell offers
   neither the preference nor the binding — opens the session and leaves the tab to the reader
+
+#### Scenario: The reader closes the Cost view mid-walk
+
+- **WHEN** the connection behind a subtree request closes while the walk is running and no
+  answer has been written
+- **THEN** the walk is cancelled, while a request whose body is merely consumed, and a request
+  that was answered, are not
 
 #### Scenario: A child that cannot be read
 

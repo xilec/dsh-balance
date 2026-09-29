@@ -469,38 +469,45 @@ export function apply(ctx, config) {
   const refresh = () => {
     if (inflight !== null) return inflight
     inflight = (async () => {
-      const key = await resolveKey()
-      if (key === '') {
-        cache = { ...cache, ok: false, error: 'api-key-missing', stale: cache.fetchedAt > 0 }
-        return
-      }
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), runtime.timeoutMs)
+      // The key resolution lives inside the try because it reaches outside the plugin
+      // — the credentials service — and a service that cannot be read is a failed poll
+      // like any other, not a rejection every caller has to be ready for. The
+      // sampling loop is the one caller, and a rejection there used to end sampling
+      // for the rest of the process's life.
       try {
-        const response = await fetch(`${runtime.baseUrl.replace(/\/+$/, '')}/user/balance`, {
-          headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' },
-          signal: controller.signal,
-        })
-        if (!response.ok) throw new Error(`DeepSeek API HTTP ${response.status}`)
-        const data = await response.json()
-        const balances = normalizeBalances(data)
-        const at = Date.now()
-        cache = {
-          ok: true,
-          balances,
-          isAvailable: data?.is_available === true,
-          error: null,
-          fetchedAt: at,
-          stale: false,
+        const key = await resolveKey()
+        if (key === '') {
+          cache = { ...cache, ok: false, error: 'api-key-missing', stale: cache.fetchedAt > 0 }
+          return
         }
-        if (!loaded) await ready
-        await recordSample(balances, at)
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), runtime.timeoutMs)
+        try {
+          const response = await fetch(`${runtime.baseUrl.replace(/\/+$/, '')}/user/balance`, {
+            headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' },
+            signal: controller.signal,
+          })
+          if (!response.ok) throw new Error(`DeepSeek API HTTP ${response.status}`)
+          const data = await response.json()
+          const balances = normalizeBalances(data)
+          const at = Date.now()
+          cache = {
+            ok: true,
+            balances,
+            isAvailable: data?.is_available === true,
+            error: null,
+            fetchedAt: at,
+            stale: false,
+          }
+          if (!loaded) await ready
+          await recordSample(balances, at)
+        } finally {
+          clearTimeout(timer)
+        }
       } catch (error) {
         const message_ = message(error)
         if (cache.error !== message_) warn(`balance fetch failed: ${message_}`)
         cache = { ...cache, ok: cache.fetchedAt > 0, error: message_, stale: true }
-      } finally {
-        clearTimeout(timer)
       }
     })().finally(() => {
       inflight = null
@@ -512,13 +519,21 @@ export function apply(ctx, config) {
   let loopStopped = false
 
   const resetLoop = () => {
+    // A settings write can land after the plugin was disposed, and re-arming the loop
+    // there leaves a timer that nothing will ever clear.
+    if (loopStopped) return
     if (loopTimer !== null) clearTimeout(loopTimer)
-    const tick = () => {
-      void refresh().then(() => {
-        if (loopStopped) return
-        const delay = cache.error === 'api-key-missing' ? 30000 : runtime.refreshIntervalMs
-        loopTimer = setTimeout(tick, delay)
-      })
+    const tick = async () => {
+      try {
+        await refresh()
+      } catch (error) {
+        // The rescheduling below is not inside this catch: sampling is the only thing
+        // that keeps the history alive, so a failed tick must not be the last one.
+        warn(`the balance poll rejected: ${message(error)}`)
+      }
+      if (loopStopped) return
+      const delay = cache.error === 'api-key-missing' ? 30000 : runtime.refreshIntervalMs
+      loopTimer = setTimeout(tick, delay)
     }
     loopTimer = setTimeout(tick, 500)
   }
@@ -1035,23 +1050,28 @@ export function apply(ctx, config) {
           res.end()
           return
         }
-        if (!loaded) await ready
-        const url = new URL(req.url ?? '/dsh-balance', 'http://127.0.0.1')
-        const payload = buildPayload(
-          url.searchParams.get('sessionId') ?? '',
-          requestZone(url.searchParams.get('zone')),
-        )
         if (req.method === 'HEAD') {
+          // A probe of the endpoint, not a read of it: the answer is a status and no
+          // body, so the ledger, the tariff windows and the rate table are not built.
           res.writeHead(200, { 'Cache-Control': 'no-store' })
           res.end()
           return
         }
-        sendJson(res, 200, payload)
+        if (!loaded) await ready
+        const url = new URL(req.url ?? '/dsh-balance', 'http://127.0.0.1')
+        sendJson(res, 200, buildPayload(
+          url.searchParams.get('sessionId') ?? '',
+          requestZone(url.searchParams.get('zone')),
+        ))
       },
     }), 'dsh-balance: read route')
 
     postRoute('/dsh-balance/refresh', 'dsh-balance: refresh route', async (body, res) => {
       await refresh()
+      // The same wait the read route does. A poll that found no key returns before its
+      // own wait for the load, and this route used to answer from an empty in-memory
+      // history while the log on disk held months of samples.
+      if (!loaded) await ready
       sendJson(res, 200, buildPayload(''))
     }, { lenient: true })
 
@@ -1095,14 +1115,20 @@ export function apply(ctx, config) {
         }
         if (!loaded) await ready
         // A tree can be wide and every child is read from its own log, so the walk
-        // is cancellable: the reader closing the view stops the work on the Host.
+        // is cancellable: the reader closing the view stops the work on the Host. The
+        // signal is the response's own `close` and only while nothing was written yet:
+        // on the request, `close` means the request body is done being read, which on
+        // a GET is immediately, so a cancel there either fires a millisecond into the
+        // walk or never fires at all.
         const abort = new AbortController()
-        const cancel = () => abort.abort()
-        req.on?.('close', cancel)
+        const cancel = () => {
+          if (!res.writableEnded) abort.abort()
+        }
+        res.on?.('close', cancel)
         try {
           sendJson(res, 200, await childrenPayloadOf(sessionId, url.searchParams.get('full') === '1', abort.signal))
         } finally {
-          req.off?.('close', cancel)
+          res.off?.('close', cancel)
         }
       },
     }), 'dsh-balance: session cost children route')
@@ -1269,7 +1295,10 @@ function readJsonBody(req, limitBytes = 1e6, timeoutMs = 10000) {
     req.on('data', (chunk) => {
       if (settled) return
       body += chunk
-      if (body.length > limitBytes) {
+      // Bytes, not string length: `length` counts UTF-16 code units, so multi-byte
+      // text would have got three quarters of a megabyte past the limit per character
+      // and a 1 MB route would have accepted several megabytes of it.
+      if (Buffer.byteLength(body) > limitBytes) {
         req.destroy?.()
         finish(reject, new Error('payload too large'))
       }
