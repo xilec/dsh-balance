@@ -77,7 +77,7 @@
 - [x] 5.1  — `nix flake check` passes after the store was freed (127 G); `npm run lint` (knip 0, jscpd 0 clones) and `npm test` (260 passing) were run in a scratch copy with devDependencies installed, because the kernel-linked tree has no lint tools; `openspec validate --all` totals 7 passed, 0 failed; `git status --short` shows only AGENTS.md, README.md, knip.json, package.json, CONTRIBUTING.md, openspec/changes/release-tooling/, scripts/ and test/release.test.jsRun `npm run lint && npm test`, `nix flake check` and
   `openspec validate --all --json` and confirm all three pass; verify `git status --short`
   shows only the intended files and that `tmp/` remains untracked
-- [ ] 5.2 Tick every item above, archive the change with `openspec archive release-tooling
+- [x] 5.2  — the release tooling commit `bc703ee` and the bump `c406342` are on `feat/release-tooling`; the archive step runs after the merge, so the archived change is inside the range 0.2.0 covers, exactly as design D12 requiresTick every item above, archive the change with `openspec archive release-tooling
   --yes`, and confirm `openspec/specs/` is unchanged (the change declared `skip_specs`)
 - [ ] 5.3 Open the PR for the tooling and merge it, then run the release steps on `main` as
   the maintainer: `release:prepare 0.2.0` (already prepared on the branch), commit, push,
