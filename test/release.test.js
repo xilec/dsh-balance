@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  checkRefusals, ghReleaseArgs, notAheadReason, notCurrentReason, rewriteVersionIn, slugFromOrigin, VERSION_PLACES,
+  checkRefusals, dirtyFromStatus, ghReleaseArgs, notAheadReason, notCurrentReason, rewriteVersionIn, slugFromOrigin,
+  VERSION_PLACES,
 } from '../scripts/release.mjs'
 import {
   compareVersions, extractWhatChanges, extractWhy, humanizeChangeName, parseVersion, renderNotes,
@@ -173,18 +174,18 @@ test('a rewrite writes a longer version without shifting the line around it', ()
 })
 
 test('the check refuses a mismatched version, a dirty tree and an old version', () => {
-  const ready = { current: '0.2.0', lastTag: 'v0.1.0', tagExists: false, dirty: [] }
+  const ready = { current: '0.2.0', lastTag: 'v0.1.0', tagExists: null, dirty: [] }
   assert.deepEqual(checkRefusals(ready), [])
   assert.deepEqual(
     checkRefusals({ ...ready, current: null }),
     ['the three version places do not all carry the same x.y.z version'],
   )
   assert.deepEqual(
-    checkRefusals({ ...ready, dirty: ['src/index.js', 'tmp/'] }),
-    ['uncommitted changes outside tmp/: src/index.js, tmp/'],
+    checkRefusals({ ...ready, dirty: ['src/index.js'] }),
+    ['uncommitted changes outside tmp/: src/index.js'],
   )
   assert.deepEqual(
-    checkRefusals({ ...ready, tagExists: true }),
+    checkRefusals({ ...ready, tagExists: '0.2.0' }),
     ['the tag v0.2.0 already exists'],
   )
   assert.deepEqual(
@@ -196,6 +197,14 @@ test('the check refuses a mismatched version, a dirty tree and an old version', 
     [],
     'the first release has no tag to be ahead of',
   )
+})
+
+test('the status dump is parsed into paths, and tmp/ is the one exemption', () => {
+  assert.deepEqual(dirtyFromStatus('?? tmp/release-notes-0.2.0.md\0 M src/index.js\0'), ['src/index.js'])
+  assert.deepEqual(dirtyFromStatus('?? tmp/x.md\0'), [], 'a notes draft never blocks a release')
+  assert.deepEqual(dirtyFromStatus('A  scripts/release.mjs\0M  client/client.js\0'), ['scripts/release.mjs', 'client/client.js'])
+  assert.deepEqual(dirtyFromStatus(''), [])
+  assert.deepEqual(dirtyFromStatus('?? tmps/x.md\0'), ['tmps/x.md'], 'a directory that only starts with tmp is not tmp')
 })
 
 test('a remote URL gives the owner and name, or nothing', () => {
@@ -216,6 +225,7 @@ test('prepare only moves the version forward', () => {
 
 test('publish only tags the version the tree already carries', () => {
   assert.equal(notCurrentReason('0.2.0', '0.2.0'), null)
+  assert.equal(notCurrentReason('0.2.0', '0.2.0', false), 'HEAD is not on origin/main — push it and let CI review it before releasing')
   assert.equal(notCurrentReason('0.3.0', '0.2.0'), 'the tree is at 0.2.0, not 0.3.0 — prepare it first')
   assert.equal(notCurrentReason('0.1.0', '0.2.0'), 'the tree is at 0.2.0, not 0.1.0 — prepare it first')
   assert.equal(notCurrentReason('0.2.0', null), 'the three version places do not all carry the same x.y.z version')

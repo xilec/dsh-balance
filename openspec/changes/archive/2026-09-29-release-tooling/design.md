@@ -129,10 +129,13 @@ feeds them strings; no test needs a repository. This is also what keeps `knip` q
 files are entries, and their exports are used by the tests.
 
 **D9 — `knip.json` gains `scripts/*.mjs` as an entry.** Without it, the new files are outside
-`project` and unreferenced, which the `files` rule reports. Adding them as entries (not
-`ignore`) keeps the `exports` rule honest: a leftover exported helper fails lint. The
-`binaries` rule accepts `node` (a Node built-in), and the new `package.json` scripts
-therefore need no allow-list entry.
+`project` and unreferenced, which the `files` rule reports. The `binaries` rule accepts `node`
+(a Node built-in), and the new `package.json` scripts therefore need no allow-list entry.
+*Corrected after review:* this was first written as "a leftover exported helper fails lint",
+which knip does not do for entry files — its default `includeEntryExports` is false, so the
+`exports` rule stays quiet about exports that only the file itself uses. The guard against
+those is `test/release.test.js`, not knip; enabling `includeEntryExports` would be a separate
+decision, because the six internal-only exports would then have to lose their `export`.
 
 **D10 — Missing lint tools are a clear failure, not a skip.** `prepare` runs `npm run lint`
 through the npm script, and if it fails it prints that `npm run ci` needs the dev

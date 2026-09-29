@@ -38,25 +38,29 @@ places — `package.json`, `src/index.js`, `client/client.js` — and the script
 only supported way to move them. When the user asks to cut a release, work in this order and
 stop where a draft is required:
 
-1. `npm run release:check -- <version>` — refuses a mismatched version, a dirty tree or an
-   existing `v<version>`. Fix what it names rather than working around it.
+1. `npm run release:check -- <version>` — refuses a mismatched version, a dirty tree, an
+   existing `v<version>` or a version at or behind the last tag. Fix what it names rather
+   than working around it. A non-zero exit means it found a problem, not that it broke.
 2. `npm run release:prepare -- <version>` — writes the version into the three places, runs
    `npm run lint` and `npm test`, prints a draft commit message. It does not commit. In a
    kernel-linked development tree the lint tools are absent, so this fails with a message
    about `npm ci --ignore-scripts`; that is the rule, not an obstacle to bypass — do the
    work in a scratch copy under `./tmp/` with its own `node_modules` when the tools are
    needed, never by replacing the kernel symlink in the working tree.
-3. `npm run release:notes` — writes the notes draft to `tmp/release-notes-<version>.md` from
+3. Commit the bump with the drafted message, **show it first**, then push. The bump has to
+   be on `origin/main` before anything is published; `publish` refuses a commit that is not.
+4. `npm run release:notes` — writes the notes draft to `tmp/release-notes-<version>.md` from
    the archived OpenSpec changes in the range since the last tag plus the remaining commits.
    **Show the file to the user and wait for approval.** It is prose written for the upgrade
-   decision, not for the change record: cut the noise, keep the numbers.
-4. Commit the bump with the drafted message, **show it first**, then push the branch.
+   decision, not for the change record: cut the noise, keep the numbers. Regenerate it if
+   the merge added commits of its own.
 5. `npm run release:publish -- <version>` — prints the notes and the exact `gh` command and
-   refuses to act. Review, then re-run with `--yes`. It creates the tag and the release;
-   push the tag with `git push origin v<version>` afterwards.
+   refuses to act. Review, then re-run with `--yes`. It creates the tag and the release in
+   one step (`gh` creates the tag on the remote and pushes it), so there is no tag to push
+   afterwards; `git fetch --tags` afterwards to see it locally.
 6. Report the release URL and stop.
 
-Nothing in a release skips the draft steps: step 3 is a GitHub-bound text and step 4 is a
+Nothing in a release skips the draft steps: step 4 is a GitHub-bound text and step 3 is a
 commit, so both wait for the user, even when the feature that precedes them was confirmed
 and the autonomous-finish rule above applies. The rule covers finishing a *change*; a
 release publishes a *version*, and that is a separate decision. Contributors who are not

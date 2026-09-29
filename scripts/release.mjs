@@ -72,21 +72,38 @@ function repoRoot() {
   return run('git', ['rev-parse', '--show-toplevel'])
 }
 
-/** Whether a path outside `tmp/` carries uncommitted changes. */
-function dirtyPaths() {
-  const status = run('git', ['status', '--porcelain'])
+/**
+ * The uncommitted paths of a `git status --porcelain` dump, minus `tmp/`.
+ *
+ * Pure, because the `tmp/` exemption is the one thing keeping a notes draft
+ * from blocking a release, and that has to be testable. The status is read with
+ * paths relative to the repository root (`-z`, no quoting, no cwd sensitivity),
+ * so the `tmp/` test here is the same test a caller from any directory gets.
+ */
+export function dirtyFromStatus(status) {
   return status
-    .split('\n')
-    .map((line) => line.replace(/^.{1,2}\s+/, '').trim())
+    .split('\0')
+    .map((entry) => entry.replace(/^.{1,2}\s+/, '').trim())
     .filter((path) => path !== '' && !path.startsWith('tmp/'))
 }
 
-/** A one-line reason to refuse, or null when the repository may be released. */
+/** Whether a path outside `tmp/` carries uncommitted changes. */
+function dirtyPaths(root) {
+  return dirtyFromStatus(run('git', ['-C', root, 'status', '--porcelain', '-z']))
+}
+
+/**
+ * A one-line reason to refuse, or null when the repository may be released.
+ *
+ * `tagExists` carries the version it was looked up for, so the message names
+ * the version that is actually tagged rather than the one the tree happens to
+ * carry.
+ */
 export function checkRefusals({ current, lastTag: tag, tagExists, dirty }) {
   const problems = []
   if (current === null) problems.push('the three version places do not all carry the same x.y.z version')
   if (dirty.length > 0) problems.push(`uncommitted changes outside tmp/: ${dirty.join(', ')}`)
-  if (tagExists) problems.push(`the tag v${current} already exists`)
+  if (tagExists !== null && tagExists !== false) problems.push(`the tag v${tagExists} already exists`)
   if (current !== null) {
     const order = compareVersions(current, tag === null ? '0.0.0' : tag.replace(/^v/, ''))
     if (order !== null && order <= 0) problems.push(`${current} is not ahead of the last tag ${tag}`)
@@ -98,9 +115,12 @@ export function checkRefusals({ current, lastTag: tag, tagExists, dirty }) {
  * Everything a release step needs to know, read from the repository.
  *
  * `versions` is the version each place carries, keyed by file, so a mismatch is
- * reported as such instead of being silently normalized.
+ * reported as such instead of being silently normalized. `tagExists` is the
+ * version whose tag exists — the one being released when the caller names it,
+ * otherwise the version in the tree, because that is the one a release would
+ * otherwise duplicate.
  */
-export function inspect(root) {
+export function inspect(root, requested = null) {
   const versions = {}
   for (const place of VERSION_PLACES) {
     const text = readFileSync(join(root, place.file), 'utf8')
@@ -108,15 +128,15 @@ export function inspect(root) {
     versions[place.file] = match === null ? null : match[place.group]
   }
   const found = [...new Set(Object.values(versions))]
-  const tag = lastTag()
   const current = found.length === 1 && found[0] !== null ? found[0] : null
-  const manifestVersion = versions['package.json']
+  const tag = lastTag()
+  const tagged = requested ?? versions['package.json']
   return {
     versions,
     current,
     tag,
-    tagExists: manifestVersion !== null && run('git', ['tag', '--list', `v${manifestVersion}`]) !== '',
-    dirty: dirtyPaths(),
+    tagExists: tagged !== null && run('git', ['-C', root, 'tag', '--list', `v${tagged}`]) !== '' ? tagged : null,
+    dirty: dirtyPaths(root),
   }
 }
 
@@ -151,13 +171,13 @@ export function ghReleaseArgs({ version, slug, title, notes, sha }) {
 /**
  * Report the state on stdout and return the reasons to refuse, if any.
  *
- * The requested version is deliberately not judged here: `check` only answers
- * "is the tree releasable", and whether a version is ahead of the current one
- * (`prepare`) or equal to it (`publish`) is a question each subcommand asks for
- * itself.
+ * The requested version is not judged here beyond the tag lookup `inspect`
+ * already made for it: whether a version is ahead of the current one (`prepare`)
+ * or equal to it and on `origin/main` (`publish`) is a question each subcommand
+ * asks for itself.
  */
 function report(state) {
-  const { label, tag } = releaseRange()
+  const { label, tag } = releaseRange({ warn: (message) => process.stderr.write(`release: ${message}\n`) })
   const lines = [
     `version: ${state.current ?? `mismatched (${JSON.stringify(state.versions)})`}`,
     `last tag: ${tag ?? 'none'}`,
@@ -183,12 +203,31 @@ export function notAheadReason(version, current) {
   return null
 }
 
-/** The reason `version` cannot be published from this tree, or null when it can. */
-export function notCurrentReason(version, current) {
+/**
+ * The reason `version` cannot be published from this tree, or null when it can.
+ *
+ * A commit is publishable when `origin/main` contains it: publishing an
+ * unreviewed or unpushed commit would put it in front of everyone at once, and
+ * `gh` pushes the tag itself.
+ */
+export function notCurrentReason(version, current, onOriginMain = true) {
   if (parseVersion(version) === null) return `${version} is not an x.y.z version`
   if (current === null) return 'the three version places do not all carry the same x.y.z version'
   if (version !== current) return `the tree is at ${current}, not ${version} — prepare it first`
+  if (!onOriginMain) return 'HEAD is not on origin/main — push it and let CI review it before releasing'
   return null
+}
+
+/**
+ * Whether the repository has a remote `main`, and whether HEAD is in it.
+ *
+ * A clone without `origin/main` (a fresh local repository, a detached checkout)
+ * cannot answer the question, and the answer `true` there is the permissive one:
+ * the absence of evidence is not a reason to refuse a release.
+ */
+function onOriginMain(root) {
+  if (tryRun('git', ['-C', root, 'rev-parse', '--verify', 'origin/main']) === null) return true
+  return tryRun('git', ['-C', root, 'merge-base', '--is-ancestor', 'HEAD', 'origin/main']) !== null
 }
 
 function fail(message) {
@@ -196,7 +235,7 @@ function fail(message) {
   process.exit(1)
 }
 
-/** `--notes <file>` / `--yes` / `--dry-run`, nothing else. */
+/** `--notes <file>` / `--yes` / `--dry-run`, nothing else — an unknown flag is a typo, not a no-op. */
 function parseArgs(argv) {
   const options = { yes: false, dryRun: false, notes: null }
   const rest = []
@@ -205,6 +244,7 @@ function parseArgs(argv) {
     if (arg === '--yes') options.yes = true
     else if (arg === '--dry-run') options.dryRun = true
     else if (arg === '--notes') options.notes = argv[++i] ?? fail('--notes needs a file')
+    else if (arg.startsWith('-')) fail(`unknown option: ${arg} — check, prepare and publish take --notes, --yes and --dry-run only`)
     else rest.push(arg)
   }
   return { options, rest }
@@ -212,7 +252,7 @@ function parseArgs(argv) {
 
 function check(version) {
   if (version !== null && parseVersion(version) === null) fail(`not a version: ${version}`)
-  const state = inspect(repoRoot())
+  const state = inspect(repoRoot(), version)
   if (report(state).length > 0) process.exit(1)
   return state
 }
@@ -220,7 +260,7 @@ function check(version) {
 function prepare(version) {
   if (version === null) fail('prepare needs a version: npm run release:prepare -- 0.2.0')
   const root = repoRoot()
-  const state = inspect(root)
+  const state = inspect(root, version)
   const behind = notAheadReason(version, state.current)
   if (behind !== null) fail(behind)
   if (report(state).length > 0) fail('nothing was written')
@@ -257,23 +297,29 @@ function prepare(version) {
 function publish(version, options) {
   if (version === null) fail('publish needs a version: npm run release:publish -- 0.2.0')
   const root = repoRoot()
-  const state = inspect(root)
-  const mismatch = notCurrentReason(version, state.current)
+  const state = inspect(root, version)
+  const mismatch = notCurrentReason(version, state.current, onOriginMain(root))
   if (mismatch !== null) fail(mismatch)
-  if (report(state).length > 0) fail('nothing was tagged')
-  const notes = resolve(options.notes ?? join('tmp', `release-notes-${version}.md`))
+  if (report(state).length > 0) fail('nothing was published')
+  const notes = options.notes === null ? join(root, 'tmp', `release-notes-${version}.md`) : resolve(options.notes)
   let body
   try {
     body = readFileSync(notes, 'utf8')
   } catch {
     fail(`no notes file at ${notes} — write one with: npm run release:notes -- --out ${notes}`)
   }
+  if (body.trim() === '') fail(`the notes file ${notes} is empty`)
+  if (body.includes('<!-- DRAFT')) {
+    fail(`the notes file ${notes} still carries its DRAFT marker — it is a draft, not a release`)
+  }
   const slug = repoSlug()
   if (slug === null) fail('no GitHub repository to publish to: set GH_REPO or add an origin remote')
   const title = `dsh-balance ${version}`
-  const args = ghReleaseArgs({ version, slug, title, notes, sha: run('git', ['rev-parse', 'HEAD']) })
+  const sha = run('git', ['-C', root, 'rev-parse', 'HEAD'])
+  const args = ghReleaseArgs({ version, slug, title, notes, sha })
   process.stdout.write([
     `repository: ${slug}`,
+    `commit: ${sha}`,
     `notes: ${notes}`,
     '',
     '--- release notes ---',
@@ -291,14 +337,16 @@ function publish(version, options) {
     process.exit(1)
   }
   if (tryRun('gh', ['auth', 'status']) === null) fail('gh is not authenticated or not installed — run `gh auth login`')
-  run('git', ['tag', `v${version}`, '-m', title])
+  // No local `git tag` first: `gh release create` creates the tag on the remote
+  // and pushes it, so a local tag made first only ever leaves a half-release
+  // behind when gh then fails.
   try {
     process.stdout.write(`${run('gh', args)}\n`)
   } catch (error) {
-    process.stdout.write(`gh failed, the tag v${version} exists; delete it with: git tag -d v${version}\n${error.stderr ?? error.message}\n`)
+    process.stdout.write(`gh failed, nothing was tagged: ${error.stderr ?? error.message}\n`)
     process.exit(1)
   }
-  process.stdout.write(`\nreleased ${version}: push the tag with \`git push origin v${version}\`\n`)
+  process.stdout.write(`\nreleased ${version}: the tag is on the remote; fetch it with \`git fetch --tags\`\n`)
 }
 
 function main() {

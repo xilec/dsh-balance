@@ -41,6 +41,15 @@ function git(...args) {
   return execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
+/** The same, but a command that fails or is absent yields null instead of throwing. */
+function tryGit(...args) {
+  try {
+    return git(...args)
+  } catch {
+    return null
+  }
+}
+
 /** The repository root, so the pathspecs and the file reads work from anywhere. */
 function repoRoot() {
   return git('rev-parse', '--show-toplevel')
@@ -171,7 +180,7 @@ const isBreaking = (bullets) => bullets.some((bullet) => bullet.includes('**BREA
  * @param input.date - the release date, `YYYY-MM-DD`.
  * @param input.range - the git range the notes cover, for the reader's benefit.
  * @param input.changes - `{name, why, bullets}` per archived change, in order.
- * @param input.commits - commit subjects, already stripped of their prefixes.
+ * @param input.commits - commit subjects; their conventional prefixes are stripped here.
  * @returns the markdown of the draft.
  */
 export function renderNotes({ version, date, range, changes, commits }) {
@@ -203,14 +212,24 @@ export function renderNotes({ version, date, range, changes, commits }) {
   return `${out.join('\n')}\n`
 }
 
-/** The last tag, or null when the repository has none. */
-export function lastTag() {
-  try {
-    const tag = git('describe', '--tags', '--abbrev=0')
-    return tag === '' ? null : tag
-  } catch {
+/**
+ * The last tag, or null when the repository has none.
+ *
+ * A repository with no tags and a git that failed are told apart: a shallow
+ * clone, or one cloned without tags, would otherwise be reported as "the whole
+ * history" with a confidence the notes do not deserve. `warn` carries the
+ * complaint to whoever is reading the output.
+ */
+export function lastTag({ warn = null } = {}) {
+  const described = tryGit('describe', '--tags', '--abbrev=0')
+  if (described !== null) return described === '' ? null : described
+  const listed = tryGit('tag', '--list')
+  if (listed === null) {
+    if (warn) warn('git could not be read, so the range below may be wrong')
     return null
   }
+  if (listed === '' && warn) warn('this clone carries no tags, so the range below is the whole history')
+  return null
 }
 
 /**
@@ -221,8 +240,8 @@ export function lastTag() {
  * the whole history, and the label says so. The label is what the reader of the
  * draft sees, so the first release cannot look like it covered a range.
  */
-export function releaseRange() {
-  const tag = lastTag()
+export function releaseRange({ warn = null } = {}) {
+  const tag = lastTag({ warn })
   if (tag) return { gitRange: `${tag}..HEAD`, label: `${tag}..HEAD`, tag }
   return { gitRange: 'HEAD', label: 'the whole history (no tag yet)', tag: null }
 }
@@ -256,7 +275,7 @@ export function archivesInRange(gitRange) {
  */
 export function archiveOrder() {
   const order = new Map()
-  gitLogNames('HEAD', 'A', ARCHIVE_DIR)
+  gitLogNames('HEAD', 'AM', ARCHIVE_DIR)
     .split('\n')
     .map((line) => line.trim().match(new RegExp(`^${ARCHIVE_DIR}/([^/]+)/`)))
     .filter((match) => match !== null)
@@ -268,7 +287,7 @@ export function archiveOrder() {
 
 /** The paths under `path` that a diff filter reports, in commit order. */
 function gitLogNames(gitRange, diffFilter, path) {
-  return git('log', gitRange, '--name-only', `--diff-filter=${diffFilter}`, '--format=', '--', `:/${path}`)
+  return git('log', gitRange, '--name-only', `-M`, `--diff-filter=${diffFilter}`, '--format=', '--', `:/${path}`)
 }
 
 /**
@@ -291,7 +310,7 @@ function currentVersion() {
 
 /** A draft assembled from the repository as it stands. */
 export function buildDraft({ version, date }) {
-  const { gitRange, label } = releaseRange()
+  const { gitRange, label } = releaseRange({ warn: (message) => process.stderr.write(`release-notes: ${message}\n`) })
   const root = repoRoot()
   const order = archiveOrder()
   const changes = archivesInRange(gitRange)
@@ -344,13 +363,15 @@ function main() {
   if (options.stdout) {
     process.stdout.write(draft.notes)
   } else {
-    const target = resolve(options.out ?? join('tmp', `release-notes-${version}.md`))
+    const target = options.out === null ? join(repoRoot(), 'tmp', `release-notes-${version}.md`) : resolve(options.out)
     mkdirSync(dirname(target), { recursive: true })
     writeFileSync(target, draft.notes)
     process.stdout.write(`${target}\n`)
   }
   const names = draft.changes.length === 0 ? 'none' : draft.changes.map((change) => humanizeChangeName(change.name)).join(', ')
-  process.stdout.write([
+  // The summary goes to stderr, always: with `--stdout` the markdown is being
+  // piped somewhere that would publish the summary with it.
+  process.stderr.write([
     `version ${version}, range ${draft.label}`,
     `archived changes: ${names}`,
     `other commits: ${draft.commits.length}`,

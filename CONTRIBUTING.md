@@ -41,10 +41,13 @@ version, a dirty tree or an existing tag stops the release with the reason named
 
 | Command | What it does | What it refuses |
 | --- | --- | --- |
-| `npm run release:check -- 0.3.0` | Reports the version the three places carry, the last tag and the range a release would cover | Exits non-zero on a mismatch, an uncommitted change outside `tmp/`, an existing `v0.3.0` |
-| `npm run release:notes` | Writes a **draft** to `tmp/release-notes-0.3.0.md`: a section per archived OpenSpec change (its `Why` and its `What Changes` bullets) plus the remaining commits | Nothing — it only reads git and the archive |
-| `npm run release:prepare -- 0.3.0` | Writes `0.3.0` into the three places, runs `npm run lint` and `npm test`, prints a draft commit message | A version that is not `x.y.z`, is not ahead of the current one, or any failing check |
-| `npm run release:publish -- 0.3.0` | Creates the tag `v0.3.0` and the GitHub Release from the reviewed notes file | Runs the checks again, requires the tree to already carry the version, a clean tree, a notes file and an authenticated `gh`; and does nothing at all without `--yes` |
+| `npm run release:check -- 0.3.0` | Reports the version the three places carry, the last tag and the range a release would cover | Exit status 1 on a mismatch, an uncommitted change outside `tmp/`, an existing `v0.3.0`, or a version at or behind the last tag |
+| `npm run release:notes` | Writes a **draft** to `tmp/release-notes-0.3.0.md`: a section per archived OpenSpec change (its `Why` and its `What Changes` bullets) plus the remaining commits | Nothing — it only reads git and the archive, and writes under the gitignored `tmp/` |
+| `npm run release:prepare -- 0.3.0` | Writes `0.3.0` into the three places, runs `npm run lint` and `npm test`, prints a draft commit message | A version that is not `x.y.z`, is not ahead of the current one, an existing `v0.3.0`, an unknown flag, or any failing check |
+| `npm run release:publish -- 0.3.0` | Creates the tag `v0.3.0` and the GitHub Release from the reviewed notes file | Runs the checks again, requires the tree to already carry the version, a clean tree, a commit that is on `origin/main`, a non-empty notes file without its `DRAFT` marker, and an authenticated `gh`; and does nothing at all without `--yes` |
+
+Every refusal is a non-zero exit status: `npm run release:check` reporting problems is the
+command working, not failing.
 
 ### Cutting a release
 
@@ -52,17 +55,22 @@ version, a dirty tree or an existing tag stops the release with the reason named
 npm run release:check   -- 0.3.0     # is the tree releasable?
 npm run release:prepare -- 0.3.0     # writes the version, runs lint and tests
 git commit -am "Release 0.3.0"       # the message prepare printed
-git push
+git push                             # the bump has to be on origin/main before a release
 npm run release:notes                # writes tmp/release-notes-0.3.0.md
 #   ← edit it: it is a draft. Keep what a reader deciding to upgrade needs.
 npm run release:publish -- 0.3.0    # prints the notes and the gh command, changes nothing
 npm run release:publish -- 0.3.0 --yes
-git push origin v0.3.0
 ```
 
-`release:publish` prints the notes and the exact `gh release create` command before it acts,
-so `--dry-run` (or simply omitting `--yes`) is enough to review what would happen. It targets
-`origin` by default; set `GH_REPO=owner/name` to publish elsewhere.
+The notes are drafted after the bump is pushed so the range is exactly what the release
+covers; regenerate them after the merge if the merge added commits of its own.
+
+`release:publish` creates the tag and the release in one step — `gh` creates the tag on the
+remote and pushes it — so there is no `git push origin v0.3.0` afterwards. It prints the
+notes and the exact `gh release create` command before it acts, so `--dry-run` (or simply
+omitting `--yes`) is enough to review what would happen. It targets `origin` by default; set
+`GH_REPO=owner/name` to publish elsewhere, and `git fetch --tags` afterwards to see the tag
+locally.
 
 The notes come from the OpenSpec archive, so they are as good as the proposals behind them.
 A change with no archived proposal shows up only as a commit subject — write the prose the
