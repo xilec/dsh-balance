@@ -4,15 +4,16 @@
  * Three subcommands, one job each, in the order they are meant to be run:
  *
  *   check [version]    is the repository ready to be released as <version>?
- *   prepare <version>  write that version into the three places that carry it,
+ *   prepare <version>  write that version into the files that carry it,
  *                      then run the same lint and tests CI runs
  *   publish <version>  tag the reviewed commit and open the GitHub Release
  *
- * The version of the plugin is written in three files — `package.json`,
- * `src/index.js` and `client/client.js` — because the panel footer reports the
- * Host and client versions separately. A release that bumps only the manifest
- * produces a plugin that claims one version and behaves as another, so every
- * step here reads all three and refuses to act when they disagree.
+ * The version of the plugin is written in four files — `package.json`,
+ * `package-lock.json`, `src/index.js` and `client/client.js`. The first two keep
+ * the manifest npm installs, the last two because the panel footer reports the
+ * Host and client versions separately. A release that bumps only some of them
+ * produces a tree that claims one version and behaves as another, so every step
+ * here reads all of them and refuses to act when they disagree.
  *
  * Nothing in this file commits, pushes or publishes by itself. `prepare` stops
  * after printing a draft commit message, and `publish` needs both a reviewed
@@ -24,11 +25,30 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { compareVersions, lastTag, parseVersion, releaseRange } from './release-notes.mjs'
 
-/** The files that carry the version, and the one line in each that holds it. */
+/**
+ * The files that carry the version, and the one line in each that holds it.
+ *
+ * A file may list more than one pattern, and every one of them has to match
+ * exactly once: `package-lock.json` holds the root package's version twice — next
+ * to `lockfileVersion` at the top, and in the `packages[""]` entry — and npm keeps
+ * the two equal, so a rewrite that moved one and not the other would trade a drift
+ * between two files for a drift inside one. Every other `version` in that file
+ * belongs to a dependency, which is what the two anchors are for.
+ */
 export const VERSION_PLACES = [
-  { file: 'package.json', pattern: /("version"\s*:\s*")(\d+\.\d+\.\d+)(")/, group: 2 },
-  { file: 'src/index.js', pattern: /const VERSION = '(\d+\.\d+\.\d+)'/, group: 1 },
-  { file: 'client/client.js', pattern: /const VERSION = '(\d+\.\d+\.\d+)'/, group: 1 },
+  { file: 'package.json', patterns: [/"version"\s*:\s*"(\d+\.\d+\.\d+)"/] },
+  {
+    file: 'package-lock.json',
+    patterns: [
+      // The root manifest's own version, written by npm next to lockfileVersion.
+      /"version"\s*:\s*"(\d+\.\d+\.\d+)"\s*,\s*"lockfileVersion"/,
+      // The same version again in the root entry of `packages`; the `name` between
+      // them is what says this entry is the project and not a dependency.
+      /"packages"\s*:\s*\{\s*""\s*:\s*\{[^{}]*?"name"\s*:\s*"[^"]*",\s*"version"\s*:\s*"(\d+\.\d+\.\d+)"/,
+    ],
+  },
+  { file: 'src/index.js', patterns: [/const VERSION = '(\d+\.\d+\.\d+)'/] },
+  { file: 'client/client.js', patterns: [/const VERSION = '(\d+\.\d+\.\d+)'/] },
 ]
 
 /** Run a command, return its trimmed stdout, and throw with its stderr on failure. */
@@ -101,7 +121,7 @@ function dirtyPaths(root) {
  */
 export function checkRefusals({ current, lastTag: tag, tagExists, dirty }) {
   const problems = []
-  if (current === null) problems.push('the three version places do not all carry the same x.y.z version')
+  if (current === null) problems.push('the version files do not all carry the same x.y.z version')
   if (dirty.length > 0) problems.push(`uncommitted changes outside tmp/: ${dirty.join(', ')}`)
   if (tagExists !== null && tagExists !== false) problems.push(`the tag v${tagExists} already exists`)
   if (current !== null) {
@@ -123,9 +143,7 @@ export function checkRefusals({ current, lastTag: tag, tagExists, dirty }) {
 export function inspect(root, requested = null) {
   const versions = {}
   for (const place of VERSION_PLACES) {
-    const text = readFileSync(join(root, place.file), 'utf8')
-    const match = text.match(place.pattern)
-    versions[place.file] = match === null ? null : match[place.group]
+    versions[place.file] = oneVersion(placeVersions(readFileSync(join(root, place.file), 'utf8'), place))
   }
   const found = [...new Set(Object.values(versions))]
   const current = found.length === 1 && found[0] !== null ? found[0] : null
@@ -141,20 +159,45 @@ export function inspect(root, requested = null) {
 }
 
 /**
- * Write `version` into one file's version line.
+ * The version each of a place's patterns finds, in order, or null for a pattern
+ * that does not match.
  *
- * Refuses when the line is not there exactly once: a version written twice in
- * one file is a fact this script would have to guess about, and guessing is how
- * a release ends up half-done.
+ * Every pattern ends on its version, which is what lets {@link rewriteVersionIn}
+ * place the new one without reformatting the line around it.
+ */
+export function placeVersions(text, place) {
+  return place.patterns.map((pattern) => {
+    const match = text.match(pattern)
+    return match === null ? null : match[1]
+  })
+}
+
+/**
+ * The single version a place carries, or null when its patterns disagree or are
+ * missing — the two ways a file can carry no usable version at all.
+ */
+function oneVersion(found) {
+  const distinct = new Set(found)
+  return distinct.size === 1 && !distinct.has(null) ? found[0] : null
+}
+
+/**
+ * Write `version` into one file's version lines, one per pattern.
+ *
+ * Refuses unless every pattern matches exactly once: a version written twice in
+ * one file, or a line this script cannot find, is a fact it would have to guess
+ * about, and guessing is how a release ends up half-done.
  */
 export function rewriteVersionIn(text, version, place) {
-  const counted = text.match(new RegExp(place.pattern.source, 'g')) ?? []
-  if (counted.length !== 1) {
-    throw new Error(`${place.file}: expected one version line, found ${counted.length}`)
+  const counted = place.patterns.reduce((sum, pattern) => sum + (text.match(new RegExp(pattern.source, 'g')) ?? []).length, 0)
+  if (counted !== place.patterns.length) {
+    throw new Error(`${place.file}: expected one version line per pattern (${place.patterns.length}), found ${counted}`)
   }
-  const match = text.match(place.pattern)
-  const at = match.index + match[0].lastIndexOf(match[place.group])
-  return text.slice(0, at) + version + text.slice(at + match[place.group].length)
+  return place.patterns.reduce((current, pattern) => {
+    const match = current.match(pattern)
+    const at = match.index + match[0].lastIndexOf(match[1])
+    return current.slice(0, at) + version + current.slice(at + match[1].length)
+  }, text)
 }
 
 /**
@@ -212,7 +255,7 @@ export function notAheadReason(version, current) {
  */
 export function notCurrentReason(version, current, onOriginMain = true) {
   if (parseVersion(version) === null) return `${version} is not an x.y.z version`
-  if (current === null) return 'the three version places do not all carry the same x.y.z version'
+  if (current === null) return 'the version files do not all carry the same x.y.z version'
   if (version !== current) return `the tree is at ${current}, not ${version} — prepare it first`
   if (!onOriginMain) return 'HEAD is not on origin/main — push it and let CI review it before releasing'
   return null

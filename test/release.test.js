@@ -1,8 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  checkRefusals, dirtyFromStatus, ghReleaseArgs, notAheadReason, notCurrentReason, rewriteVersionIn, slugFromOrigin,
-  VERSION_PLACES,
+  checkRefusals, dirtyFromStatus, ghReleaseArgs, notAheadReason, notCurrentReason, placeVersions, rewriteVersionIn,
+  slugFromOrigin, VERSION_PLACES,
 } from '../scripts/release.mjs'
 import {
   compareVersions, extractWhatChanges, extractWhy, humanizeChangeName, parseVersion, renderNotes,
@@ -13,6 +13,25 @@ const MANIFEST = '{\n  "name": "dsh-balance",\n  "version": "0.1.0",\n  "private
 const HOST = "import { z } from 'zod'\n\nconst VERSION = '0.1.0'\n"
 const CLIENT = "const VERSION = '0.1.0'\nexport { VERSION }\n"
 const place = (file) => VERSION_PLACES.find((known) => known.file === file)
+
+const LOCKFILE = `{
+  "name": "dsh-balance",
+  "version": "0.1.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "dsh-balance",
+      "version": "0.1.0",
+      "license": "MIT"
+    },
+    "node_modules/zod": {
+      "version": "4.4.3",
+      "resolved": "https://registry.npmjs.org/zod/-/zod-4.4.3.tgz"
+    }
+  }
+}
+`
 
 const PROPOSAL = `# Proposal
 
@@ -150,8 +169,13 @@ test('a release with only commits still reads as notes', () => {
   assert.match(notes, /## Other changes\n\n- a day that never ends\n/)
 })
 
-test('the version is written in exactly the three places the panel reads', () => {
-  assert.deepEqual(VERSION_PLACES.map((known) => known.file), ['package.json', 'src/index.js', 'client/client.js'])
+test('the version is written in every file that carries it, manifest and lockfile included', () => {
+  assert.deepEqual(VERSION_PLACES.map((known) => known.file), [
+    'package.json',
+    'package-lock.json',
+    'src/index.js',
+    'client/client.js',
+  ])
 })
 
 test('a rewrite touches one line and changes nothing else', () => {
@@ -163,9 +187,37 @@ test('a rewrite touches one line and changes nothing else', () => {
 })
 
 test('a rewrite refuses a file that does not carry the version once', () => {
-  assert.throws(() => rewriteVersionIn(MANIFEST, '0.2.0', place('src/index.js')), /no version line|expected one/)
+  assert.throws(() => rewriteVersionIn(MANIFEST, '0.2.0', place('src/index.js')), /expected one version line per pattern \(1\), found 0/)
   const twice = `const VERSION = '0.1.0'\nconst VERSION = '0.1.0'\n`
-  assert.throws(() => rewriteVersionIn(twice, '0.2.0', place('src/index.js')), /expected one version line, found 2/)
+  assert.throws(() => rewriteVersionIn(twice, '0.2.0', place('src/index.js')), /expected one version line per pattern \(1\), found 2/)
+})
+
+test('the lockfile root version comes along with the manifest', () => {
+  assert.deepEqual(placeVersions(LOCKFILE, place('package-lock.json')), ['0.1.0', '0.1.0'])
+  const rewritten = rewriteVersionIn(LOCKFILE, '0.2.0', place('package-lock.json'))
+  assert.deepEqual(placeVersions(rewritten, place('package-lock.json')), ['0.2.0', '0.2.0'])
+})
+
+test('the lockfile rewrite leaves every dependency version where it is', () => {
+  const rewritten = rewriteVersionIn(LOCKFILE, '0.2.0', place('package-lock.json'))
+  assert.match(rewritten, /"node_modules\/zod": \{\n      "version": "4\.4\.3"/)
+  assert.equal(
+    rewritten,
+    LOCKFILE.replace('"version": "0.1.0"', '"version": "0.2.0"').replace('"version": "0.1.0"', '"version": "0.2.0"'),
+  )
+})
+
+test('a lockfile whose root version cannot be found is refused, not guessed at', () => {
+  const noRootEntry = LOCKFILE.replace(/    "": \{[^}]*"version": "0\.1\.0",\n/, '')
+  assert.throws(
+    () => rewriteVersionIn(noRootEntry, '0.2.0', place('package-lock.json')),
+    /expected one version line per pattern \(2\), found 1/,
+  )
+  const noTopVersion = LOCKFILE.replace('  "version": "0.1.0",\n  "lockfileVersion"', '  "lockfileVersion"')
+  assert.throws(
+    () => rewriteVersionIn(noTopVersion, '0.2.0', place('package-lock.json')),
+    /expected one version line per pattern \(2\), found 1/,
+  )
 })
 
 test('a rewrite writes a longer version without shifting the line around it', () => {
@@ -178,7 +230,7 @@ test('the check refuses a mismatched version, a dirty tree and an old version', 
   assert.deepEqual(checkRefusals(ready), [])
   assert.deepEqual(
     checkRefusals({ ...ready, current: null }),
-    ['the three version places do not all carry the same x.y.z version'],
+    ['the version files do not all carry the same x.y.z version'],
   )
   assert.deepEqual(
     checkRefusals({ ...ready, dirty: ['src/index.js'] }),
@@ -228,7 +280,7 @@ test('publish only tags the version the tree already carries', () => {
   assert.equal(notCurrentReason('0.2.0', '0.2.0', false), 'HEAD is not on origin/main — push it and let CI review it before releasing')
   assert.equal(notCurrentReason('0.3.0', '0.2.0'), 'the tree is at 0.2.0, not 0.3.0 — prepare it first')
   assert.equal(notCurrentReason('0.1.0', '0.2.0'), 'the tree is at 0.2.0, not 0.1.0 — prepare it first')
-  assert.equal(notCurrentReason('0.2.0', null), 'the three version places do not all carry the same x.y.z version')
+  assert.equal(notCurrentReason('0.2.0', null), 'the version files do not all carry the same x.y.z version')
   assert.equal(notCurrentReason('0.2', '0.2.0'), '0.2 is not an x.y.z version')
 })
 
