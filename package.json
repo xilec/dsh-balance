@@ -23,7 +23,11 @@
     "lint:dead": "knip --no-config-hints",
     "lint:dup": "jscpd --min-tokens 60 --min-lines 10 --threshold 1 --reporters console --format javascript src client",
     "lint": "npm run lint:dead && npm run lint:dup",
-    "ci": "npm ci --ignore-scripts && npm run lint && npm test"
+    "ci": "npm ci --ignore-scripts && npm run lint && npm test",
+    "release:notes": "node scripts/release-notes.mjs",
+    "release:check": "node scripts/release.mjs check",
+    "release:prepare": "node scripts/release.mjs prepare",
+    "release:publish": "node scripts/release.mjs publish"
   },
   "engines": {
     "node": ">=22"

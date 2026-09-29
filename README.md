@@ -256,6 +256,7 @@ src/store.js          samples.ndjson and state.json on disk
 src/index.js          the Host plugin: sampler loop, HTTP routes
 client/client.js      the browser half: the readout, the peak chip, the panel
 test/                 node --test suite (no build step)
+scripts/              release tooling: the notes draft, and check/prepare/publish
 ```
 
 ```sh
@@ -284,6 +285,14 @@ purpose and is not scanned.
 
 GitHub Actions runs the suite, both lint checks and the flake package build on
 every push and pull request.
+
+## Releasing
+
+A release is a tag plus a GitHub Release, and the version is written in `package.json`,
+`src/index.js` and `client/client.js` together. There is no changelog in the tree: the
+notes live in the release, and `npm run release:notes` drafts them from the archived
+OpenSpec changes since the last tag. `CONTRIBUTING.md` has the commands, in order, and
+what each of them refuses to do.
 
 ## Sources
 
