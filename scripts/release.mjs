@@ -138,6 +138,17 @@ export function rewriteVersionIn(text, version, place) {
 }
 
 /**
+ * The arguments `gh release create` is called with.
+ *
+ * Kept apart from the printing and the call so a test can pin the exact list: a
+ * `gh gh …` slipped in here once, and the printed command read perfectly right
+ * while the executed one did not.
+ */
+export function ghReleaseArgs({ version, slug, title, notes, sha }) {
+  return ['release', 'create', `v${version}`, '--repo', slug, '--title', title, '--notes-file', notes, '--target', sha]
+}
+
+/**
  * Report the state on stdout and return the reasons to refuse, if any.
  *
  * The requested version is deliberately not judged here: `check` only answers
@@ -260,13 +271,7 @@ function publish(version, options) {
   const slug = repoSlug()
   if (slug === null) fail('no GitHub repository to publish to: set GH_REPO or add an origin remote')
   const title = `dsh-balance ${version}`
-  const command = [
-    'gh', 'release', 'create', `v${version}`,
-    '--repo', slug,
-    '--title', title,
-    '--notes-file', notes,
-    '--target', run('git', ['rev-parse', 'HEAD']),
-  ]
+  const args = ghReleaseArgs({ version, slug, title, notes, sha: run('git', ['rev-parse', 'HEAD']) })
   process.stdout.write([
     `repository: ${slug}`,
     `notes: ${notes}`,
@@ -275,7 +280,7 @@ function publish(version, options) {
     body.trimEnd(),
     '--- end of release notes ---',
     '',
-    `$ ${command.join(' ')}`,
+    `$ gh ${args.join(' ')}`,
   ].join('\n') + '\n')
   if (options.dryRun) {
     process.stdout.write('\ndry run: nothing was tagged or published\n')
@@ -288,7 +293,7 @@ function publish(version, options) {
   if (tryRun('gh', ['auth', 'status']) === null) fail('gh is not authenticated or not installed — run `gh auth login`')
   run('git', ['tag', `v${version}`, '-m', title])
   try {
-    process.stdout.write(`${run('gh', command)}\n`)
+    process.stdout.write(`${run('gh', args)}\n`)
   } catch (error) {
     process.stdout.write(`gh failed, the tag v${version} exists; delete it with: git tag -d v${version}\n${error.stderr ?? error.message}\n`)
     process.exit(1)
