@@ -257,6 +257,71 @@ test('compaction keeps every recent sample and one per hour before that', () => 
   assert.equal(kept.filter((s) => s.t < now - 7 * 24 * hour).length, 1) // all ten fall in one hour
 })
 
+test('thinned hours are the clock hours of the ledger\'s zone, not UTC ones', () => {
+  // Kolkata is +05:30, so a UTC hour covers 23:30 of one local day and 00:30 of the next:
+  // bucketing by UTC hour hands the bucket's last sample (00:25 local) to the next day and
+  // leaves the day before it without its own last half hour.
+  const zone = 'Asia/Kolkata'
+  const now = at('2026-09-30T12:00:00Z')
+  const samples = []
+  for (let i = 0; i < 288 * 2; i += 1) samples.push({ t: at('2026-09-20T00:00:00Z') + i * 5 * 60_000, total: i })
+  const kept = compactSamples(samples, { nowMs: now, keepDays: 7, zone })
+  const newestOfDay = new Map()
+  for (const one of kept) newestOfDay.set(dayKeyOf(one.t, zone), one)
+  const lastOfDay = new Map()
+  for (const one of samples) lastOfDay.set(dayKeyOf(one.t, zone), one)
+  assert.deepEqual([...newestOfDay.keys()], [...lastOfDay.keys()], 'every sampled day is still there')
+  for (const [key, newest] of newestOfDay) {
+    // One sample per clock hour, last of the hour: the newest sample of a day is therefore
+    // the newest sample that day ever had, and the day boundary survives the thinning.
+    assert.equal(newest.t, lastOfDay.get(key).t, `${key} keeps the last sample of its own last hour`)
+  }
+})
+
+test('a ledger over a full history builds no formatter per sample', () => {
+  const zone = 'Europe/Berlin'
+  const now = at('2026-09-30T12:00:00Z')
+  const count = 35_000 // 120 days at the 5-minute cadence of the default keepDays
+  const samples = []
+  for (let i = 0; i < count; i += 1) {
+    samples.push({ t: now - (count - i) * 5 * 60_000, total: 100 - (i % 97) * 0.01, currency: 'CNY' })
+  }
+  // What this protects against is the per-call `new Intl.DateTimeFormat(...)`: the same build
+  // spent 2.8 s here before the formatters were cached, and 15 s at the sample cap, and the
+  // 15 s browser poll runs it in the dsh process that every pane shares. The count is read
+  // rather than the clock, because a wall-clock budget is a statement about the runner and
+  // not about the code: this build costs tens of milliseconds here and would be several
+  // times that on a loaded machine, while the counts below are the two shapes the fix
+  // removed — one formatter for the whole build, and one calendar lookup per sample rather
+  // than two per interval plus one per override row.
+  const real = Intl.DateTimeFormat
+  let built = 0
+  let formatted = 0
+  Intl.DateTimeFormat = class extends real {
+    constructor(...args) {
+      super(...args)
+      built += 1
+    }
+
+    format(...args) {
+      formatted += 1
+      return super.format(...args)
+    }
+  }
+  let ledger
+  try {
+    ledger = buildLedger({ samples, zone, nowMs: now, days: 30 })
+  } finally {
+    Intl.DateTimeFormat = real
+  }
+  assert.equal(ledger.rows.length, 30)
+  // The zone is one panel setting, so the build may add the formatter the cache is missing
+  // — at most one, and none at all when an earlier case already warmed the entry.
+  assert.ok(built <= 1, `the build constructed ${built} formatters for one zone`)
+  // One lookup per sample, plus today and the three window-coverage keys.
+  assert.ok(formatted <= count + 8, `the build formatted ${formatted} instants for ${count} samples`)
+})
+
 test('calibration needs two samples inside the window and says what it covers', () => {
   const samples = [
     sample('2026-09-24T09:00:00Z', 100),

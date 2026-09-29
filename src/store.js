@@ -40,12 +40,13 @@ async function readTextIfPresent(path, fallback = '') {
  *
  * @param dir - the plugin's state directory.
  * @param options.keepDays - full-resolution retention window.
+ * @param options.zone - the ledger's day boundary; the thinned hours are its clock hours.
  * @returns the retained samples ascending by time.
  */
 export async function readSamplesCompacting(dir, options = {}) {
   const text = await readTextIfPresent(join(dir, SAMPLES_FILE))
   const all = parseSamples(text)
-  const kept = compactSamples(all, { keepDays: options.keepDays ?? DEFAULT_KEEP_DAYS })
+  const kept = compactSamples(all, { keepDays: options.keepDays ?? DEFAULT_KEEP_DAYS, zone: options.zone })
   if (kept.length !== all.length) {
     try {
       await writeSamples(dir, kept)
