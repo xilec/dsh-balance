@@ -438,12 +438,17 @@ export function apply(ctx, config) {
    * cadence (~11 MB/year at the default one) and a start at the maximum `keepDays`
    * then reads a hundred megabytes. This runs the same pass and then adopts what
    * it kept, which is what the next start would have loaded.
+   *
+   * The zone is the one the ledger is read in, the same as at the start: thinning
+   * buckets the old samples irreversibly, and a pass that bucketed them on the
+   * host's hours instead would drop a day's own last sample wherever the two
+   * disagree.
    */
   const thinSamples = async () => {
     appended = 0
     if (dir === '') return
     try {
-      samples = await readSamplesCompacting(dir, { keepDays: runtime.keepDays })
+      samples = await readSamplesCompacting(dir, { keepDays: runtime.keepDays, zone: runtime.dayZone })
     } catch (error) {
       warn(`cannot compact the sample log: ${message(error)}`)
     }
@@ -1114,6 +1119,12 @@ export function apply(ctx, config) {
     }), 'dsh-balance: session cost text route')
 
     postRoute('/dsh-balance/hello', 'dsh-balance: client hello route', async (body, res) => {
+      // The document this route persists carries the whole state, so it has to wait
+      // for the load the same way the routes that edit it do: a write built while the
+      // load is still reading would put an empty document where the stored overrides,
+      // the identity and the panel choices are. The client sends this without waiting
+      // for the answer, so the wait costs the reader nothing.
+      if (!loaded) await ready
       const mount = body.phase === 'mount'
       clientHello = {
         version: typeof body.version === 'string' ? body.version : null,
@@ -1122,6 +1133,8 @@ export function apply(ctx, config) {
         reads: clientHello.reads + (mount ? 0 : 1),
         mounts: clientHello.mounts + (mount ? 1 : 0),
       }
+      // Deliberately not awaited and its result not read: this is a heartbeat, the
+      // browser asked for nothing to be stored, and a write that fails warns.
       void persist()
       sendJson(res, 200, { ok: true, refreshIntervalMs: runtime.refreshIntervalMs, clientPollIntervalMs: runtime.clientPollIntervalMs })
     }, { lenient: true })

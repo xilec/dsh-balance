@@ -890,6 +890,54 @@ test('a write that arrives while the state is still loading survives the load', 
   }
 })
 
+test('the client heartbeat that lands during the load does not blank the stored state', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
+  const previousHome = process.env.DSH_HOME
+  const previousFetch = globalThis.fetch
+  process.env.DSH_HOME = home
+  globalThis.fetch = async () => ({ ok: true, json: async () => balanceBody(12.34) })
+  const ctx = hostContext()
+  try {
+    const { mkdir, writeFile, readFile, rm } = await import('node:fs/promises')
+    await mkdir(join(home, 'dsh-balance'), { recursive: true })
+    // A document big enough that reading it outlasts the heartbeat below: the heartbeat
+    // persists the whole state, so a write built before the load has restored it would
+    // put an empty document where every correction and every panel choice is.
+    const overrides = {}
+    for (let i = 0; i < 60_000; i += 1) {
+      overrides[`2026-09-${String((i % 28) + 1).padStart(2, '0')}-${String(i).padStart(5, '0')}`] = { amount: 1, at: Date.now() }
+    }
+    await writeFile(join(home, 'dsh-balance', 'state.json'), JSON.stringify({
+      version: 1,
+      overrides,
+      prefs: { costMetric: 'output' },
+      client: { version: '9.9.9', at: 1234, count: 7 },
+    }), 'utf8')
+    const module = await import(`../src/index.js?hello-race=${encodeURIComponent(home)}`)
+    module.apply(ctx, module.Config({ apiKey: 'test-key' }))
+    const res = response()
+    await ctx.routes.get('/dsh-balance/hello')(request('POST', '/dsh-balance/hello', { phase: 'mount', version: 'test' }), res)
+    assert.equal(res.status, 200, res.body)
+    // The heartbeat's own write is fire-and-forget, so the file is read until it lands.
+    let state = {}
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      state = JSON.parse(await readFile(join(home, 'dsh-balance', 'state.json'), 'utf8'))
+      if (state.client?.mounts === 1) break
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    assert.equal(state.client?.mounts, 1, 'the heartbeat landed on top of the loaded state')
+    assert.equal(Object.keys(state.overrides ?? {}).length, Object.keys(overrides).length, 'every stored correction is still on disk')
+    assert.equal(state.prefs.costMetric, 'output', 'and so is the stored panel choice')
+    assert.equal(state.client.version, 'test', 'with the heartbeat’s own identity on top')
+    await rm(home, { recursive: true, force: true })
+  } finally {
+    ctx.dispose()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    globalThis.fetch = previousFetch
+  }
+})
+
 test('two corrections written at the same time both land on disk', async () => {
   await withPlugin(async ({ ctx, home }) => {
     const { readFile } = await import('node:fs/promises')

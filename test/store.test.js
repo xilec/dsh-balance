@@ -76,14 +76,40 @@ test('an append issued while the log is compacted survives the rewrite', async (
       old.push({ t: now - 40 * 24 * HOUR_MS + i * 60_000, currency: 'CNY', total: 100 - i / 1000, granted: 0, toppedUp: 100 })
     }
     await writeFile(join(dir, 'samples.ndjson'), serializeSamples(old), 'utf8')
-    // The append is issued while the compaction is still reading. The queue runs it
-    // after the rewrite, so the line survives; without the queue whether the rewrite
-    // swallowed it was a race against the file read.
-    const compaction = readSamplesCompacting(dir, { keepDays: 7 })
-    await appendSample(dir, { t: now, currency: 'CNY', total: 99, granted: 0, toppedUp: 99 })
-    await compaction
+    // The append is issued while the compaction is still reading, and the two settle in
+    // an order: the rewrite reads, thins and renames first, and only then does the append
+    // write. Ordering is the invariant — whether an unqueued rewrite happens to swallow
+    // the line is a race against the file read, and a test that waits for a race is a
+    // test that passes on the code it is meant to catch.
+    const order = []
+    const compaction = readSamplesCompacting(dir, { keepDays: 7 }).then((kept) => {
+      order.push('rewrite')
+      return kept
+    })
+    await appendSample(dir, { t: now, currency: 'CNY', total: 99, granted: 0, toppedUp: 99 }).then(() => {
+      order.push('append')
+    })
+    const kept = await compaction
+    assert.deepEqual(order, ['rewrite', 'append'], 'the append ran after the rewrite, never during it')
+    assert.ok(kept.length < old.length, 'so the rewrite really did run and thin the log')
     const stored = parseSamples(await readFile(join(dir, 'samples.ndjson'), 'utf8'))
-    assert.equal(stored.at(-1).t, now, 'the appended sample is the newest line of the rewritten log')
+    assert.equal(stored.at(-1).t, now, 'and the appended sample is the newest line of the rewritten log')
+  })
+})
+
+test('a log with a torn tail line is still read from its newest lines', async () => {
+  await withDir(async (dir) => {
+    const now = Date.now()
+    const lines = [sampleLine(now - 3 * HOUR_MS, 10), sampleLine(now - 2 * HOUR_MS, 9.5)]
+    // A crash mid-append leaves a half-written last line, with no newline of its own.
+    await writeFile(join(dir, 'samples.ndjson'), `${lines.join('')}{"t":${now},"currency":"CN`, 'utf8')
+    const all = await readSamplesCompacting(dir, { keepDays: 7 })
+    assert.deepEqual(all.map((s) => s.total), [10, 9.5], 'a torn tail line is simply dropped')
+    // The limit counts lines, not parsed samples, so a damaged line inside the window
+    // costs a sample rather than being made up for by an older one: the cap is there to
+    // bound what is materialised, and reading more to fill the gap would undo that.
+    const capped = await readSamplesCompacting(dir, { keepDays: 7, maxSamples: 2 })
+    assert.deepEqual(capped.map((s) => s.total), [9.5], 'a damaged line in the window costs a sample from the result')
   })
 })
 

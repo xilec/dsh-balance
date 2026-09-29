@@ -85,8 +85,10 @@ async function readTextIfPresent(path, fallback = '') {
  * @param dir - the plugin's state directory.
  * @param options.keepDays - full-resolution retention window.
  * @param options.maxSamples - how many of the newest samples to materialise
- * (default {@link MAX_SAMPLES}); the head of a longer log is dropped, on disk as
- * well as in memory, because a restart would drop it anyway.
+ * (default {@link MAX_SAMPLES}); the head of a longer log is dropped from what is
+ * loaded, and written back whenever the pass rewrites the log anyway — a head the cap
+ * hides is a head no start could read, but rewriting on every start to remove it would
+ * cost more than it saves.
  * @param options.zone - the ledger's day boundary; the thinned hours are its clock hours.
  * Thinning cannot be undone, so every caller has to pass the same zone: the ledger's,
  * not the host's, or the two passes would bucket the old samples differently.

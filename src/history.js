@@ -441,7 +441,10 @@ export function compactSamples(samples, options = {}) {
  * only that many of them, and the lines before them are counted past without ever
  * being sliced out of the text. That is what bounds the cost of reading a log
  * nobody thinned — a file of a million lines used to materialise a million objects
- * before the caller threw almost all of them away.
+ * before the caller threw almost all of them away. The limit counts lines and not
+ * parsed samples, so a damaged line inside the window costs a sample from the
+ * result: finding out that it is damaged is what parsing is, and parsing the lines
+ * before the window is what the cap is there to avoid.
  *
  * @param text - the whole log, as read from disk.
  * @param options.limit - how many of the newest samples to materialise (all of
