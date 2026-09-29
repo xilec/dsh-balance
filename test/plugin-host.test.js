@@ -1,10 +1,48 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { mkdtempSync } from 'node:fs'
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { homedir, tmpdir } from 'node:os'
+import { isAbsolute, join, relative } from 'node:path'
 import { dayKeyOf, parseSamples } from '../src/history.js'
+
+/**
+ * The home the plugin writes under when a test does not name one itself.
+ *
+ * A test that reached the store without setting `$DSH_HOME` resolved the harness
+ * home to the developer's real `~/.dsh` and wrote there, and a helper's own
+ * save/restore of the variable is a convention rather than a guarantee. This is
+ * the guarantee: a missing override becomes a throwaway directory instead. The
+ * directory is left in place on purpose — nothing deletes a home here, least of
+ * all a real one, and a deleted suite home would leave every later test pointing
+ * at a path that is not there.
+ */
+const SUITE_HOME = mkdtempSync(join(tmpdir(), 'dsh-balance-suite-home-'))
+
+/** Whether `path` lies inside `dir`, without the prefix-match traps. */
+function inside(dir, path) {
+  const step = relative(dir, path)
+  return step !== '' && !step.startsWith('..') && !isAbsolute(step)
+}
+
+/**
+ * Point a missing `$DSH_HOME` at the throwaway suite home, leaving a chosen one alone.
+ *
+ * A blank value counts as missing: the harness reads one as unset, so the net
+ * cannot treat it as a decision.
+ *
+ * @param env - the environment mapping to read and write.
+ * @returns the home in effect afterwards.
+ */
+function ensureSuiteHome(env = process.env) {
+  if (env.DSH_HOME === undefined || env.DSH_HOME.trim() === '') env.DSH_HOME = SUITE_HOME
+  return env.DSH_HOME
+}
+
+/** The home the process brought with it, and the one the plugin therefore sees. */
+const inheritedHome = process.env.DSH_HOME
+const suiteHome = ensureSuiteHome()
 
 /** A request stub that emits an optional JSON body. */
 function request(method, url, body) {
@@ -126,6 +164,50 @@ async function withPlugin(run, options = {}) {
     await rm(home, { recursive: true, force: true })
   }
 }
+
+test('a missing DSH_HOME becomes a throwaway home, a chosen one is left alone', () => {
+  assert.equal(ensureSuiteHome({}), SUITE_HOME, 'a test that sets no home gets the suite one')
+  assert.equal(ensureSuiteHome({ DSH_HOME: '' }), SUITE_HOME, 'so does a blank one, which the harness reads as unset')
+  assert.equal(ensureSuiteHome({ DSH_HOME: '   ' }), SUITE_HOME, 'and one holding nothing but whitespace')
+  assert.equal(ensureSuiteHome({ DSH_HOME: '/tmp/a-home-of-my-own' }), '/tmp/a-home-of-my-own', 'a home the caller named is not overruled')
+  assert.ok(inside(tmpdir(), SUITE_HOME), 'the suite home is under the system temp directory')
+  assert.equal(inside(join(homedir(), '.dsh'), SUITE_HOME), false, 'and never inside the real harness home')
+  // The net is wired into the module, not merely defined next to it: this process is
+  // the evidence, and the value is the inherited one when the environment had it.
+  assert.equal(suiteHome, inheritedHome ?? SUITE_HOME)
+})
+
+test('a run that names no DSH_HOME writes under the suite home', {
+  skip: inheritedHome !== undefined && 'the environment supplies a DSH_HOME, so the suite home is not ours to write to',
+}, async () => {
+  // The shape of the mistake this file once made: no home of its own, so the net
+  // decides. Every per-test helper above and below sets one and restores it, which
+  // is the convention; this is what happens to the test that does not.
+  const previousFetch = globalThis.fetch
+  const ctx = hostContext()
+  globalThis.fetch = async () => ({ ok: true, json: async () => balanceBody(12.34) })
+  try {
+    const module = await import(`../src/index.js?suite-home=${encodeURIComponent(SUITE_HOME)}`)
+    module.apply(ctx, module.Config({ apiKey: 'test-key' }))
+    // Both of the store's paths, so the assertion covers the sample log and the
+    // state document rather than whichever one this run happened to touch.
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    const saved = response()
+    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { costMetric: 'output' }), saved)
+    assert.equal(saved.status, 200, saved.body)
+    // The whole of what the run wrote, read from the home the net named. A path is
+    // what is asserted, not a real directory: the developer's own home is never
+    // opened here, and the suite home stays on disk so nothing is left pointing at
+    // a home that is gone.
+    const dir = join(suiteHome, 'dsh-balance')
+    const written = (await readdir(dir)).sort()
+    assert.deepEqual(written, ['samples.ndjson', 'state.json'], 'the run wrote its two files and nothing else')
+    assert.equal(inside(join(homedir(), '.dsh'), dir), false, 'the store it wrote to is not the developer home')
+  } finally {
+    ctx.dispose()
+    globalThis.fetch = previousFetch
+  }
+})
 
 test('the plugin registers its routes and its projection unit', async () => {
   await withPlugin(async ({ ctx, module }) => {
