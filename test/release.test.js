@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  checkRefusals, notAheadReason, notCurrentReason, rewriteVersionIn, slugFromOrigin, VERSION_PLACES,
+  checkRefusals, ghReleaseArgs, notAheadReason, notCurrentReason, rewriteVersionIn, slugFromOrigin, VERSION_PLACES,
 } from '../scripts/release.mjs'
 import {
   compareVersions, extractWhatChanges, extractWhy, humanizeChangeName, parseVersion, renderNotes,
@@ -220,4 +220,16 @@ test('publish only tags the version the tree already carries', () => {
   assert.equal(notCurrentReason('0.1.0', '0.2.0'), 'the tree is at 0.2.0, not 0.1.0 — prepare it first')
   assert.equal(notCurrentReason('0.2.0', null), 'the three version places do not all carry the same x.y.z version')
   assert.equal(notCurrentReason('0.2', '0.2.0'), '0.2 is not an x.y.z version')
+})
+
+test('gh is called with the release, the repository and the reviewed notes', () => {
+  const args = ghReleaseArgs({ version: '0.2.0', slug: 'xilec/dsh-balance', title: 'dsh-balance 0.2.0', notes: '/tmp/notes.md', sha: 'abc123' })
+  assert.deepEqual(args, [
+    'release', 'create', 'v0.2.0',
+    '--repo', 'xilec/dsh-balance',
+    '--title', 'dsh-balance 0.2.0',
+    '--notes-file', '/tmp/notes.md',
+    '--target', 'abc123',
+  ])
+  assert.ok(!args.includes('gh'), 'gh is the program, never one of its arguments')
 })
