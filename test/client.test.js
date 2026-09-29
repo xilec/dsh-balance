@@ -1636,6 +1636,22 @@ test('the rate editor writes the rates it holds, and an empty row clears one', a
     writes.push(next)
   }
   const rates = { 'reseller-model': { cacheHit: 0.1, cacheMiss: 2, output: 8 } }
+  /**
+   * Type one row of the editor and press save, then read the status back. The stub
+   * keeps hook state between render passes, so each step needs a fresh tree.
+   */
+  const typeAndSave = async (values) => {
+    const mount = () => {
+      react.beginRender()
+      return react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
+    }
+    find(mount(), (element) => element.type === 'input').forEach((input, index) => {
+      input.props.onChange({ target: { value: values[index] } })
+    })
+    textOf(mount())
+    await find(mount(), (element) => element.props?.className?.includes?.('dshb_rates_save') === true)[0].props.onClick()
+    return textOf(mount())
+  }
   react.beginRender()
   let tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
   const text = textOf(tree)
@@ -1679,6 +1695,34 @@ test('the rate editor writes the rates it holds, and an empty row clears one', a
   tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
   await find(tree, (element) => element.props?.className?.includes?.('dshb_rates_save') === true)[0].props.onClick()
   assert.equal(writes.length, 2, 'a negative rate is not written')
+
+  // A partly filled row is refused too: the two fields left empty are not rates of
+  // zero, and writing them as such would under-price the model on screen.
+  react.beginRender()
+  tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
+  find(tree, (element) => element.type === 'input').forEach((input, index) => {
+    input.props.onChange({ target: { value: index === 0 ? '2' : '' } })
+  })
+  react.beginRender()
+  tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
+  textOf(tree)
+  react.beginRender()
+  tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
+  await find(tree, (element) => element.props?.className?.includes?.('dshb_rates_save') === true)[0].props.onClick()
+  react.beginRender()
+  tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
+  assert.match(textOf(tree), /cost\.rates\.invalid/, 'the reader is told what is wrong with the row')
+  assert.equal(writes.length, 2, 'a partly filled row is not written')
+
+  // A rate of zero is a rate the reader typed: only an empty row removes the entry.
+  assert.match(await typeAndSave(['0', '0', '0']), /cost\.rates\.saved/, 'a row of zeros is a price, not an absence')
+  assert.deepEqual(writes.at(-1), { 'reseller-model': { cacheMiss: 0, cacheHit: 0, output: 0 } })
+
+  // The gap can sit anywhere in the row, and a field holding only spaces is empty.
+  assert.match(await typeAndSave(['', '2', '']), /cost\.rates\.invalid/, 'the first field empty is the same refusal')
+  assert.match(await typeAndSave(['2', ' ', '']), /cost\.rates\.invalid/, 'a blank-looking field is empty, not a zero')
+  assert.equal(writes.length, 3, 'neither partly filled row is written')
+
   assert.equal(exported.__internals.RateEntry({ t: (key) => key, models: [], rates: {}, onSave }), null, 'no model, no editor')
   react.stop()
 })
