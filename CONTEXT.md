@@ -89,3 +89,36 @@ retries, tool calls, and at the `full` level its words — with the subtree merg
 only when it is asked for. Assembled by the view from the Host's priced routes and
 downloaded by the browser; never written into the workspace or `$DSH_HOME`.
 _Avoid_: dump, log export, session download.
+
+**Indicator**:
+One deterministic, cheap detector over the per-Step series that names a single kind of
+cost problem. It calls no model and touches no network, so detecting costs nothing and
+the same series always yields the same verdict.
+_Avoid_: check, rule, heuristic, anomaly detector.
+
+**Finding**:
+What an Indicator reports — `{kind, refs, severity, confidence, evidence}`, blaming a
+Step, a Turn or a range of them. It ranks suspicion inside the **Session cost estimate**
+and never states a real charge.
+_Avoid_: alert, warning, issue, anomaly, problem.
+
+**Severity**:
+The `info` / `warn` / `alert` grade of a Finding. It restates the same margin the
+**confidence** measures in discrete form; it is not a second, independent judgement.
+_Avoid_: priority, level, importance, risk.
+
+**Sensitivity preset**:
+The one `strict` / `balanced` / `loose` choice that moves the thresholds and reporting
+floors each Indicator ships by one factor together. Individual thresholds are pinned
+beside it in the plugin configuration — used as written rather than scaled again — so
+tuning never needs a code change.
+_Avoid_: mode, level, threshold profile, sensitivity level.
+
+**Compaction step**:
+The node that carries the bill for one context compaction — the call that wrote the
+summary — so that the **Session cost estimate** stays the sum of its nodes. It is
+anchored to the Turn whose accumulated context it rewrote; a compaction before the
+session's first Turn has no Turn to anchor to and stays turn-less, still counted in the
+estimate. It is not a Step of the conversation: it holds no tool call and has no place
+in Trajectory.
+_Avoid_: synthetic step, summary step, compaction event, compaction record.

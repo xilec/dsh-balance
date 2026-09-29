@@ -26,6 +26,7 @@ import {
   nextChange, peakIntervalsBetween, peakSchedule, phaseAt, priceAt, rateSchedule,
   utcWindowsLabel, windowsOfLocalDay,
 } from './pricing.js'
+import { createFindingsMemo, detectFindings, normalizeAnomalies } from './indicators.js'
 import { SESSION_COST_KEY, makeFallbackResolver, makeSessionCostProjection, seriesPayload, subtreeSummary } from './session-cost.js'
 import { appendSample, readSamplesCompacting, readState, writeState } from './store.js'
 
@@ -86,6 +87,16 @@ export const Config = Schema.object({
     cacheMiss: Schema.number().min(0).default(0),
     output: Schema.number().min(0).default(0),
   })).default({}),
+  /**
+   * Cost-anomaly Indicators: the Sensitivity preset and per-Indicator threshold
+   * overrides. They are plugin configuration rather than a live panel setting,
+   * and the effective values travel with the series so the view can explain a
+   * Finding without deriving a threshold of its own.
+   */
+  anomalies: Schema.object({
+    preset: Schema.string().default('balanced'),
+    thresholds: Schema.dict(Schema.any()).default({}),
+  }).default({ preset: 'balanced', thresholds: {} }),
 })
 
 /** A rate map is accepted only when every entry is a set of non-negative numbers. */
@@ -158,6 +169,7 @@ export function apply(ctx, config) {
     priceUnknownModels: config.priceUnknownModels === true,
     fallbackPrices: { cacheHit: 0.02, cacheMiss: 1, output: 4, ...(config.fallbackPrices ?? {}) },
     fallbackRates: normalizeFallbackRates(config.fallbackRates ?? {}),
+    anomalies: config.anomalies ?? { preset: 'balanced', thresholds: {} },
   }
 
   /** Fold one accepted settings value into the runtime config. */
@@ -180,6 +192,22 @@ export function apply(ctx, config) {
       /* see above */
     }
   }
+
+  /**
+   * The Indicator thresholds in force. A preset and per-Indicator overrides come
+   * from the plugin configuration and are resolved once: an unknown id, field or
+   * value is dropped with a warning instead of failing the plugin.
+   */
+  const anomalies = normalizeAnomalies(runtime.anomalies, warn)
+
+  /**
+   * Detection is a pure function of the priced series and the thresholds, so the
+   * last verdict of one session is worth keeping: the view re-reads the series on
+   * every live tail, and the same `seq` under the same rule must not be detected
+   * twice. The pricing key is part of it because entering a fallback rate reprices
+   * the history without moving `seq`.
+   */
+  const findingsMemo = createFindingsMemo()
 
   let dir
   try {
@@ -568,6 +596,10 @@ export function apply(ctx, config) {
         fallback: makeFallbackResolver(projectionConfig()),
       }
       const nodes = seriesPayload(state, options)
+      const findings = findingsMemo.read(
+        `${sessionId}:${state.seq}:${pricingKey()}:${anomalies.preset}`,
+        () => detectFindings(nodes, { anomalies }),
+      )
       const first = nodes[0]
       const last = nodes[nodes.length - 1]
       const fromMs = first === undefined ? Date.now() : first.tStart
@@ -578,6 +610,9 @@ export function apply(ctx, config) {
         seq: state.seq,
         currency,
         nodes,
+        /** What the Indicators found in this series, and the rules they ran under. */
+        findings,
+        anomalies: anomaliesPayload(),
         rule: {
           sourceUrl: RULE_SOURCE_URL,
           verifiedOn: RULE_VERIFIED_ON,
@@ -726,6 +761,24 @@ export function apply(ctx, config) {
       peak: child.peak,
       unpriced: child.unpriced,
     })))
+    /**
+     * What the Indicators make of this session *once its subtree is known*: the
+     * whole point of `expensive-subtree` is a question only this route can answer,
+     * and it is asked only here, so the session route never reports it (I15).
+     */
+    let findings = []
+    try {
+      const resolved = await projectionStateOf(sessionId)
+      if (resolved.error === undefined) {
+        const nodes = seriesPayload(resolved.state, options)
+        findings = findingsMemo.read(
+          `${sessionId}:${resolved.state.seq}:${pricingKey()}:${anomalies.preset}:subtree:${total.cost}`,
+          () => detectFindings(nodes, { anomalies, subtree: { cost: total.cost } }),
+        )
+      }
+    } catch (error) {
+      warn(`cannot detect the Indicators of ${sessionId}: ${message(error)}`)
+    }
     return {
       ok: true,
       sessionId,
@@ -739,6 +792,8 @@ export function apply(ctx, config) {
        * count is the sum of the lines' Steps, not the number of sessions.
        */
       total: { ...total, steps: children.reduce((count, child) => count + child.steps, 0) },
+      findings,
+      anomalies: anomaliesPayload(),
     }
   }
 
@@ -764,6 +819,19 @@ export function apply(ctx, config) {
    * entered for that model prices it whatever that flag says.
    */
   const projectionConfig = () => ({ ...runtime, currency: effectiveCurrency(), fallbackPrices: fallback() })
+
+  /**
+   * Everything a price depends on, as one comparable value. It is part of the
+   * detection memo's key because entering a fallback rate reprices the history
+   * without moving the session's `seq`.
+   */
+  const pricingKey = () => JSON.stringify([
+    effectiveCurrency(), runtime.holidays, runtime.fallbackPrices,
+    runtime.fallbackRates, runtime.priceUnknownModels,
+  ])
+
+  /** The thresholds in force, as the view reads them: it derives none of its own. */
+  const anomaliesPayload = () => ({ preset: anomalies.preset, thresholds: anomalies.byId })
 
   /**
    * The same unit again, unregistered: the series route folds a stored session log

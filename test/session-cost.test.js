@@ -23,7 +23,7 @@ test('the projection is registered under its own key with client-visible fields'
   assert.equal(unit.key, SESSION_COST_KEY)
   assert.equal(typeof unit.stateSchema.parse, 'function')
   assert.equal(typeof unit.wire.viewSchema.parse, 'function')
-  assert.equal(unit.stateVersion, 5)
+  assert.equal(unit.stateVersion, 6)
 })
 
 test('a peak-window session is priced at peak rates', () => {
@@ -365,6 +365,7 @@ test('a spawn is attributed to the Step that created the child, and its money st
   assert.equal(nodes.length, 2)
   assert.deepEqual(nodes[0].children.map((child) => child.id), ['child-1'], 'the spawning Step carries the marker')
   assert.equal(nodes[0].children[0].label, 'Survey the client')
+  assert.equal(nodes[0].children[0].mode, 'continuable', 'and the mode the catalog reported')
   assert.equal(nodes[0].children[0].createdAt, time + 1_500, 'with the child’s own creation instant')
   assert.deepEqual(nodes[1].children, [], 'and no other Step does')
   // 1M miss at 2 CNY + 1M output at 8 CNY: the child contributes nothing.
@@ -520,4 +521,148 @@ test('an evicted attempt leaves no stale model in the wire view', () => {
   const [node] = seriesPayload(state, { currency: 'CNY' })
   assert.equal(node.unpriced, false, 'the series agrees: there is nothing left to price')
   assert.deepEqual(node.evicted.map((report) => report.model), ['reseller-model'], 'while the evicted attempt stays retrievable')
+})
+
+/** A compaction's three events: only the summary carries the bill. */
+const compaction = (time, id, turn, shadowedTokenCount = 1e5, model = 'deepseek-flash') => ([
+  { type: 'compaction/start', time, data: { compactionId: id, turn } },
+  {
+    type: 'compaction/summary',
+    time: time + 500,
+    data: {
+      compactionId: id,
+      turn,
+      model,
+      shadowedTokenCount,
+      usage: { inputTokens: 2e5, cacheReadTokens: 0, outputTokens: 1e5 },
+    },
+  },
+  { type: 'compaction/end', time: time + 900, data: { compactionId: id, turn } },
+])
+
+test('a compaction is a node of its own, billed once and counted in the estimate', () => {
+  const unit = projection()
+  const time = bjt(2026, 9, 24, 10, 0)
+  const state = fold(unit, sequenced([
+    ...message(time, 1, 1, 1e6, 0, 0),
+    ...compaction(time + 1000, 'cmp-1', null),
+  ]))
+  const nodes = seriesPayload(state, { currency: 'CNY' })
+  assert.equal(nodes.length, 2)
+  assert.equal(nodes[0].kind, 'step')
+  assert.equal(nodes[1].kind, 'compaction')
+  assert.equal(nodes[1].compaction.id, 'cmp-1')
+  assert.equal(nodes[1].compaction.shadowedTokenCount, 1e5)
+  assert.equal(nodes[1].step, null, 'a Compaction step is nobody\'s Step')
+  assert.equal(nodes[1].cost, 1.2, '2e5 miss at 2 CNY plus 1e5 output at 8 CNY')
+  assert.equal(nodes[1].ended, true)
+  const view = unit.wire.view(state)
+  assert.equal(view.cost, 2 + 1.2)
+  assert.equal(view.steps, 1, 'a Compaction step is not a Step the reader can walk through')
+  assert.equal(view.costByModel['deepseek-flash'], 3.2, 'and its money lands in the model it was written with')
+  const sum = nodes.reduce((total, node) => total + node.cost, 0)
+  assert.ok(Math.abs(sum - view.cost) < 1e-9, 'Σ nodes equals the session estimate with the compaction in it')
+})
+
+test('a compaction that wrote no summary bills nothing, and a prune only shadows', () => {
+  const unit = projection()
+  const time = bjt(2026, 9, 24, 10, 0)
+  const withoutSummary = fold(unit, sequenced([
+    ...message(time, 1, 1, 1e6, 0, 0),
+    { type: 'compaction/start', time: time + 1000, data: { compactionId: 'cmp-1', turn: null } },
+    { type: 'compaction/end', time: time + 1200, data: { compactionId: 'cmp-1', turn: null } },
+  ]))
+  assert.equal(seriesPayload(withoutSummary, { currency: 'CNY' }).length, 1, 'no summary, no node')
+  assert.equal(unit.wire.view(withoutSummary).cost, 2)
+
+  const pruned = fold(unit, sequenced([
+    ...message(time, 1, 1, 1e6, 0, 0),
+    { type: 'compaction/prune', time: time + 1000, data: { shadowedSeqs: [1], shadowedTokenCount: 5e5 } },
+  ]))
+  assert.equal(seriesPayload(pruned, { currency: 'CNY' }).length, 1, 'a prune shadows tokens the summary already accounted for')
+  assert.equal(unit.wire.view(pruned).cost, 2)
+})
+
+test('a compaction joins the Turn that rewrote its context, ahead of the Step it serves', () => {
+  const unit = projection()
+  const time = bjt(2026, 9, 24, 10, 0)
+  const insideTurn = fold(unit, sequenced([
+    ...message(time, 1, 1, 1e6, 0, 0),
+    ...compaction(time + 1000, 'cmp-1', 1),
+    ...message(time + 2000, 1, 2, 1e6, 0, 0),
+  ]))
+  const inside = seriesPayload(insideTurn, { currency: 'CNY' })
+  assert.deepEqual(
+    inside.map((node) => [node.kind, node.turn, node.step]),
+    [['step', 1, 1], ['compaction', 1, null], ['step', 1, 2]],
+    'the bill sits between the Step that caused the compaction and the one it serves',
+  )
+
+  const betweenTurns = fold(unit, sequenced([
+    ...message(time, 1, 1, 1e6, 0, 0),
+    { type: 'turn/end', time: time + 10, data: { turn: 1, reason: 'stop' } },
+    ...compaction(time + 1000, 'cmp-1', null),
+    ...message(time + 2000, 2, 1, 1e6, 0, 0),
+  ]))
+  const between = seriesPayload(betweenTurns, { currency: 'CNY' })
+  assert.deepEqual(
+    between.map((node) => [node.kind, node.turn, node.step]),
+    [['step', 1, 1], ['compaction', 1, null], ['step', 2, 1]],
+    'a compaction naming no Turn belongs to the Turn it rewrote',
+  )
+})
+
+test('a compaction before the first Turn stays turn-less and still counts', () => {
+  const unit = projection()
+  const time = bjt(2026, 9, 24, 10, 0)
+  const state = fold(unit, sequenced([
+    ...compaction(time, 'cmp-1', null),
+    ...message(time + 2000, 1, 1, 1e6, 0, 0),
+  ]))
+  const nodes = seriesPayload(state, { currency: 'CNY' })
+  assert.deepEqual(nodes.map((node) => node.kind), ['compaction', 'step'])
+  assert.equal(nodes[0].turn, null, 'there is no Turn to anchor it to')
+  assert.equal(nodes[0].cost, 1.2)
+  assert.equal(unit.wire.view(state).cost, 3.2, 'and its money is in the estimate like any other node')
+})
+
+test('a replayed compaction summary is not billed twice', () => {
+  const unit = projection()
+  const time = bjt(2026, 9, 24, 10, 0)
+  const events = sequenced([
+    ...message(time, 1, 1, 1e6, 0, 0),
+    ...compaction(time + 1000, 'cmp-1', null),
+  ])
+  const once = fold(unit, events)
+  const twice = fold(unit, [...events, ...sequenced(compaction(time + 1000, 'cmp-1', null))])
+  assert.equal(unit.wire.view(twice).cost, unit.wire.view(once).cost)
+  assert.equal(seriesPayload(twice, { currency: 'CNY' }).length, 2)
+})
+
+test('a Compaction step holds no call, no retry and no spawn, and survives a checkpoint', () => {
+  const unit = projection()
+  const time = bjt(2026, 9, 24, 10, 0)
+  const state = fold(unit, sequenced([
+    ...message(time, 1, 1, 1e6, 0, 0),
+    ...compaction(time + 1000, 'cmp-1', null),
+    { type: 'subagent/catalog', time: time + 1500, data: { childId: 'child-1', childCreatedAt: time + 1000, mode: 'sync', label: 'scout' } },
+    { type: 'tool/call', time: time + 1600, data: { turn: 1, step: 1, callId: 'call-1', name: 'bash', arguments: '{}' } },
+  ]))
+  const nodes = seriesPayload(state, { currency: 'CNY' })
+  const [step, bill] = nodes
+  assert.deepEqual(bill.calls, [])
+  assert.equal(bill.retries, 0)
+  assert.equal(bill.interrupted, false)
+  assert.equal(bill.unpriced, false)
+  assert.deepEqual(bill.children, [], 'a spawn belongs to a Step, never to a compaction')
+  assert.deepEqual(step.children.map((child) => child.id), ['child-1'], 'the Step that ran the call keeps it')
+  assert.deepEqual(step.calls.map((call) => call.callId), ['call-1'])
+
+  const parsed = unit.stateSchema.parse(JSON.parse(JSON.stringify(state)))
+  assert.equal(parsed.lastTurn, 1)
+  assert.equal(parsed.compactions.length, 1)
+  assert.equal(seriesPayload(parsed, { currency: 'CNY' }).length, 2, 'the node survives a JSON checkpoint')
+  const broken = structuredClone(state)
+  broken.pendingCompactions[0].compaction = { model: 'deepseek-flash', shadowedTokenCount: 1 }
+  assert.throws(() => unit.stateSchema.parse(JSON.parse(JSON.stringify(broken))), 'a compaction node needs its id')
 })
