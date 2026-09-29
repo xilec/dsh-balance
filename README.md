@@ -149,10 +149,60 @@ and a value written there outranks the row for that key only.
 | `holidays` | 2026 list | Chinese public holidays (Beijing dates) |
 | `priceUnknownModels` / `fallbackPrices` | `false` / — | Price models outside the built-in table |
 | `fallbackRates` | `{}` | Peak rates per 1M tokens keyed by model id, for a model the table does not price; they win over `fallbackPrices` and can be entered from the Cost view or the panel. Off-peak is half, a cache write is billed as a cache miss |
+| `anomalies.preset` | `balanced` | Sensitivity of the Cost view's Indicators: `strict`, `balanced` or `loose` |
+| `anomalies.thresholds` | `{}` | Per-Indicator threshold overrides, by Indicator id and field name |
 
 State lives in `$DSH_HOME/dsh-balance/`: `samples.ndjson` is the append-only
 sample log (thinned to one sample per hour beyond `keepDays`), `state.json` holds
 the day overrides, the settings and the last client contact.
+
+## Cost anomalies
+
+The Cost view runs ten deterministic **Indicators** over the priced per-Step series and
+shows what they find. An Indicator calls no model and touches no network: the same series
+and the same thresholds always produce the same verdict, so detecting costs nothing.
+
+| Indicator | What it detects |
+| --- | --- |
+| `spike` | one Step far above the session's own median, measured against the median absolute deviation and p95 |
+| `retry-storm` | a Step retried twice or more, or a Turn with three or more retried Steps |
+| `context-growth` | cost climbing with the context over a run of at least eight Steps |
+| `post-compaction-spike` | a compaction, and the Step that had to rebuild the context after it |
+| `cache-miss` | the context resent instead of reused over consecutive Steps, once a cache has been in use |
+| `tool-output-inflation` | a large tool result the next Step pays for as input |
+| `verbose-output` | a generation far longer than the session's own replies |
+| `expensive-subtree` | a subtree costing at least a third of the session it belongs to — only once that subtree has been read |
+| `tariff-attributable` | the share of the session the peak window added rather than the work |
+| `pricing-gap` | Steps whose model has no rate, so the session estimate is a lower bound |
+
+A verdict is a **Finding**: `{kind, refs, severity, confidence, evidence}`. `severity` is
+`info`, `warn` or `alert`, and `confidence` (0–100) ranks suspicion inside the **Session
+cost estimate** — it is not a probability and not a claim about the bill. Each Finding is
+listed under the chart, marked on the Step it blames, and explains the numbers that cleared
+which threshold; hovering the tooltip names the same figures for the Step under the pointer.
+
+The `balanced` thresholds are the documented defaults. A Sensitivity preset moves the
+gates and reporting floors it ships by one factor — `strict` × 1.5, `loose` × 0.6 — rather
+than substituting a second table, and individual thresholds can be pinned beside it, used
+as written:
+
+```nix
+{
+  id = "dsh-balance";
+  name = "${plugin}/src/index.js";
+  config = {
+    anomalies = {
+      preset = "strict";
+      # The strict preset would gate a spike at 9 (6 × 1.5); this pins it at 12
+      # instead. A threshold named here is used as written, not scaled again.
+      thresholds = { spike = { madMultiple = 12; }; };
+    };
+  };
+}
+```
+
+An unknown Indicator id, an unknown field or a value that is not a positive number is
+dropped with one warning in the Host log and the plugin keeps running on the defaults.
 
 ## Limits worth knowing
 
@@ -171,9 +221,11 @@ the day overrides, the settings and the last client contact.
   header stays that one session's on both tabs.
 * **The history export is a file you keep.** The Cost view can assemble the
   session's history as one ordered NDJSON stream and download it — `costs` by
-  default (usage, money, tool names and call ids), `full` on request (also the
-  message, tool and thinking text, each text field cut at 2000 characters and
-  flagged `truncated`), with the subtree folded in only when it is asked for.
+  default (usage, money, tool names and call ids, one `indicator` record per
+  Finding and one `compaction` record per compaction the session paid for), `full`
+  on request (also the message, tool and thinking text, each text field cut at 2000
+  characters and flagged `truncated`), with the subtree folded in only when it is
+  asked for.
   Reading a subtree reads those sessions' logs; the file is written by the
   browser, never into the workspace or `$DSH_HOME`.
 * **A top-up hides the spend inside the same sampling gap.** With 1–2 top-ups a
@@ -181,6 +233,11 @@ the day overrides, the settings and the last client contact.
   event so a suspicious day can be corrected.
 * **Granted balance expiry** looks like spend; the granted/topped-up split and the
   override are how you tell them apart.
+* **Findings are a reading, not a bill.** Every Indicator measures the session
+  estimate the Host itself priced, in the currency and with the rates the panel
+  shows; a Finding ranks suspicion inside that estimate and never states a real
+  charge. A model with no rate makes the estimate a lower bound, which is what
+  `pricing-gap` exists to say.
 * **Sessions before 2026-08-23** are priced by the earliest table in
   `src/pricing.js`, which is an approximation: the price list has changed several
   times and old tables are not published.
@@ -194,6 +251,7 @@ the day overrides, the settings and the last client contact.
 src/pricing.js        the tariff rule, phases and zone labels (pure)
 src/history.js        samples → intervals → day ledger → 1d/1w/1m (pure)
 src/session-cost.js   the sessionProjections unit (tokens priced per event time)
+src/indicators.js     the ten Indicators, their thresholds and the Findings (pure)
 src/store.js          samples.ndjson and state.json on disk
 src/index.js          the Host plugin: sampler loop, HTTP routes
 client/client.js      the browser half: the readout, the peak chip, the panel

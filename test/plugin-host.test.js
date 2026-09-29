@@ -67,11 +67,13 @@ function hostContext(options = {}) {
   }
   if (options.subagents !== undefined) services.set('subagents', options.subagents)
   const effects = []
+  const warns = []
   return {
     routes,
     projections,
     effects,
-    logger: { info() {}, warn() {} },
+    warns,
+    logger: { info() {}, warn(message) { warns.push(message) } },
     get: (key) => services.get(key),
     effect(fn, label) {
       const disposer = fn()
@@ -112,7 +114,7 @@ async function withPlugin(run, options = {}) {
   const ctx = hostContext(options)
   try {
     const module = await import(`../src/index.js?home=${encodeURIComponent(home)}`)
-    const config = module.Config({ apiKey: 'test-key' })
+    const config = module.Config({ apiKey: 'test-key', ...(options.config ?? {}) })
     module.apply(ctx, config)
     await run({ ctx, module, config, home, setBalance: (value, extra) => { body = balanceBody(value, extra) } })
   } finally {
@@ -873,4 +875,242 @@ test('the sampling loop stops for good when the plugin is disposed with a fetch 
     const { rm } = await import('node:fs/promises')
     await rm(home, { recursive: true, force: true })
   }
+})
+
+/** Ten Steps of one session: nine around a median, the last one far above it. */
+const spikeEvents = (time) => {
+  const events = []
+  for (let index = 0; index < 9; index += 1) {
+    const at = time + index * 1000
+    events.push(
+      { type: 'step/start', time: at, data: { turn: 1, step: index + 1 } },
+      { type: 'request/header', time: at, data: { header: { config: { model: 'deepseek-flash' } } } },
+      { type: 'assistant/message', time: at, data: { turn: 1, step: index + 1, usage: { inputTokens: [1e6, 1.05e6, 1.1e6][index % 3], outputTokens: 0 } } },
+      { type: 'step/end', time: at + 500, data: { turn: 1, step: index + 1 } },
+    )
+  }
+  events.push(
+    { type: 'step/start', time: time + 20000, data: { turn: 2, step: 1 } },
+    { type: 'assistant/message', time: time + 20000, data: { turn: 2, step: 1, usage: { inputTokens: 2e7, outputTokens: 0 } } },
+  )
+  return events.map((event, index) => ({ ...event, seq: index + 1 }))
+}
+
+test('the series carries the Findings and the thresholds they were detected under', async () => {
+  const time = Date.UTC(2026, 8, 24, 2, 0)
+  const states = new Map()
+  await withPlugin(async ({ ctx }) => {
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    const unit = ctx.projections[0]
+    states.set('session-1', spikeEvents(time).reduce((state, event) => unit.apply(state, event), unit.init()))
+
+    const res = response()
+    await ctx.routes.get('/dsh-balance/session-cost')(request('GET', '/dsh-balance/session-cost?sessionId=session-1'), res)
+    const payload = JSON.parse(res.body)
+    assert.equal(payload.ok, true, res.body)
+    assert.deepEqual(payload.anomalies.preset, 'strict', 'the configured preset is the one in force')
+    assert.equal(payload.anomalies.thresholds.spike.madMultiple, 9, '6 × 1.5')
+    assert.equal(payload.anomalies.thresholds.spike.floor, 0.375)
+    assert.equal(payload.anomalies.thresholds['verbose-output'].minTokens, 3000, 'a preset moves the gates together')
+    assert.deepEqual(
+      ctx.warns.filter((line) => line.includes('no-such-indicator')).length, 1,
+      'an unknown Indicator id is dropped with one warning instead of failing the plugin',
+    )
+    assert.deepEqual(
+      ctx.warns.filter((line) => line.includes('madMultiple')).length, 1,
+      'and a value that is not a number is dropped the same way',
+    )
+
+    const spike = payload.findings.find((finding) => finding.kind === 'spike')
+    assert.ok(spike, 'the dominating Step is reported with the series it belongs to')
+    assert.equal(payload.nodes[spike.refs.from].cost, 40, 'the reference points into the nodes of the same response')
+    assert.equal(spike.refs.from, spike.refs.to)
+    assert.equal(spike.severity, 'alert')
+    assert.ok(Number.isInteger(spike.confidence) && spike.confidence > 0 && spike.confidence <= 100)
+    assert.equal(spike.evidence.threshold, 3, 'median 2.1 + 9 × MAD 0.1: the strict gate, not the balanced one')
+
+    const again = response()
+    await ctx.routes.get('/dsh-balance/session-cost')(request('GET', '/dsh-balance/session-cost?sessionId=session-1'), again)
+    assert.deepEqual(JSON.parse(again.body).findings, payload.findings, 'the same series yields the same Findings')
+  }, {
+    config: {
+      anomalies: {
+        preset: 'strict',
+        thresholds: { spike: { madMultiple: 'lots' }, 'no-such-indicator': { share: 1 } },
+      },
+    },
+    sessionOf: (id) => (id === 'session-1' ? { id } : undefined),
+    projectionState: (session, key) => (key === 'dshBalanceCost' ? states.get(session.id) : undefined),
+    readSession: async (id) => {
+      if (id !== 'session-1') throw new Error('no such session')
+      return { session: {}, inheritedEventCount: 0, events: [] }
+    },
+  })
+})
+
+test('a subtree Finding appears only where the subtree was asked for', async () => {
+  const time = Date.UTC(2026, 8, 24, 2, 0)
+  const states = new Map()
+  const reads = []
+  const stepEvents = (turn, step, input, output, offset = 0) => [
+    { type: 'step/start', seq: 1 + offset, time: time + offset, data: { turn, step } },
+    { type: 'request/header', seq: 2 + offset, time: time + offset, data: { header: { config: { model: 'deepseek-flash' } } } },
+    { type: 'assistant/message', seq: 3 + offset, time: time + offset, data: { turn, step, usage: { inputTokens: input, outputTokens: output } } },
+    { type: 'step/end', seq: 4 + offset, time: time + offset + 500, data: { turn, step } },
+  ]
+  await withPlugin(async ({ ctx }) => {
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    const unit = ctx.projections[0]
+    const parent = [
+      ...stepEvents(1, 1, 1e6, 1e6, 0),
+      { type: 'subagent/catalog', seq: 5, time: time + 600, data: { version: 1, childId: 'child-1', childCreatedAt: time + 600, mode: 'continuable', label: 'Survey the tree' } },
+    ]
+    states.set('session-1', parent.reduce((state, event) => unit.apply(state, event), unit.init()))
+
+    const main = response()
+    await ctx.routes.get('/dsh-balance/session-cost')(request('GET', '/dsh-balance/session-cost?sessionId=session-1'), main)
+    const own = JSON.parse(main.body)
+    assert.deepEqual(own.findings.filter((finding) => finding.kind === 'expensive-subtree'), [], 'one session alone claims no subtree')
+    assert.deepEqual(reads, [], 'and the session route reads no other session')
+
+    const tree = response()
+    await ctx.routes.get('/dsh-balance/session-cost/children')(request('GET', '/dsh-balance/session-cost/children?sessionId=session-1'), tree)
+    const payload = JSON.parse(tree.body)
+    assert.equal(payload.ok, true, tree.body)
+    assert.deepEqual(reads, ['child-1'], 'the subtree was read because it was asked for, and only then')
+    const finding = payload.findings.find((entry) => entry.kind === 'expensive-subtree')
+    assert.ok(finding, 'a child that costs as much as its parent is worth naming')
+    assert.equal(finding.evidence.value, 1, 'the child costs exactly what the session itself does')
+    assert.deepEqual(
+      { from: finding.refs.from, to: finding.refs.to },
+      { from: 0, to: 0 },
+      'and it blames the Step that spawned the child',
+    )
+    assert.equal(payload.anomalies.preset, 'balanced')
+  }, {
+    sessionOf: (id) => (id === 'session-1' ? { id } : undefined),
+    projectionState: (session, key) => (key === 'dshBalanceCost' ? states.get(session.id) : undefined),
+    readSession: async (id) => {
+      reads.push(id)
+      if (id === 'child-1') return { session: { id }, inheritedEventCount: 0, events: stepEvents(1, 1, 1e6, 1e6, 1_000) }
+      throw new Error(`unexpected session ${id}`)
+    },
+    subagents: {
+      async listChildren() {
+        return [{ id: 'child-1', createdAt: time + 600, mode: 'continuable', label: 'Survey the tree' }]
+      },
+    },
+  })
+})
+
+test('the documented configuration example loads and yields the thresholds it describes', async () => {
+  const time = Date.UTC(2026, 8, 24, 2, 0)
+  const states = new Map()
+  // The example in README.md, verbatim: a strict preset and one override beside it.
+  await withPlugin(async ({ ctx }) => {
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    const unit = ctx.projections[0]
+    states.set('session-1', spikeEvents(time).reduce((state, event) => unit.apply(state, event), unit.init()))
+    const res = response()
+    await ctx.routes.get('/dsh-balance/session-cost')(request('GET', '/dsh-balance/session-cost?sessionId=session-1'), res)
+    const payload = JSON.parse(res.body)
+    assert.equal(payload.ok, true, res.body)
+    assert.equal(ctx.warns.length, 0, `a documented example warns about nothing: ${ctx.warns.join('; ')}`)
+    assert.equal(payload.anomalies.preset, 'strict')
+    assert.equal(payload.anomalies.thresholds.spike.madMultiple, 12, 'the pinned override, not the strict default of 9')
+    const growth = payload.anomalies.thresholds['context-growth'].minR2
+    assert.ok(growth > 0 && growth < 1, `an Indicator the example does not name still carries its preset value: ${growth}`)
+    const spike = payload.findings.find((finding) => finding.kind === 'spike')
+    assert.equal(spike.evidence.threshold, 3.3, 'and the Finding names the gate it cleared: 2.1 + 12 × 0.1')
+  }, {
+    config: { anomalies: { preset: 'strict', thresholds: { spike: { madMultiple: 12 } } } },
+    sessionOf: (id) => (id === 'session-1' ? { id } : undefined),
+    projectionState: (session, key) => (key === 'dshBalanceCost' ? states.get(session.id) : undefined),
+    readSession: async (id) => {
+      if (id !== 'session-1') throw new Error('no such session')
+      return { session: {}, inheritedEventCount: 0, events: [] }
+    },
+  })
+})
+
+test('the peak intervals cover a multi-day series and skip the days the tariff does not trade', async () => {
+  // Thursday 2026-09-24 10:00 Beijing — inside the morning peak window — through
+  // Saturday 2026-09-26 10:00, which is a weekend day. The intervals must be clipped to
+  // the series they describe, and no interval may cover the Saturday instant.
+  const { bjt } = await import('./fixtures/anomaly-sessions.js')
+  const time = bjt(2026, 9, 24, 10, 0)
+  const weekend = bjt(2026, 9, 26, 10, 0)
+  const events = [
+    { type: 'step/start', seq: 1, time, data: { turn: 1, step: 1 } },
+    { type: 'request/header', seq: 2, time, data: { header: { config: { model: 'deepseek-flash' } } } },
+    { type: 'assistant/message', seq: 3, time: time + 1000, data: { turn: 1, step: 1, usage: { inputTokens: 1e6, outputTokens: 0 } } },
+    { type: 'step/end', seq: 4, time: time + 2000, data: { turn: 1, step: 1 } },
+    { type: 'step/start', seq: 5, time: weekend, data: { turn: 1, step: 2 } },
+    { type: 'assistant/message', seq: 6, time: weekend + 1000, data: { turn: 1, step: 2, usage: { inputTokens: 1e6, outputTokens: 0 } } },
+    { type: 'step/end', seq: 7, time: weekend + 2000, data: { turn: 1, step: 2 } },
+  ]
+  await withPlugin(async ({ ctx }) => {
+    const res = response()
+    await ctx.routes.get('/dsh-balance/session-cost')(request('GET', '/dsh-balance/session-cost?sessionId=session-1'), res)
+    const payload = JSON.parse(res.body)
+    assert.equal(payload.ok, true, res.body)
+    const nodes = payload.nodes
+    assert.equal(nodes.length, 2)
+    const from = nodes[0].tStart
+    const to = nodes[nodes.length - 1].tEnd
+    assert.ok(payload.peakIntervals.length >= 1, 'the series carries the windows that cover it')
+    for (const interval of payload.peakIntervals) {
+      // The windows are absolute tariff windows, not slices of the series: what matters
+      // is that each one overlaps the series and is a window rather than an instant.
+      assert.ok(interval.endMs > from && interval.startMs < to, 'every interval overlaps the series')
+      assert.ok(interval.startMs < interval.endMs, 'and each one is a window, not an instant')
+    }
+    assert.equal(
+      payload.peakIntervals.some((interval) => interval.startMs <= weekend && weekend < interval.endMs), false,
+      'a Saturday instant is inside no peak window',
+    )
+    // The two projections answer different questions: `peak` is what the Step would cost
+    // at peak rates, `offPeak` at half of them, and `fact` is what the phase charged.
+    assert.equal(nodes[0].cost, nodes[0].peak.cost, 'the Thursday-morning step was charged the peak rate')
+    assert.ok(nodes[0].offPeak.cost < nodes[0].cost, 'and its off-peak projection is cheaper')
+    assert.equal(nodes[1].cost, nodes[1].offPeak.cost, 'the Saturday step was charged the off-peak rate')
+    assert.ok(nodes[1].peak.cost > nodes[1].cost, 'while its peak projection is dearer')
+  }, {
+    sessionOf: () => undefined,
+    readSession: async (id) => {
+      if (id !== 'session-1') throw new Error('no such session')
+      return { session: {}, inheritedEventCount: 0, events }
+    },
+  })
+})
+
+test('the anomaly thresholds are configuration, not something the panel can edit', async () => {
+  const time = Date.UTC(2026, 8, 24, 2, 0)
+  const states = new Map()
+  await withPlugin(async ({ ctx }) => {
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    const unit = ctx.projections[0]
+    states.set('session-1', spikeEvents(time).reduce((state, event) => unit.apply(state, event), unit.init()))
+    const written = response()
+    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', {
+      anomalies: { preset: 'loose', thresholds: { spike: { madMultiple: 1 } } },
+    }), written)
+    assert.equal(written.status, 200)
+    const payload = JSON.parse(written.body)
+    assert.deepEqual(payload.changed, [], 'a settings write changes only the view settings it knows')
+    assert.equal(payload.prefs.anomalies, undefined, 'and never stores the Indicator rules')
+    const res = response()
+    await ctx.routes.get('/dsh-balance/session-cost')(request('GET', '/dsh-balance/session-cost?sessionId=session-1'), res)
+    const series = JSON.parse(res.body)
+    assert.equal(series.anomalies.preset, 'balanced', 'the configured preset is untouched by the request')
+    assert.equal(series.anomalies.thresholds.spike.madMultiple, 6, 'and so are the thresholds')
+  }, {
+    config: { anomalies: { preset: 'balanced' } },
+    sessionOf: (id) => (id === 'session-1' ? { id } : undefined),
+    projectionState: (session, key) => (key === 'dshBalanceCost' ? states.get(session.id) : undefined),
+    readSession: async (id) => {
+      if (id !== 'session-1') throw new Error('no such session')
+      return { session: {}, inheritedEventCount: 0, events: [] }
+    },
+  })
 })

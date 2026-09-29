@@ -14,7 +14,11 @@
  * — it is retained on the node as a retry, for the tooltip and the export.
  *
  * On top of that fold the unit keeps `dshBalanceCost`'s **per-Step series**: one
- * node per `(turn, step)` holding its usage reports, its tool calls and its flags.
+ * node per `(turn, step)` holding its usage reports, its tool calls and its flags,
+ * plus one node of kind `compaction` per context compaction whose summarizing call
+ * was paid for. A compaction is money without a Step of its own, so it is a node
+ * like any other — which is what keeps the session estimate the sum of its nodes —
+ * anchored to the Turn whose accumulated context it rewrote.
  * The running aggregates the client view needs stay incremental, so a usage event
  * produces the next view in O(1); the series itself is an append-only chunked list
  * (the current node is kept aside until the next Step opens), which is what the
@@ -111,8 +115,11 @@ const spawnSchema = z.object({
  * retry closed it and the next report accumulates.
  */
 const nodeSchema = z.object({
-  turn: z.number().int().nonnegative(),
-  step: z.number().int().nonnegative(),
+  /** `step` for a Step of the conversation, `compaction` for a Compaction step. */
+  kind: z.enum(['step', 'compaction']).default('step'),
+  /** `null` on a Compaction step: it belongs to no Step, and to no Turn when none precedes it. */
+  turn: z.number().int().nonnegative().nullable(),
+  step: z.number().int().nonnegative().nullable(),
   tStart: z.number(),
   tEnd: z.number().nullable(),
   ended: z.boolean(),
@@ -123,6 +130,12 @@ const nodeSchema = z.object({
   reports: z.array(reportSchema),
   evicted: z.array(reportSchema),
   calls: z.array(callSchema),
+  /** What the compaction cost and rewrote; absent on a Step. */
+  compaction: z.object({
+    id: z.string(),
+    model: z.string(),
+    shadowedTokenCount: z.number().int().nonnegative(),
+  }).optional(),
 })
 
 const stateSchema = z.object({
@@ -152,6 +165,18 @@ const stateSchema = z.object({
    * with. They are folded into nothing here: a child's line is its own work.
    */
   inheritedEventCount: z.number().int().nonnegative().optional(),
+  /** Compaction ids already folded, so a replayed summary cannot be billed twice. */
+  compactions: z.array(z.string()).optional(),
+  /**
+   * Compaction steps that happened after the open Step but belong to the next one
+   * (or to the Turn's end): they are parked until the series can place them, so the
+   * order of the plot stays chronological without rewriting committed chunks.
+   */
+  pendingCompactions: z.array(nodeSchema).optional(),
+  /** Compaction steps already in the series, so the Step count can stay O(1). */
+  compactionsCommitted: z.number().int().nonnegative().optional(),
+  /** The Turn of the newest Step: where a compaction naming no Turn is anchored. */
+  lastTurn: z.number().int().nonnegative().nullable().optional(),
   seq: z.number().int().nonnegative(),
 })
 
@@ -308,6 +333,10 @@ export function makeSessionCostProjection(getConfig) {
     order: [],
     unpriced: [],
     spawns: [],
+    compactions: [],
+    pendingCompactions: [],
+    compactionsCommitted: 0,
+    lastTurn: null,
     inheritedEventCount: Number.isInteger(inheritedEventCount) && inheritedEventCount > 0 ? inheritedEventCount : 0,
     seq: 0,
   })
@@ -354,6 +383,7 @@ export function makeSessionCostProjection(getConfig) {
   }
 
   const blankNode = (turn, step, time) => ({
+    kind: 'step',
     turn,
     step,
     tStart: time,
@@ -372,14 +402,34 @@ export function makeSessionCostProjection(getConfig) {
    * Park a node for `(turn, step)`, committing the previous one to the series.
    * The pending node is what lets a restated report or a late tool call land on
    * the right Step without rewriting an immutable chunked list.
+   *
+   * A compaction that arrived while the previous Step was open spent its money
+   * before this Step and after that one, so it is committed in between: the plot
+   * stays chronological without touching the chunks already written.
    */
   const openNode = (state, turn, step, time) => {
     const pending = state.pending
     if (pending !== null && pending.turn === turn && pending.step === step) return state
-    const committed = pending === null
-      ? {}
-      : { series: appendChunkedList(state.series, pending), committed: state.committed + 1 }
-    return { ...state, ...committed, pending: blankNode(turn, step, time) }
+    const parked = state.pendingCompactions ?? []
+    let series = state.series
+    let committed = state.committed
+    if (pending !== null) {
+      series = appendChunkedList(series, pending)
+      committed += 1
+    }
+    for (const compaction of parked) {
+      series = appendChunkedList(series, compaction)
+      committed += 1
+    }
+    return {
+      ...state,
+      series,
+      committed,
+      compactionsCommitted: (state.compactionsCommitted ?? 0) + parked.length,
+      pendingCompactions: [],
+      pending: blankNode(turn, step, time),
+      lastTurn: turn,
+    }
   }
 
   /**
@@ -392,7 +442,9 @@ export function makeSessionCostProjection(getConfig) {
    */
   const committedNodeOf = (state, turn, step) => {
     const nodes = [...iterateChunkedList(state.series)]
-    const index = nodes.findIndex((node) => node.turn === turn && node.step === step)
+    const index = nodes.findIndex(
+      (node) => (node.kind ?? 'step') === 'step' && node.turn === turn && node.step === step,
+    )
     return index === -1 ? null : { index, node: nodes[index], nodes }
   }
 
@@ -549,6 +601,63 @@ export function makeSessionCostProjection(getConfig) {
     }
   }
 
+  /**
+   * Fold one compaction: a node carrying the bill for the call that wrote the summary.
+   *
+   * A compaction is money without a Step of its own, and the session estimate must
+   * stay the sum of its nodes, so it becomes one. It is anchored to the Turn its own
+   * event names, or to the Turn whose accumulated context it rewrote when the event
+   * names none; a compaction before the session's first Turn stays turn-less. The
+   * node is parked rather than committed, because the Step it precedes may not have
+   * opened yet — `openNode` and `flush` place it in chronological order.
+   *
+   * `compaction/start`, `compaction/end` and `compaction/prune` carry no money of
+   * their own: a compaction that never wrote a summary bills nothing, and a prune
+   * only shadows tokens the summary already accounted for.
+   */
+  const withCompaction = (state, event) => {
+    const data = event.data ?? {}
+    const id = typeof data.compactionId === 'string' ? data.compactionId : ''
+    if (id === '') return state
+    if ((state.compactions ?? []).includes(id)) return state
+    const time = typeof event.time === 'number' ? event.time : Date.now()
+    const named = Number.isInteger(data.turn) && data.turn >= 0 ? data.turn : null
+    const turn = named ?? state.lastTurn ?? null
+    const usage = data.usage
+    const model = typeof data.model === 'string' && data.model !== ''
+      ? data.model
+      : state.model ?? 'unknown'
+    const report = usage === null || usage === undefined
+      ? null
+      : { model, time, buckets: bucketsOf(usage), seq: typeof event.seq === 'number' ? event.seq : 0 }
+    const node = {
+      kind: 'compaction',
+      turn,
+      step: null,
+      tStart: time,
+      tEnd: time,
+      ended: true,
+      hasUsage: report !== null,
+      interrupted: false,
+      retries: 0,
+      slotOpen: false,
+      reports: report === null ? [] : [report],
+      evicted: [],
+      calls: [],
+      compaction: {
+        id,
+        model,
+        shadowedTokenCount: Number.isFinite(data.shadowedTokenCount) ? data.shadowedTokenCount : 0,
+      },
+    }
+    const shifted = report === null ? state : shift(state, report, 1)
+    return {
+      ...shifted,
+      compactions: [...(state.compactions ?? []), id],
+      pendingCompactions: [...(state.pendingCompactions ?? []), node],
+    }
+  }
+
   /** Close the pending node: its Step cannot receive anything else. */
   const withStepEnd = (state, turn, step, time) => {
     const node = state.pending
@@ -556,14 +665,30 @@ export function makeSessionCostProjection(getConfig) {
     return { ...state, pending: { ...node, tEnd: time, ended: true } }
   }
 
-  /** Commit the pending node without ending it (a new Turn starts). */
+  /**
+   * Commit the pending node without ending it (a new Turn starts), and the parking
+   * compaction steps with it: they spent their money before whatever comes next.
+   */
   const flush = (state) => {
-    if (state.pending === null) return state
+    const parked = state.pendingCompactions ?? []
+    if (state.pending === null && parked.length === 0) return state
+    let series = state.series
+    let committed = state.committed
+    if (state.pending !== null) {
+      series = appendChunkedList(series, state.pending)
+      committed += 1
+    }
+    for (const compaction of parked) {
+      series = appendChunkedList(series, compaction)
+      committed += 1
+    }
     return {
       ...state,
-      series: appendChunkedList(state.series, state.pending),
+      series,
+      committed,
+      compactionsCommitted: (state.compactionsCommitted ?? 0) + parked.length,
+      pendingCompactions: [],
       pending: null,
-      committed: state.committed + 1,
     }
   }
 
@@ -612,6 +737,12 @@ export function makeSessionCostProjection(getConfig) {
     if (event.type === 'llm/retry-started') return withRetry(state, event.data.turn, event.data.step)
     if (event.type === 'tool/call') return withCall(state, event)
     if (event.type === 'subagent/catalog') return withSpawn(state, event)
+    if (event.type === 'compaction/summary') return withCompaction(state, event)
+    // Start, end and prune carry no money of their own: a compaction is billed by its
+    // summary, and a prune only shadows tokens that summary already accounted for.
+    if (event.type === 'compaction/start' || event.type === 'compaction/end' || event.type === 'compaction/prune') {
+      return state
+    }
     if (event.type === 'assistant/message' || event.type === 'assistant/attempt') {
       const { turn, step } = event.data
       const usage = usageOf(event)
@@ -655,13 +786,15 @@ export function makeSessionCostProjection(getConfig) {
       unpriced: priced.unpriced,
       peakNow: priceOf('deepseek-flash', Date.now())?.peak ?? false,
       seq: priced.seq,
-      steps: priced.committed + (priced.pending === null ? 0 : 1),
+      // A Compaction step is money, not a Step of the conversation: the count the
+      // view reports is the number of Steps the reader can walk through.
+      steps: (priced.committed - (priced.compactionsCommitted ?? 0)) + (priced.pending === null ? 0 : 1),
     }
   }
 
   return {
     key: SESSION_COST_KEY,
-    stateVersion: 5,
+    stateVersion: 6,
     stateSchema,
     init,
     apply,
@@ -669,11 +802,13 @@ export function makeSessionCostProjection(getConfig) {
   }
 }
 
-/** Every node of the series, oldest first, the in-progress one last. */
+/** Every node of the series, oldest first, the in-progress one and the parked compactions last. */
 function seriesNodes(state) {
   const nodes = []
   for (const node of iterateChunkedList(state.series)) nodes.push(node)
   if (state.pending !== null) nodes.push(state.pending)
+  // A parked compaction spent its money after that Step opened, so it reads after it.
+  for (const compaction of state.pendingCompactions ?? []) nodes.push(compaction)
   return nodes
 }
 
@@ -694,6 +829,19 @@ function seriesNodes(state) {
 function attachSpawns(nodes, spawns) {
   const attached = nodes.map(() => [])
   if (nodes.length === 0) return attached
+  const isStep = (node) => (node.kind ?? 'step') === 'step'
+  const firstStep = nodes.findIndex(isStep)
+  /**
+   * The Step that owns a spawn. A Compaction step holds no tool call, so a spawn
+   * that lands on one belongs to the nearest Step instead — and to the first Step
+   * when it precedes them all.
+   */
+  const owner = (index) => {
+    if (index >= 0 && isStep(nodes[index])) return index
+    for (let at = Math.max(0, index); at >= 0; at -= 1) if (isStep(nodes[at])) return at
+    for (let at = index + 1; at < nodes.length; at += 1) if (isStep(nodes[at])) return at
+    return firstStep === -1 ? 0 : firstStep
+  }
   for (const spawn of spawns) {
     const at = Number.isFinite(spawn.createdAt) && spawn.createdAt > 0 ? spawn.createdAt : spawn.time
     let chosen = -1
@@ -706,8 +854,7 @@ function attachSpawns(nodes, spawns) {
       }
       if (node.tStart <= at) chosen = index
     }
-    if (chosen < 0) chosen = 0
-    attached[chosen].push(spawn)
+    attached[owner(chosen)].push(spawn)
   }
   return attached
 }
@@ -778,9 +925,11 @@ export function subtreeSummary(nodes) {
   const bucketCost = { fact: zero(), offPeak: zero(), peak: zero() }
   const models = new Set()
   let unpriced = false
+  let steps = 0
   let tStart = null
   let tEnd = null
   for (const node of nodes ?? []) {
+    if ((node.kind ?? 'step') === 'step') steps += 1
     for (const key of BUCKET_KEYS) totals[key] += node.buckets?.[key] ?? 0
     for (const model of Object.keys(node.byModel ?? {})) models.add(model)
     if (node.unpriced === true) unpriced = true
@@ -793,7 +942,7 @@ export function subtreeSummary(nodes) {
   }
   const { rounded, costs } = roundProjections(bucketCost)
   return {
-    steps: Array.isArray(nodes) ? nodes.length : 0,
+    steps,
     tokens: BUCKET_KEYS.reduce((acc, key) => ({ ...acc, [key]: totals[key] }), zero()),
     models: [...models],
     unpriced,
@@ -889,6 +1038,7 @@ function describeNode(node, options) {
   // and the session total is exactly the sum of its Steps.
   const { rounded, costs } = roundProjections(bucketCost)
   return {
+    kind: node.kind ?? 'step',
     turn: node.turn,
     step: node.step,
     tStart: node.tStart,
@@ -902,6 +1052,8 @@ function describeNode(node, options) {
     calls: node.calls,
     /** Subagents spawned by this Step; empty on every other Step. */
     children: options.children ?? [],
+    /** What a Compaction step cost and rewrote; `null` on a Step of the conversation. */
+    compaction: node.compaction ?? null,
     buckets,
     byModel,
     cost: costs.fact,

@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { CATALOGUE } from '../src/indicators.js'
 
 /**
  * The browser half is a `window.__ModuleLoader__` registration, so this test stands
@@ -150,14 +151,24 @@ async function loadClient() {
 function clientContext() {
   const registered = []
   const services = new Map()
+  // The locale service is where the dictionaries land, and the only place a test can
+  // read them: the shell itself only ever calls `t`.
+  let dictionary = null
   return {
     registered,
     services,
+    dictionary: () => dictionary,
     effect(fn) {
       const disposer = fn()
       return typeof disposer === 'function' ? disposer : () => {}
     },
-    locale: { register: () => () => {}, bind: () => (key) => key },
+    locale: {
+      register: (namespace, copy) => {
+        if (namespace === 'dsh-balance') dictionary = copy
+        return () => {}
+      },
+      bind: () => (key) => key,
+    },
     get: (key) => services.get(key),
     slots: {
       inject(name, callback) {
@@ -1396,11 +1407,15 @@ test('the inspector sits beside the top list, not below it', async () => {
     assert.equal(panes.length, 1, 'the two cards share one grid')
     const listed = panes[0].children ?? []
     const children = Array.isArray(listed[0]) ? listed[0] : listed
-    assert.equal(children.length, 2, 'exactly the inspector and the top list')
+    assert.equal(children.length, 3, 'the session reading, the top list and the findings list')
     assert.equal(children[0].props.className, 'dshb_cost_pane', 'inspector first, so it is the left column')
     assert.match(textOf(children[0]), /cost\.inspector\.empty/)
     assert.match(textOf(children[1]), /cost\.topk\.title/)
-    assert.equal(find(tree, (element) => element.props?.className === 'dshb_cost_card').length, 1)
+    assert.match(textOf(children[2]), /cost\.findings\.title/, 'and the findings card closes the band')
+    assert.equal(
+      find(tree, (element) => (element.props?.className ?? '').includes('dshb_cost_card')).length, 3,
+      'three cards of equal height: the inspector, the top list and the findings list',
+    )
   } finally {
     react.stop()
     restore()
@@ -1744,6 +1759,12 @@ test('the subtree is read on demand and its money stays out of the session total
     }],
     diagnostics: [{ id: 'broken-1', parentId: 'session-7', depth: 1, reason: 'corrupt' }],
     total: { cost: 12.5, steps: 4 },
+    // The reading carries its own verdicts, detected over this same series with the
+    // subtree cost folded in.
+    findings: [finding('expensive-subtree', [0], {
+      severity: 'warn',
+      evidence: { metric: 'subtreeShare', value: 0.6, threshold: 0.3, subtreeCost: 12.5, sessionCost: 10, sample: 1 },
+    })],
   }
   const deeper = {
     ...children,
@@ -1807,6 +1828,11 @@ test('the subtree is read on demand and its money stays out of the session total
     assert.doesNotMatch(text, /¥22\.50/, 'the child is not folded in')
     assert.match(text, /broken-1/, 'a branch that could not be read is named')
     assert.match(text, /cost\.subagents\.reason\.corrupt/, 'with the reason the Host gave')
+    // The card describes the reading the tab shows: the subtree's own Finding while
+    // the Subagents tab is open, the session's own — none — on the session tab.
+    assert.match(text, /cost\.findings\.subtree/, 'the card says it is the subtree reading')
+    assert.match(text, /cost\.finding\.kind\.expensive-subtree/, 'and lists the Finding of that reading')
+    assert.doesNotMatch(text, /cost\.findings\.empty/, 'so the reading is not reported empty')
 
     // Select the Step itself: the attribution belongs beside the Step that caused it.
     const toTab = (label) => {
@@ -1816,6 +1842,8 @@ test('the subtree is read on demand and its money stays out of the session total
       tree = react.createElement(exported.__internals.CostView, props)
     }
     toTab('cost.tab.session')
+    assert.doesNotMatch(textOf(tree), /cost\.finding\.kind\.expensive-subtree/, 'the session reading keeps its own Findings')
+    assert.match(textOf(tree), /cost\.findings\.empty/, 'and it has none of its own')
     const row = find(tree, (element) => element.props?.className === 'dshb_topk_row')[0]
     row.props.onClick()
     react.beginRender()
@@ -2516,4 +2544,503 @@ test('the inspector prompt is the newest user message at or before the Step', as
   } finally {
     globalThis.fetch = previous
   }
+})
+
+/** One Finding as the Host serves it, with only what a test cares about spelled out. */
+const finding = (kind, refs, over = {}) => ({
+  kind,
+  refs: { from: refs[0], to: refs[1] ?? refs[0], turnFrom: 2, stepFrom: 3, turnTo: 2, stepTo: 3 },
+  severity: 'warn',
+  confidence: 60,
+  evidence: { metric: 'cost', value: 12, threshold: 5, median: 2, mad: 0.1, share: 0.3, z: 9 },
+  ...over,
+})
+
+/** The payload of a series with Findings, in the shape the route serves. */
+const findingsPayload = (nodes, findings, over = {}) => costPayload(nodes, {
+  findings,
+  anomalies: { preset: 'balanced', thresholds: { spike: { madMultiple: 6, floor: 0.25 } } },
+  ...over,
+})
+
+test('the badge of a Step names its worst Finding and counts the rest', async () => {
+  const { exported } = await loadClient()
+  const { overlayOf, findingRank, MAX_BADGES } = exported.__internals
+  const nodes = Array.from({ length: 6 }, (_, index) => costNode({
+    turn: 1, step: index + 1, tStart: NOW - 2 * HOUR + index * MINUTE, tEnd: NOW - 2 * HOUR + index * MINUTE + 1000,
+  }))
+  const findings = [
+    finding('spike', [0], { severity: 'alert', confidence: 80 }),
+    finding('retry-storm', [0], { severity: 'warn', confidence: 40 }),
+    finding('verbose-output', [1], { severity: 'info', confidence: 90 }),
+    finding('context-growth', [3, 5], { severity: 'warn', confidence: 60 }),
+  ]
+  const full = overlayOf(nodes, nodes, findings)
+  assert.deepEqual(full.rows.map((row) => row.kind), ['spike', 'retry-storm', 'verbose-output', 'context-growth'], 'payload order is kept')
+  assert.equal(full.rows.every((row) => row.partial === false), true, 'nothing reaches beyond the whole series')
+  const badge = full.marks.find((mark) => mark.index === 0)
+  assert.equal(badge.kind, 'spike', 'the most severe Finding on the Step names the badge')
+  assert.equal(badge.severity, 'alert')
+  assert.equal(badge.count, 2, 'and the count holds every Finding on it')
+  assert.equal(full.marks.some((mark) => mark.index === 1), false, 'an info-only Step draws no badge at all')
+  assert.deepEqual(full.marks.filter((mark) => mark.index === 3).map((mark) => mark.count), [1], 'a run leaves a badge on each Step it blames')
+
+  const many = Array.from({ length: 60 }, (_, index) => finding('spike', [index % 40], { confidence: index, severity: index % 3 === 0 ? 'alert' : 'warn' }))
+  const wide = nodes.concat(Array.from({ length: 34 }, (_, index) => costNode({ turn: 1, step: 10 + index })))
+  const crowded = overlayOf(wide, wide, many)
+  assert.equal(crowded.marks.length, MAX_BADGES, 'a crowded chart draws only the best badges')
+  for (let index = 1; index < crowded.marks.length; index += 1) {
+    assert.ok(findingRank(crowded.marks[index - 1]) >= findingRank(crowded.marks[index]), 'ordered by severity × confidence')
+  }
+})
+
+test('a Finding that reaches beyond the visible range is listed and marked', async () => {
+  const { exported } = await loadClient()
+  const { overlayOf } = exported.__internals
+  const nodes = Array.from({ length: 5 }, (_, index) => costNode({ turn: 1, step: index + 1 }))
+  const findings = [finding('context-growth', [0, 3]), finding('spike', [0])]
+  const part = overlayOf(nodes, nodes.slice(0, 2), findings)
+  assert.deepEqual(part.rows.map((row) => row.kind), ['context-growth', 'spike'])
+  assert.equal(part.rows[0].partial, true, 'the run continues past the window')
+  assert.equal(part.rows[0].at, 0, 'and it still selects the Step it starts at')
+  assert.equal(part.rows[1].partial, false)
+  assert.deepEqual(part.marks.map((mark) => mark.index), [0, 1], 'a badge is drawn only on the visible Steps it blames')
+  const beyond = overlayOf(nodes, [nodes[4]], findings)
+  assert.deepEqual(beyond.rows, [], 'a Finding whose Steps are all outside the window is not listed')
+})
+
+test('the visible-range filter is memoised on the window and stays inside its budget', async () => {
+  const { exported } = await loadClient()
+  const { overlayOf, overlayMemo } = exported.__internals
+  const nodes = Array.from({ length: 8 }, (_, index) => costNode({ turn: 1, step: index + 1 }))
+  const findings = [finding('spike', [0])]
+  let computed = 0
+  const compute = () => {
+    computed += 1
+    return overlayOf(nodes, nodes, findings)
+  }
+  const first = overlayMemo('session-7:5:balanced:time:0:1:1:8', compute)
+  assert.equal(computed, 1)
+  assert.equal(overlayMemo('session-7:5:balanced:time:0:1:1:8', () => { throw new Error('recomputed') }), first)
+  assert.equal(computed, 1, 'the same window is never filtered twice')
+  const moved = overlayMemo('session-7:5:balanced:time:0.2:1:1:8', compute)
+  assert.equal(computed, 2, 'a new window is a new filter')
+  assert.notEqual(moved, first)
+
+  const wide = Array.from({ length: 10_000 }, (_, index) => costNode({ turn: 1, step: index + 1 }))
+  const lots = Array.from({ length: 200 }, (_, index) => finding('spike', [index * 4, index * 4 + 3]))
+  const started = process.hrtime.bigint()
+  const overlay = overlayOf(wide, wide, lots)
+  const elapsed = Number(process.hrtime.bigint() - started) / 1e6
+  assert.equal(overlay.rows.length, 200)
+  // The design budget is 4 ms for the client filter; the assertion carries CI headroom.
+  assert.ok(elapsed < 50, `filtering 10⁴ Steps took ${elapsed.toFixed(1)} ms, over the budget`)
+})
+
+test('the findings card lists its rows, marks a partial one and says when nothing fired', async () => {
+  const { exported, react } = await loadClient()
+  const Findings = exported.__internals.Findings
+  const rows = [{ ...finding('spike', [0]), at: 2, partial: true }]
+  const picked = []
+  const said = (key, params) => (params === undefined ? key : `${key} ${JSON.stringify(params)}`)
+  const tree = react.createElement(Findings, {
+    t: said,
+    rows,
+    anomalies: { preset: 'strict' },
+    currency: 'CNY',
+    steps: 40,
+    onSelect: (at) => picked.push(at),
+  })
+  const text = textOf(tree)
+  assert.match(text, /cost\.finding\.kind\.spike/)
+  assert.match(text, /cost\.finding\.at\.step/)
+  assert.match(text, /cost\.findings\.confidence/)
+  assert.match(text, /cost\.findings\.partial/)
+  const row = find(tree, (element) => (element.props?.className ?? '').split(' ').includes('dshb_finding'))[0]
+  assert.match(row.props.title, /cost\.finding\.detect\.spike/, 'the explanation is one hover away')
+  assert.match(row.props.title, /cost\.finding\.ranking/)
+  // The explanation names the numbers that cleared the gate, not just the kind: the
+  // value and its multiple, the session median, the MAD z and the share of the session.
+  for (const named of ['12', '2', '9', 'cost\.finding\.spike\.text']) {
+    assert.match(row.props.title, new RegExp(named), `the explanation names ${named}`)
+  }
+  assert.match(text, /12/, 'and so does the row itself')
+  assert.match(text, /cost\.finding\.spike\.text/, 'the sentence is the row body')
+  const sentence = find(tree, (element) => (element.props?.className ?? '').split(' ').includes('dshb_finding_text'))[0]
+  const body = textOf(sentence)
+  for (const number of ['12', '2', '5', '9', '30%']) {
+    assert.match(body, new RegExp(number), `the rendered sentence carries ${number}`)
+  }
+  assert.match(row.props.title, /cost\.finding\.preset/)
+  assert.match(text, /¥12\.00/, 'and the row names the numbers, not only the kind')
+  row.props.onClick()
+  assert.deepEqual(picked, [2], 'a row selects the Step the Finding starts at')
+
+  const empty = textOf(react.createElement(Findings, {
+    t: (key) => key, rows: [], anomalies: null, currency: 'CNY', steps: 5, onSelect: () => {},
+  }))
+  assert.match(empty, /cost\.findings\.empty/)
+  assert.match(empty, /cost\.findings\.norm/, 'a session below the floor says its norm is not established')
+  const quiet = textOf(react.createElement(Findings, {
+    t: (key) => key, rows: [], anomalies: null, currency: 'CNY', steps: 40, onSelect: () => {},
+  }))
+  assert.doesNotMatch(quiet, /cost\.findings\.norm/)
+})
+
+test('the chart draws one badge per Step and a Compaction mark of its own', async () => {
+  const { exported, react } = await loadClient()
+  const { CostChart, overlayOf } = exported.__internals
+  const nodes = [
+    // The Step that carries the badge also spawned a subagent and reported no price: a
+    // badge must not hide either mark (I19).
+    costNode({
+      turn: 1,
+      step: 1,
+      tStart: NOW - HOUR,
+      tEnd: NOW - HOUR + MINUTE,
+      children: [{ id: 'child-1', mode: 'continuable', label: 'Survey the tree', createdAt: NOW - HOUR, turn: 1, step: 1 }],
+    }),
+    costNode({ turn: 1, step: 2, tStart: NOW - 30 * MINUTE, tEnd: NOW, unpriced: true }),
+  ]
+  const overlay = overlayOf(nodes, nodes, [
+    finding('spike', [0], { severity: 'alert', confidence: 80 }),
+    finding('retry-storm', [0], { severity: 'warn', confidence: 10 }),
+    finding('verbose-output', [1], { severity: 'info', confidence: 90 }),
+  ])
+  const compactionNode = costNode({
+    kind: 'compaction',
+    turn: null,
+    step: null,
+    tStart: NOW - 45 * MINUTE,
+    tEnd: NOW - 45 * MINUTE + 1000,
+    compaction: { id: 'cmp-1', model: 'deepseek-flash', shadowedTokenCount: 5e5 },
+  })
+  const picked = []
+  const tree = react.createElement(CostChart, {
+    t: (key) => key,
+    nodes,
+    payload: findingsPayload(nodes, []),
+    clip: true,
+    axis: 'time',
+    metric: 'cost',
+    projection: 'fact',
+    currency: 'CNY',
+    total: 20,
+    range: null,
+    topk: 'steps',
+    onWindow: () => {},
+    selected: -1,
+    onSelect: (index) => picked.push(index),
+    overlay,
+    anomalies: { preset: 'balanced' },
+    compactions: [compactionNode],
+  })
+  textOf(tree)
+  const badges = find(tree, (element) => (element.props?.className ?? '').split(' ').includes('dshb_cost_badge'))
+  assert.equal(badges.length, 1, 'an info Finding draws none, and the two on the first Step draw one')
+  assert.match(badges[0].props.title, /cost\.finding\.detect\.spike/)
+  assert.match(textOf(badges[0]), /2/, 'the badge counts the others')
+  badges[0].props.onClick({ stopPropagation: () => {} })
+  assert.deepEqual(picked, [0], 'activating a badge selects that Step')
+  const marks = find(tree, (element) => element.props?.className === 'dshb_cost_compaction')
+  assert.equal(marks.length, 1, 'a Compaction step gets a mark of its own')
+  assert.equal(marks[0].props.style.left, '180px', 'at its own instant, a quarter into the window')
+  assert.match(marks[0].props.title, /cost\.compaction\.mark/)
+  // The badge sits beside the marks the chart already draws, not on top of them.
+  const spawn = find(tree, (element) => element.props?.className === 'dshb_cost_spawn')
+  assert.equal(spawn.length, 1, 'the Step that spawned a subagent keeps its spawn mark')
+  assert.equal(spawn[0].props.style.left, badges[0].props.style.left, 'on the same Step as the badge')
+  // The canvas keeps drawing the point marks — the unpriced and clipped Steps among
+  // them; what a badge must not do is replace the DOM marks that share its Step.
+  assert.equal(
+    find(tree, (element) => element.props?.className === 'dshb_cost_mark').length, 0,
+    'nothing is selected, so the selection marker is absent',
+  )
+})
+
+/** Walk an element tree without executing components, so a component's own props are reachable. */
+const elementOf = (node, predicate) => {
+  if (node === null || node === undefined || typeof node !== 'object') return undefined
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const hit = elementOf(child, predicate)
+      if (hit !== undefined) return hit
+    }
+    return undefined
+  }
+  if (predicate(node)) return node
+  return elementOf(node.children, predicate)
+}
+
+test('a Compaction step counts in the session total without joining the Step line', async () => {
+  const { exported, react } = await loadClient()
+  const step = costNode({ turn: 1, step: 1, tStart: NOW - HOUR, tEnd: NOW - HOUR + MINUTE })
+  const compactionNode = costNode({
+    kind: 'compaction',
+    turn: null,
+    step: null,
+    tStart: NOW - 30 * MINUTE,
+    tEnd: NOW - 30 * MINUTE + 1000,
+    cost: 4,
+    costByBucket: { uncachedInput: 4, cacheRead: 0, cacheWrite: 0, output: 0 },
+    offPeak: { cost: 2, costByBucket: { uncachedInput: 2, cacheRead: 0, cacheWrite: 0, output: 0 } },
+    compaction: { id: 'cmp-1', model: 'deepseek-flash', shadowedTokenCount: 5e5 },
+  })
+  const restore = stubSeriesAndWrites(findingsPayload([step, compactionNode], [finding('spike', [0])]), [])
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => undefined }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    const tree = react.createElement(exported.__internals.CostView, props)
+    const text = textOf(tree)
+    assert.match(text, /¥14\.00/, 'the session estimate counts the compaction')
+    react.beginRender()
+    const chart = elementOf(exported.__internals.CostView(props), (element) => element.type === exported.__internals.CostChart)
+    assert.deepEqual(chart.props.nodes.map((node) => node.kind ?? 'step'), ['step'], 'the cost line holds Steps only')
+    assert.equal(chart.props.compactions.length, 1, 'the compaction travels beside the line')
+    assert.match(text, /cost\.compaction\.row/, 'the top list ranks it as a compaction')
+    const row = find(tree, (element) => (element.props?.className ?? '').includes('dshb_topk_row_off'))
+    assert.equal(row.length, 1, 'its row is marked as not-a-Step')
+    assert.equal(row[0].props.role, undefined, 'and it offers no focus target')
+    assert.equal(find(tree, (element) => element.props?.className === 'dshb_finding_detail').length, 0, 'the compaction opens no inspector of its own')
+  } finally {
+    react.stop()
+    restore()
+  }
+})
+
+test('brushing, zooming and panning never re-read the series', async () => {
+  const { exported, react } = await loadClient()
+  const nodes = [
+    costNode({ turn: 1, step: 1, tStart: NOW - HOUR, tEnd: NOW - HOUR + MINUTE }),
+    costNode({ turn: 1, step: 2, tStart: NOW - 30 * MINUTE, tEnd: NOW - 30 * MINUTE + MINUTE }),
+    costNode({ turn: 1, step: 3, tStart: NOW - 10 * MINUTE, tEnd: NOW }),
+  ]
+  const calls = []
+  const restore = stubCostFetch(findingsPayload(nodes, [finding('context-growth', [0, 2])]), { calls })
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => undefined }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    let tree = react.createElement(exported.__internals.CostView, props)
+    textOf(tree)
+    const read = calls.length
+    assert.ok(read >= 1, 'the view reads the series once')
+    assert.match(textOf(tree), /cost\.finding\.kind\.context-growth/)
+
+    // A wheel zoom, a right-drag pan and a left-drag brush all end in one call to the
+    // window setter (D34); what the chart does with the pointer is covered above, and
+    // what matters here is that moving the window never re-reads the series.
+    const chartOf = () => {
+      react.beginRender()
+      return elementOf(exported.__internals.CostView(props), (element) => element.type === exported.__internals.CostChart)
+    }
+    const setWindow = chartOf().props.onWindow
+    const settled = calls.length
+    for (const next of [{ from: 0.2, to: 0.8 }, { from: 0.3, to: 0.7 }, { from: 0.45, to: 1 }]) {
+      setWindow(next)
+    }
+    assert.equal(calls.length, settled, 'a wheel zoom, a pan and a brush perform no read of their own')
+    // The stub re-runs effects on every traversal instead of tracking mount and update, so
+    // the next render reads once — the point is that only a render does.
+    tree = react.createElement(exported.__internals.CostView, props)
+    textOf(tree)
+    assert.equal(calls.length, settled + 1, 'only the render that follows reads the series, and only once')
+    assert.match(textOf(tree), /cost\.finding\.kind\.context-growth/, 'the Finding is filtered, not forgotten')
+    assert.match(textOf(tree), /cost\.findings\.partial/, 'and a window that covers part of its range says so')
+    const range = find(tree, (element) => element.props?.className === 'dshb_cost_panes')
+    assert.equal(range.length, 1, 'and the view still renders its three cards')
+  } finally {
+    react.stop()
+    restore()
+  }
+})
+
+test('both locales carry every Indicator sentence the view can ask for', async () => {
+  const { exported } = await loadClient()
+  const ctx = clientContext()
+  exported.apply(ctx)
+  const copy = ctx.dictionary()
+  assert.ok(copy !== null, 'the dictionaries are registered under the plugin namespace')
+  assert.deepEqual(
+    Object.keys(copy.ru).sort(),
+    Object.keys(copy.en).sort(),
+    'a reader gets the same keys in either language',
+  )
+  for (const [locale, table] of Object.entries(copy)) {
+    for (const [key, value] of Object.entries(table)) {
+      assert.equal(typeof value, 'string', `${locale}.${key} is a string`)
+    }
+  }
+  // The list is read from the catalogue, not written out here: a hard-coded one drifts the
+  // moment an Indicator is added or dropped, and the view would fall back to a placeholder.
+  const kinds = CATALOGUE.map((entry) => entry.id)
+  const metrics = { spike: 'spike.text', 'verbose-output': 'verbose.text', 'context-growth': 'growth.text',
+    'retry-storm': 'retry.step', 'cache-miss': 'cache.text',
+    'tool-output-inflation': 'tool.text', 'post-compaction-spike': 'compaction.text',
+    'expensive-subtree': 'subtree.text', 'tariff-attributable': 'tariff.text', 'pricing-gap': 'gap.text' }
+  for (const locale of ['en', 'ru']) {
+    for (const kind of kinds) {
+      assert.ok(copy[locale][`cost.finding.kind.${kind}`], `${locale} names ${kind}`)
+      assert.ok(copy[locale][`cost.finding.detect.${kind}`], `${locale} explains ${kind}`)
+      assert.ok(copy[locale][`cost.finding.${metrics[kind]}`], `${locale} spells out the numbers of ${kind}`)
+      assert.ok(exported.__internals.FINDING_GLYPH[kind], `${locale} has a glyph for ${kind}`)
+    }
+    for (const key of ['cost.findings.title', 'cost.findings.empty', 'cost.findings.norm', 'cost.findings.partial',
+      'cost.findings.legend', 'cost.findings.confidence', 'cost.finding.ranking', 'cost.finding.preset',
+      'cost.compaction.mark', 'cost.compaction.row', 'cost.compaction.body']) {
+      assert.ok(copy[locale][key], `${locale} has ${key}`)
+      assert.notEqual(copy[locale][key].trim(), '', `${locale}.${key} is not empty`)
+    }
+  }
+  // Every catalogue id has a sentence and a glyph of its own: neither map may silently drop
+  // one, and neither may keep a dead entry for an Indicator that no longer exists.
+  assert.deepEqual(Object.keys(metrics).sort(), [...kinds].sort(), 'the sentence map is the catalogue')
+  assert.deepEqual(Object.keys(exported.__internals.FINDING_GLYPH).sort(), [...kinds].sort(), 'so is the glyph map')
+})
+
+test('the projection and the metric never move the Findings, only the money they are drawn over', async () => {
+  const { exported, react } = await loadClient()
+  const nodes = [costNode(), costNode({ turn: 1, step: 2, tStart: NOW - HOUR, tEnd: NOW - HOUR + MINUTE })]
+  const findings = [finding('spike', [0], { severity: 'alert', confidence: 71 })]
+  const restore = stubCostFetch(costPayload(nodes, {
+    findings,
+    anomalies: { preset: 'balanced', thresholds: { spike: { madMultiple: 6, floor: 0.25 } } },
+  }))
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => ({ seq: 5, currency: 'CNY' }) }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    let tree = react.createElement(exported.__internals.CostView, props)
+    const rowsOf = (element) => textOf(find(element, (each) => String(each.props?.className).split(' ').includes('dshb_findings_list'))[0])
+    const badges = (element) => find(element, (each) => String(each.props?.className).split(' ').includes('dshb_cost_badge')).length
+    const before = rowsOf(tree)
+    assert.match(before, /cost\.finding\.kind\.spike/)
+    assert.equal(badges(tree), 1)
+
+    // The same series under another projection and another metric: the Host detected on
+    // `fact` and the client only filters, so nothing about the verdict may change.
+    for (const button of ['cost.proj.peak', 'cost.metric.tokens']) {
+      const control = find(tree, (element) => element.type === 'button' && element.children?.join('') === button)[0]
+      assert.ok(control !== undefined, `${button} is on screen`)
+      control.props.onClick()
+      react.beginRender()
+      tree = react.createElement(exported.__internals.CostView, props)
+      assert.match(textOf(tree), new RegExp(button.replace('.', '\\.')), 'the control switched')
+    }
+    assert.equal(rowsOf(tree), before, 'the findings list is byte for byte the same')
+    assert.equal(badges(tree), 1, 'and so is the badge')
+  } finally {
+    react.stop()
+    restore()
+  }
+})
+
+test('a badge names the top-ranked kind and counts every Finding behind it', async () => {
+  const { exported, react } = await loadClient()
+  const nodes = [costNode({ turn: 1, step: 1, tStart: NOW - HOUR, tEnd: NOW - HOUR + MINUTE })]
+  // Three Findings on one Step: an alert, a warn and an info. The badge names the
+  // top-ranked one — severity first — and counts all three; the info one draws nothing
+  // of its own but still has a row.
+  const findings = [
+    // An alert whose margin was barely past its floor can rank below a confident warn.
+    finding('spike', [0], { severity: 'alert', confidence: 40 }),
+    finding('cache-miss', [0], { severity: 'warn', confidence: 95 }),
+    finding('verbose-output', [0], { severity: 'info', confidence: 90 }),
+  ]
+  const restore = stubCostFetch(costPayload(nodes, {
+    findings,
+    anomalies: { preset: 'balanced', thresholds: { spike: { madMultiple: 6, floor: 0.25 } } },
+  }))
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => ({ seq: 5, currency: 'CNY' }) }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    const tree = react.createElement(exported.__internals.CostView, props)
+    const text = textOf(tree)
+    const badges = find(tree, (element) => String(element.props?.className).split(' ').includes('dshb_cost_badge'))
+    assert.equal(badges.length, 1, 'one badge for the one Step that carries loud Findings')
+    // One ranking everywhere: severity × confidence. The warn with 95 outranks the alert
+    // with 40, exactly as it would in the list.
+    assert.match(textOf(badges[0]), /⊘/, 'the glyph is the highest-ranked Finding, not the earliest')
+    // `info` draws no badge of its own, so it is not part of the badge's count either:
+    // it lives in the list, where all three are.
+    assert.match(textOf(badges[0]), /2/, 'and the count is the Findings the badge stands for')
+    const rows = find(tree, (element) => String(element.props?.className).split(' ').includes('dshb_findings_list'))[0]
+    assert.equal(find(rows, (element) => String(element.props?.className).split(' ').includes('dshb_finding')).length, 3, 'all three are listed')
+  } finally {
+    react.stop()
+    restore()
+  }
+})
+
+test('a window that holds no Finding says so instead of showing a stale one', async () => {
+  const { exported, react } = await loadClient()
+  const nodes = [
+    costNode({ turn: 1, step: 1, tStart: NOW - HOUR, tEnd: NOW - HOUR + MINUTE }),
+    costNode({ turn: 1, step: 2, tStart: NOW - 30 * MINUTE, tEnd: NOW - 30 * MINUTE + MINUTE }),
+    costNode({ turn: 1, step: 3, tStart: NOW - 10 * MINUTE, tEnd: NOW }),
+  ]
+  const restore = stubCostFetch(findingsPayload(nodes, [finding('spike', [2], { severity: 'alert', confidence: 88 })]))
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => undefined }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    let tree = react.createElement(exported.__internals.CostView, props)
+    assert.match(textOf(tree), /cost\.finding\.kind\.spike/, 'the Finding is listed over the whole session')
+
+    const chartOf = () => {
+      react.beginRender()
+      return elementOf(exported.__internals.CostView(props), (element) => element.type === exported.__internals.CostChart)
+    }
+    chartOf().props.onWindow({ from: 0, to: 0.2 })
+    tree = react.createElement(exported.__internals.CostView, props)
+    textOf(tree)
+    assert.doesNotMatch(textOf(tree), /cost\.finding\.kind\.spike/, 'the Step it blames is out of the window')
+    assert.match(textOf(tree), /cost\.findings\.empty/, 'and the card says the range holds nothing')
+    assert.match(textOf(tree), /cost\.findings\.legend/, 'while still explaining what the card is for')
+    react.stop()
+  } finally {
+    restore()
+  }
+})
+
+test('the findings card states the preset it read and the thresholds behind it', async () => {
+  const { exported, react } = await loadClient()
+  const Findings = exported.__internals.Findings
+  const { thresholdLines } = exported.__internals
+  const anomalies = {
+    preset: 'strict',
+    thresholds: {
+      spike: { id: 'spike', madMultiple: 9, p95Factor: 7.5, reference: 3, floor: 0.375, statistical: true, sampleFactor: true, completeness: 1 },
+      'pricing-gap': { id: 'pricing-gap', share: 0.3, floor: 0.5, statistical: false, sampleFactor: false, completeness: 1 },
+    },
+  }
+  const lines = thresholdLines(anomalies)
+  assert.deepEqual(lines, ['spike: madMultiple=9 p95Factor=7.5 reference=3 floor=0.375', 'pricing-gap: share=0.3 floor=0.5'], 'every gate is named, bookkeeping fields are not')
+  assert.deepEqual(thresholdLines(null), [])
+  const tree = react.createElement(Findings, {
+    t: (key, params) => (params === undefined ? key : `${key} ${JSON.stringify(params)}`),
+    rows: [],
+    anomalies,
+    currency: 'CNY',
+    steps: 40,
+    onSelect: () => {},
+  })
+  const text = textOf(tree)
+  assert.match(text, /cost\.findings\.preset/, 'the card says which preset the verdicts came from')
+  assert.match(text, /cost\.finding\.preset\.strict/, 'by name')
+  const preset = find(tree, (element) => (element.props?.className ?? '').split(' ').includes('dshb_cost_note') && String(element.props?.title ?? '').includes('madMultiple'))[0]
+  assert.ok(preset !== undefined, 'and offers the effective thresholds on hover')
+  assert.match(preset.props.title, /pricing-gap: share=0\.3/, 'all of them, in catalogue order')
 })

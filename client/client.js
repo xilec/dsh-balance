@@ -222,15 +222,44 @@ window.__ModuleLoader__.load({
         // Two content columns and no more: on a wide screen a row that spans the whole
         // window reads worse than a compact one, and the same cap keeps the tab strip
         // aligned with the panes below it.
-        '.dshb_cost_panes{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;align-items:stretch;max-width:1120px}',
-        // Both readings are cards of the same height, so neither looks like loose text.
+        '.dshb_cost_panes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-items:stretch;max-width:1380px}',
+        // The three readings are cards of the same height, so neither looks like loose text.
         '.dshb_cost_pane{min-width:0;display:flex;flex-direction:column}',
+        '@media (max-width:1200px){.dshb_cost_panes{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}',
         '@media (max-width:900px){.dshb_cost_panes{grid-template-columns:minmax(0,1fr)}}',
         '.dshb_topk{display:flex;flex-direction:column;gap:2px}',
         '.dshb_topk_row{display:grid;grid-template-columns:minmax(0,1fr) max-content;gap:0 12px;align-items:baseline;cursor:pointer;',
         'border-radius:6px;padding:2px 6px}',
         '.dshb_topk_row:hover{background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.08))}',
         '.dshb_topk_row_on{background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.12))}',
+        // A Compaction row is ranked with the Steps but is not one of them: it is dimmed
+        // and opens nothing, because it has no Step to open (I7).
+        '.dshb_topk_row_off{cursor:default;opacity:.8}',
+        // The Indicator badges sit on the Step they blame, above its point, and never
+        // hide the marks the chart already draws (I19).
+        '.dshb_cost_badge{position:absolute;transform:translate(-50%,-135%);display:inline-flex;align-items:center;gap:2px;',
+        'padding:0 3px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.35));',
+        'background:var(--dsw-alias-bg-layer-1,rgba(20,20,20,.82));color:var(--dsw-alias-label-primary);font-size:10px;line-height:14px;cursor:pointer}',
+        '.dshb_cost_badge:hover{background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.22))}',
+        '.dshb_cost_badge_warn{border-color:var(--dsw-alias-state-warn-primary,#f59e0b);color:var(--dsw-alias-state-warn-primary,#f59e0b)}',
+        '.dshb_cost_badge_alert{border-color:var(--dsw-alias-state-error-primary,#ef4444);color:var(--dsw-alias-state-error-primary,#ef4444)}',
+        '.dshb_cost_badgeCount{color:var(--dsw-alias-label-tertiary);font-size:9px}',
+        // A Compaction step draws no point of the cost line: one dashed mark of its own.
+        '.dshb_cost_compaction{position:absolute;top:0;bottom:0;width:0;border-left:1px dashed var(--dsw-alias-label-caption,rgba(128,128,128,.6));pointer-events:auto}',
+        // The findings card: the third card of the band, scrolling inside itself (I20).
+        '.dshb_findings{display:flex;flex-direction:column;gap:6px}',
+        '.dshb_findings_list{display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:320px;min-height:0}',
+        '.dshb_finding{display:flex;flex-direction:column;gap:2px;padding:4px 6px;border-radius:8px;cursor:pointer;',
+        'border-left:3px solid var(--dsw-alias-border-l2,rgba(128,128,128,.35))}',
+        '.dshb_finding:hover{background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.08))}',
+        '.dshb_finding_warn{border-left-color:var(--dsw-alias-state-warn-primary,#f59e0b)}',
+        '.dshb_finding_alert{border-left-color:var(--dsw-alias-state-error-primary,#ef4444)}',
+        '.dshb_finding_head{display:flex;align-items:baseline;gap:4px;color:var(--dsw-alias-label-primary);font-size:12px}',
+        '.dshb_finding_text{color:var(--dsw-alias-label-secondary);font-size:11px;line-height:1.35}',
+        '.dshb_finding_partial{color:var(--dsw-alias-label-tertiary);font-size:10px;border:1px dashed var(--dsw-alias-border-l2,rgba(128,128,128,.35));',
+        'border-radius:5px;padding:0 3px}',
+        '.dshb_finding_detail{border-top:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));margin-top:4px;padding-top:4px}',
+        '.dshb_finding_detailHead{color:var(--dsw-alias-label-primary);font-size:12px;margin-top:2px}',
         '.dshb_topk_head{color:var(--dsw-alias-label-secondary);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
         '.dshb_topk_rank{color:var(--dsw-alias-label-tertiary);margin-right:6px;font-size:11px}',
         '.dshb_topk_money{color:var(--dsw-alias-label-primary);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}',
@@ -446,6 +475,61 @@ window.__ModuleLoader__.load({
         'cost.inspector.loadFailed': 'loading older events failed',
         'cost.inspector.noFocus': 'no focus target: this Step holds no tool call',
         'cost.inspector.focus': 'Show in Trajectory',
+        'cost.findings.title': 'Findings',
+        'cost.findings.legend': 'confidence ranks suspicion inside the Session cost estimate — it is not a probability and not a claim about the bill',
+        'cost.findings.empty': 'no Indicator found anything in this range',
+        'cost.findings.norm': 'this session is below the short-session floor: its own norm is not established yet, so only the rule-based Indicators speak',
+        'cost.findings.partial': 'reaches beyond this range',
+        'cost.findings.preset': 'detected under the {preset} preset — hover for its thresholds',
+        'cost.findings.subtree': 'the subtree reading: its own Findings, over this chart',
+        'cost.findings.confidence': 'confidence {value} · {severity}',
+        'cost.finding.at.step': 'turn {turn}, step {step}',
+        'cost.finding.at.run': 'turn {turn}, steps {from}–{to}',
+        'cost.finding.at.turns': 'turns {from}.{stepFrom}–{to}.{stepTo}',
+        'cost.finding.at.compaction': 'a Compaction step',
+        'cost.finding.severity.info': 'info',
+        'cost.finding.severity.warn': 'warning',
+        'cost.finding.severity.alert': 'alert',
+        'cost.finding.preset': '{preset} sensitivity',
+        'cost.finding.preset.strict': 'strict',
+        'cost.finding.preset.balanced': 'balanced',
+        'cost.finding.preset.loose': 'loose',
+        'cost.finding.ranking': 'confidence {confidence} ({severity}) ranks suspicion inside the estimate, not a bill',
+        'cost.finding.unknown': 'unknown Indicator {kind}',
+        'cost.finding.kind.spike': 'cost spike',
+        'cost.finding.kind.verbose-output': 'long reply',
+        'cost.finding.kind.context-growth': 'context growth',
+        'cost.finding.kind.retry-storm': 'retry storm',
+        'cost.finding.kind.cache-miss': 'cache miss',
+        'cost.finding.kind.tool-output-inflation': 'input inflation',
+        'cost.finding.kind.post-compaction-spike': 'post-compaction spike',
+        'cost.finding.kind.expensive-subtree': 'expensive subtree',
+        'cost.finding.kind.tariff-attributable': 'peak-window cost',
+        'cost.finding.kind.pricing-gap': 'pricing gap',
+        'cost.finding.detect.spike': 'one Step far above this session’s own median',
+        'cost.finding.detect.verbose-output': 'a generation far longer than this session’s own replies',
+        'cost.finding.detect.context-growth': 'cost climbing with the context over a run of Steps',
+        'cost.finding.detect.retry-storm': 'a Step fighting retries, or a Turn full of retried Steps',
+        'cost.finding.detect.cache-miss': 'the context resent instead of reused, after a cache was in use',
+        'cost.finding.detect.tool-output-inflation': 'a large tool result the next Step pays for as input',
+        'cost.finding.detect.post-compaction-spike': 'a compaction, and the Step that had to rebuild the context after it',
+        'cost.finding.detect.expensive-subtree': 'a subtree costing as much as the session it belongs to',
+        'cost.finding.detect.tariff-attributable': 'money the peak window added, rather than the work',
+        'cost.finding.detect.pricing-gap': 'models with no rate in the Tariff rule, so the total is a lower bound',
+        'cost.finding.spike.text': 'this Step cost {cost} — {multiple} the session median {median}, past the {threshold} gate (MAD z {z}), {share} of the session',
+        'cost.finding.verbose.text': '{value} output tokens against a {threshold}-token gate (session median {median} output tokens, z {z})',
+        'cost.finding.growth.text': 'cost rose {rise} above the session median {median} over {steps} Steps (R² {r2} against a line, gate {threshold})',
+        'cost.finding.retry.step': '{count} retries inside one Step (gate {threshold}; the Step cost {cost})',
+        'cost.finding.retry.turn': '{count} retried Steps in turn {turn} (gate {threshold}; {cost} in total)',
+        'cost.finding.cache.text': '{share} of the input over {steps} consecutive Steps was uncached (gate {threshold} uncached)',
+        'cost.finding.tool.text': 'the next Step carried {delta} more input tokens after {tools} (gate {threshold})',
+        'cost.finding.compaction.text': 'the compaction cost {cost}, and the Step after it cost {value}× the session median (gate {threshold}×, {tokens} tokens shadowed)',
+        'cost.finding.subtree.text': 'the subtree costs {cost} — {share} of the session estimate {session}',
+        'cost.finding.tariff.text': '{share} of the session ({delta} of {total}) is the peak-window surcharge',
+        'cost.finding.gap.text': '{steps} Steps carry {share} of the tokens with no rate: the session estimate is a lower bound',
+        'cost.compaction.mark': 'compaction · {cost} · {tokens} tokens shadowed',
+        'cost.compaction.row': 'Compaction',
+        'cost.compaction.body': 'context compaction · {tokens} tokens shadowed',
       },
       ru: {
         'readout.balance': 'б',
@@ -651,6 +735,61 @@ window.__ModuleLoader__.load({
         'cost.inspector.loadFailed': 'не удалось загрузить старые события',
         'cost.inspector.noFocus': 'нет цели фокуса: в этом шаге нет вызова инструмента',
         'cost.inspector.focus': 'Показать в Trajectory',
+        'cost.findings.title': 'Находки',
+        'cost.findings.legend': 'уверенность упорядочивает подозрение внутри оценки стоимости сессии — это не вероятность и не счёт к оплате',
+        'cost.findings.empty': 'в этом диапазоне индикаторы ничего не нашли',
+        'cost.findings.norm': 'сессия короче порога: её собственная норма ещё не установлена, поэтому говорят только правила',
+        'cost.findings.partial': 'выходит за диапазон',
+        'cost.findings.preset': 'детекция по пресету {preset} — пороги под курсором',
+        'cost.findings.subtree': 'чтение поддерева: его собственные находки по этому графику',
+        'cost.findings.confidence': 'уверенность {value} · {severity}',
+        'cost.finding.at.step': 'ход {turn}, шаг {step}',
+        'cost.finding.at.run': 'ход {turn}, шаги {from}–{to}',
+        'cost.finding.at.turns': 'ходы {from}.{stepFrom}–{to}.{stepTo}',
+        'cost.finding.at.compaction': 'ступень компакции',
+        'cost.finding.severity.info': 'инфо',
+        'cost.finding.severity.warn': 'предупреждение',
+        'cost.finding.severity.alert': 'тревога',
+        'cost.finding.preset': 'чувствительность «{preset}»',
+        'cost.finding.preset.strict': 'строгая',
+        'cost.finding.preset.balanced': 'сбалансированная',
+        'cost.finding.preset.loose': 'мягкая',
+        'cost.finding.ranking': 'уверенность {confidence} ({severity}) упорядочивает подозрение внутри оценки, а не счёт',
+        'cost.finding.unknown': 'неизвестный индикатор {kind}',
+        'cost.finding.kind.spike': 'всплеск стоимости',
+        'cost.finding.kind.verbose-output': 'длинный ответ',
+        'cost.finding.kind.context-growth': 'рост контекста',
+        'cost.finding.kind.retry-storm': 'шторм повторов',
+        'cost.finding.kind.cache-miss': 'промах кэша',
+        'cost.finding.kind.tool-output-inflation': 'рост входа',
+        'cost.finding.kind.post-compaction-spike': 'всплеск после компакции',
+        'cost.finding.kind.expensive-subtree': 'дорогое поддерево',
+        'cost.finding.kind.tariff-attributable': 'пиковый тариф',
+        'cost.finding.kind.pricing-gap': 'пробел в ставках',
+        'cost.finding.detect.spike': 'одна ступень сильно выше собственной медианы сессии',
+        'cost.finding.detect.verbose-output': 'ответ намного длиннее собственной нормы сессии',
+        'cost.finding.detect.context-growth': 'стоимость растёт вместе с контекстом на серии ступеней',
+        'cost.finding.detect.retry-storm': 'ступень, борющаяся с повторами, или ход, полный повторяемых ступеней',
+        'cost.finding.detect.cache-miss': 'контекст отправлен заново вместо переиспользования, хотя кэш уже работал',
+        'cost.finding.detect.tool-output-inflation': 'большой результат инструмента, который следующая ступень читает как вход',
+        'cost.finding.detect.post-compaction-spike': 'компакция и ступень, которой пришлось пересобрать контекст после неё',
+        'cost.finding.detect.expensive-subtree': 'поддерево, которое стоит как сессия, которой принадлежит',
+        'cost.finding.detect.tariff-attributable': 'деньги, которые добавило пиковое окно, а не работа',
+        'cost.finding.detect.pricing-gap': 'модели без ставки в тарифном правиле, поэтому итог — нижняя граница',
+        'cost.finding.spike.text': 'ступень стоила {cost} — {multiple} от медианы сессии {median}, выше порога {threshold} (MAD z {z}), {share} сессии',
+        'cost.finding.verbose.text': '{value} выходных токенов против порога {threshold} (медиана выходных токенов сессии {median}, z {z})',
+        'cost.finding.growth.text': 'стоимость выросла на {rise} над медианой сессии {median} за {steps} ступеней (R² {r2} к прямой, порог {threshold})',
+        'cost.finding.retry.step': '{count} повторов внутри одной ступени (порог {threshold}; ступень стоила {cost})',
+        'cost.finding.retry.turn': '{count} ступеней с повторами в ходе {turn} (порог {threshold}; всего {cost})',
+        'cost.finding.cache.text': '{share} входных токенов на {steps} подряд идущих ступенях не взяты из кэша (порог {threshold})',
+        'cost.finding.tool.text': 'следующая ступень принесла на {delta} входных токенов больше после {tools} (порог {threshold})',
+        'cost.finding.compaction.text': 'компакция стоила {cost}, а следующая ступень — {value}× медианы сессии (порог {threshold}×, затенено {tokens} токенов)',
+        'cost.finding.subtree.text': 'поддерево стоит {cost} — {share} оценки сессии {session}',
+        'cost.finding.tariff.text': '{share} сессии ({delta} из {total}) — надбавка пикового окна',
+        'cost.finding.gap.text': '{steps} ступеней несут {share} токенов без ставки: оценка сессии — нижняя граница',
+        'cost.compaction.mark': 'компакция · {cost} · затенено {tokens} токенов',
+        'cost.compaction.row': 'Компакция',
+        'cost.compaction.body': 'компакция контекста · затенено {tokens} токенов',
       },
     }
     //#endregion
@@ -1800,6 +1939,149 @@ window.__ModuleLoader__.load({
       return clampWindow(current.from + delta * width, current.to + delta * width)
     }
 
+    /** The Findings the series payload carries: the client detects none of its own. */
+    function findingsOf(payload) {
+      return Array.isArray(payload?.findings) ? payload.findings : []
+    }
+
+    /** The glyph a Finding of each Indicator draws on the chart. */
+    const FINDING_GLYPH = Object.freeze({
+      spike: '▲',
+      'verbose-output': '≡',
+      'context-growth': '↗',
+      'retry-storm': '↻',
+      'cache-miss': '⊘',
+      'tool-output-inflation': '⇥',
+      'post-compaction-spike': '◆',
+      'expensive-subtree': '⤷',
+      'tariff-attributable': '◷',
+      'pricing-gap': '?',
+    })
+
+    /** The three grades, so one ranking serves the badges and the list alike. */
+    const SEVERITY_WEIGHT = Object.freeze({ info: 1, warn: 2, alert: 3 })
+
+    /** How many badges the plot draws before the rest are left to the list (I19). */
+    const MAX_BADGES = 24
+
+    /** `severity × confidence`: the one order the badges and the list both use. */
+    function findingRank(finding) {
+      return (SEVERITY_WEIGHT[finding.severity] ?? 0) * (finding.confidence ?? 0)
+    }
+
+    /**
+     * The effective thresholds as hover lines, one per Indicator.
+     *
+     * Every gate, floor and rate the Host detected under is named, in catalogue order,
+     * so a reader can see the rule behind a verdict without the view editing it.
+     */
+    function thresholdLines(anomalies) {
+      const thresholds = anomalies?.thresholds
+      if (thresholds === null || thresholds === undefined || typeof thresholds !== 'object') return []
+      return Object.entries(thresholds).map(([id, values]) => {
+        const gates = Object.entries(values ?? {})
+          .filter(([field]) => !['id', 'statistical', 'sampleFactor', 'completeness', 'maxSeverity'].includes(field))
+          .map(([field, value]) => `${field}=${value}`)
+          .join(' ')
+        return `${id}: ${gates}`
+      })
+    }
+
+    /** Where a Finding sits, as a short label: one Step, a run, or a Compaction step. */
+    function findingPlace(t, finding) {
+      const refs = finding.refs ?? {}
+      if (refs.turnFrom === null || refs.turnFrom === undefined) return t('cost.finding.at.compaction')
+      if (refs.from === refs.to) return t('cost.finding.at.step', { turn: refs.turnFrom, step: refs.stepFrom })
+      if (refs.turnFrom === refs.turnTo) {
+        return t('cost.finding.at.run', { turn: refs.turnFrom, from: refs.stepFrom, to: refs.stepTo })
+      }
+      return t('cost.finding.at.turns', {
+        from: refs.turnFrom, stepFrom: refs.stepFrom, to: refs.turnTo, stepTo: refs.stepTo,
+      })
+    }
+
+    /**
+     * Which Findings touch the visible Steps, and which Steps carry a badge.
+     *
+     * Brushing, panning and zooming never refetch the series: the Findings the payload
+     * carries are filtered here instead. A Finding is shown when at least one Step it
+     * references is visible, and one that reaches beyond the window says so rather than
+     * disappearing — hiding it would conceal exactly what the reader zoomed in to see.
+     *
+     * @param allNodes - every node of the series, as the payload served them.
+     * @param sliceNodes - the nodes of the visible range.
+     * @param findings - the Findings the payload carries.
+     * @returns `{ rows, marks, at }`: the visible rows in payload order, the badge marks
+     * capped by `severity × confidence`, and the Findings of each visible Step.
+     */
+    function overlayOf(allNodes, sliceNodes, findings) {
+      const visibleAt = new Map()
+      sliceNodes.forEach((node, index) => visibleAt.set(node, index))
+      const rows = []
+      const marks = new Map()
+      const at = new Map()
+      for (const finding of findings) {
+        const last = allNodes.length - 1
+        const from = Math.max(0, Math.min(last, finding.refs?.from ?? 0))
+        const to = Math.max(from, Math.min(last, finding.refs?.to ?? from))
+        const seen = []
+        let hidden = 0
+        for (let index = from; index <= to; index += 1) {
+          const visible = visibleAt.get(allNodes[index])
+          if (visible === undefined) hidden += 1
+          else seen.push(visible)
+        }
+        if (seen.length === 0) continue
+        rows.push({ ...finding, at: seen[0], partial: hidden > 0 })
+        for (const index of seen) {
+          const list = at.get(index)
+          if (list === undefined) at.set(index, [finding])
+          else list.push(finding)
+        }
+        if (finding.severity === 'info') continue
+        for (const index of seen) {
+          const mark = marks.get(index)
+          if (mark === undefined) {
+            marks.set(index, {
+              index, kind: finding.kind, severity: finding.severity, confidence: finding.confidence, count: 1,
+            })
+            continue
+          }
+          mark.count += 1
+          if (findingRank(finding) > findingRank(mark)) {
+            mark.kind = finding.kind
+            mark.severity = finding.severity
+            mark.confidence = finding.confidence
+          }
+        }
+      }
+      const capped = [...marks.values()]
+        .sort((a, b) => findingRank(b) - findingRank(a) || a.index - b.index)
+        .slice(0, MAX_BADGES)
+      return { rows, marks: capped, at }
+    }
+
+    /**
+     * The last visible-range filter.
+     *
+     * A wheel zoom re-renders on every frame and the filter is a pure function of the
+     * series and the window, so one entry is enough (design I24: the client filter is
+     * memoised on `(from, to)`).
+     */
+    let overlayCache = null
+    function overlayMemo(key, compute) {
+      if (overlayCache !== null && overlayCache.key === key) return overlayCache.value
+      const value = compute()
+      overlayCache = { key, value }
+      return value
+    }
+
+    /** The Findings of one node of the series, in payload order. */
+    function findingsAt(findings, index) {
+      if (!Number.isInteger(index) || index < 0) return []
+      return findings.filter((finding) => index >= (finding.refs?.from ?? -1) && index <= (finding.refs?.to ?? -1))
+    }
+
     /**
      * The slice of the series a window covers.
      *
@@ -1848,7 +2130,7 @@ window.__ModuleLoader__.load({
      * @returns rows, best first, each with the index of the Step it selects.
      */
     function topRows(nodes, options = {}) {
-      const { metric = 'cost', projection = 'fact', mode = 'steps', count = 10 } = options
+      const { metric = 'cost', projection = 'fact', mode = 'steps', count = 10, compactions = [] } = options
       const costOf = (node) => projectionOf(node, projection)?.cost ?? 0
       const rows = []
       if (mode === 'turns') {
@@ -1888,9 +2170,9 @@ window.__ModuleLoader__.load({
             inProgress: group.nodes.some((node) => node.ended === false),
           })
         }
-        return rank(rows, count)
+        return rank([...rows, ...compactionRows(compactions, options)], count)
       }
-      return rank(nodes.map((node, index) => ({
+      return rank([...nodes.map((node, index) => ({
         key: `${node.turn}.${node.step}`,
         index,
         turn: node.turn,
@@ -1905,7 +2187,35 @@ window.__ModuleLoader__.load({
         call: (node.calls ?? [])[0] ?? null,
         unpriced: node.unpriced === true,
         inProgress: node.ended === false,
-      })), count)
+      })), ...compactionRows(compactions, options)], count)
+    }
+
+    /**
+     * A Compaction step as a top row of its own, ranked with the Steps.
+     *
+     * It is real money and belongs in the ranking, but it has no Step to select: its
+     * row carries no index, is labelled as a compaction, and opens nothing (I7).
+     */
+    function compactionRows(compactions, options = {}) {
+      const { metric = 'cost', projection = 'fact' } = options
+      return compactions.map((node, position) => ({
+        key: `compaction-${node.compaction?.id ?? position}`,
+        index: -1,
+        kind: 'compaction',
+        compaction: node.compaction ?? null,
+        turn: node.turn,
+        step: node.step,
+        tStart: node.tStart,
+        tEnd: node.tEnd,
+        steps: 0,
+        value: metricOf(node, metric, projection),
+        cost: projectionOf(node, projection)?.cost ?? 0,
+        buckets: node.buckets ?? {},
+        models: Object.keys(node.byModel ?? {}),
+        call: null,
+        unpriced: node.unpriced === true,
+        inProgress: node.ended === false,
+      }))
     }
 
     /**
@@ -2215,7 +2525,13 @@ window.__ModuleLoader__.load({
     function truncateText(value) {
       const text = typeof value === 'string' ? value : ''
       if (text.length <= EXPORT_TEXT_LIMIT) return { text, truncated: false }
-      return { text: text.slice(0, EXPORT_TEXT_LIMIT), truncated: true }
+      let cut = EXPORT_TEXT_LIMIT
+      // The limit counts UTF-16 units, so a cut can land between the halves of one
+      // character written as a surrogate pair. Taking one unit less keeps the text a
+      // string of whole characters; a file is read by people, not by code points.
+      const half = text.charCodeAt(cut - 1)
+      if (half >= 0xd800 && half <= 0xdbff) cut -= 1
+      return { text: text.slice(0, cut), truncated: true }
     }
 
     /**
@@ -2225,14 +2541,19 @@ window.__ModuleLoader__.load({
      * note to themselves, not a record of an instant in a log.
      */
     function exportFileName(sessionId, at) {
-      const date = at instanceof Date ? at : new Date(at ?? Date.now())
+      const given = at instanceof Date ? at : new Date(at ?? Date.now())
+      // A clock the browser cannot read leaves the stamp empty rather than writing NaN
+      // into a file name; the file itself still carries the instants of the session.
+      const date = Number.isNaN(given.getTime()) ? new Date() : given
       const pad = (value) => String(value).padStart(2, '0')
       const stamp = `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}`
       // Every id the harness mints starts with "session-": the prefix says nothing
       // about which session this is, so the name drops it before taking 8 characters.
-      const raw = typeof sessionId === 'string' && sessionId !== '' ? sessionId : 'unknown'
-      const id = raw.replace(/^session-/, '')
-      return `dsh-balance-${id.slice(0, 8)}-${stamp}.cost-history.ndjson`
+      const raw = typeof sessionId === 'string' ? sessionId.replace(/^session-/, '') : ''
+      // Only what a file name may hold: a session id is a UUID today, and the name has
+      // to stay a name whatever a future id holds.
+      const id = raw.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 8)
+      return `dsh-balance-${id === '' ? 'unknown' : id}-${stamp}.cost-history.ndjson`
     }
 
     /**
@@ -2268,6 +2589,33 @@ window.__ModuleLoader__.load({
         const callsInText = new Set(words.filter((record) => record.type === 'tool_call').map((record) => record.callId))
         for (const node of own) {
           const at = (value) => (typeof value === 'number' ? value : node.tStart)
+          // A Compaction step is money without a conversation: it never joins the
+          // per-Step line, and in the stream it is its own record type, with the
+          // usage the summary call paid for and the Step it is anchored to (I7, I8).
+          if (node.kind === 'compaction') {
+            const anchor = node.turn === null || node.turn === undefined
+              ? null
+              : { turn: node.turn, step: node.step ?? null }
+            push({
+              type: 'compaction',
+              session: id,
+              depth,
+              seq: node.reports?.[0]?.seq ?? 0,
+              t: node.tStart,
+              turn: node.turn ?? null,
+              step: node.step ?? null,
+              id: node.compaction?.id ?? '',
+              model: node.compaction?.model ?? '',
+              tokens: node.buckets ?? node.reports?.[0]?.buckets ?? {},
+              cost: {
+                fact: node.cost ?? node.reports?.[0]?.cost ?? 0,
+                offPeak: node.offPeak?.cost ?? node.reports?.[0]?.offPeak?.cost ?? 0,
+                peak: node.peak?.cost ?? node.reports?.[0]?.peak?.cost ?? 0,
+              },
+              shadowedTokenCount: node.compaction?.shadowedTokenCount ?? 0,
+              anchor,
+            })
+          }
           for (const report of node.reports ?? []) {
             push({
               type: 'usage',
@@ -2324,6 +2672,26 @@ window.__ModuleLoader__.load({
               callId: call.callId,
             })
           }
+        }
+        // The Findings the Host detected over this series. A Finding cites the Step it
+        // starts at, so that Step's own instant and sequence order it in the stream
+        // rather than a clock of the builder's own.
+        for (const finding of Array.isArray(series?.findings) ? series.findings : []) {
+          const anchor = own[finding.refs?.from ?? -1] ?? own[0]
+          push({
+            type: 'indicator',
+            session: id,
+            depth,
+            seq: anchor?.reports?.[0]?.seq ?? 0,
+            t: anchor?.tStart ?? null,
+            turn: anchor?.turn ?? null,
+            step: anchor?.step ?? null,
+            kind: finding.kind,
+            refs: finding.refs,
+            severity: finding.severity,
+            confidence: finding.confidence,
+            evidence: finding.evidence,
+          })
         }
         for (const word of words) {
           const t = typeof word.t === 'number' ? word.t : null
@@ -2720,13 +3088,17 @@ window.__ModuleLoader__.load({
       // A Step that reported no usage has no point to draw; the empty state below
       // is what says so, instead of a chart of zeroes.
       const allNodes = Array.isArray(payload?.nodes) ? payload.nodes : []
-      const nodes = allNodes.filter((node) => node.hasUsage === true)
-      const session = seriesSummary(nodes)
+      const withUsage = allNodes.filter((node) => node.hasUsage === true)
+      // A Compaction step is money without a conversation: it counts in the session
+      // estimate but is never a point of the per-Step cost line (I7).
+      const nodes = withUsage.filter((node) => node.kind !== 'compaction')
+      const compactions = allNodes.filter((node) => node.kind === 'compaction')
+      const session = seriesSummary(withUsage)
       /**
        * The subtree read: idle until the reader asks for it, because it is the one
        * action that reads other sessions (D26).
        */
-      const [subtree, setSubtree] = react.useState({ status: 'idle', lines: [], total: null, diagnostics: [], full: false, error: null })
+      const [subtree, setSubtree] = react.useState({ status: 'idle', lines: [], total: null, diagnostics: [], findings: [], full: false, error: null })
       const [copied, setCopied] = react.useState(false)
       const [exportDetail, setExportDetail] = react.useState('costs')
       const [exportSubagents, setExportSubagents] = react.useState(false)
@@ -2741,18 +3113,42 @@ window.__ModuleLoader__.load({
       // describe the same part of it and the axis switch keeps the same window.
       const slice = visibleSlice(nodes, range, axis)
       const summary = seriesSummary(slice.nodes)
+      // A Compaction step is ranked with the Steps but draws no point of their line: it
+      // is visible while its own instant falls inside the range on screen. Its money
+      // still belongs to the figure the header leads with, which is the same Σ.
+      const sliceFrom = slice.nodes.length > 0 ? slice.nodes[0].tStart : slice.fromMs
+      const sliceTo = slice.nodes.length > 0
+        ? slice.nodes[slice.nodes.length - 1].tEnd ?? slice.nodes[slice.nodes.length - 1].tStart
+        : slice.toMs
+      const visibleCompactions = isFullWindow(range)
+        ? compactions
+        : axis === 'index'
+          ? compactions.filter((node) => node.tStart >= sliceFrom && node.tStart <= sliceTo)
+          : compactions.filter((node) => node.tStart >= slice.fromMs && node.tStart <= slice.toMs)
+      const summaryMoney = seriesSummary([...slice.nodes, ...visibleCompactions])
+      // The Findings the Host detected travel with the series; the client only filters
+      // them to the visible range, and that filter is memoised on the window (I24).
+      const findings = findingsOf(payload)
+      const nodeAt = new Map(allNodes.map((node, index) => [node, index]))
+      const overlay = overlayMemo([
+        sessionId, payload?.seq ?? 0, payload?.anomalies?.preset ?? '',
+        JSON.stringify(payload?.fallbackRates ?? {}),
+        axis, range === null ? 'all' : `${range.from}:${range.to}`, findings.length, slice.nodes.length,
+      ].join(':'), () => overlayOf(allNodes, slice.nodes, findings))
       // Without a payload there is no figure to lead with: a dash beats a `$0.00`
       // that would read as "this session cost nothing".
       const total = payload === null ? null : session.totals[projection] ?? session.total
       // The headline follows the selected projection and the visible range; the session
       // and the `fact` figures stay beside it, so neither is ever hidden by the other.
-      const shown = payload === null ? null : summary.totals[projection] ?? summary.total
+      const shown = payload === null ? null : summaryMoney.totals[projection] ?? summaryMoney.total
       const windowed = !isFullWindow(range)
       // Where the remembered Step sits in what is on screen; -1 when the window or the
       // series no longer holds it, which is how a stale memory simply stops marking.
       const selected = step === null
         ? -1
         : slice.nodes.findIndex((node) => node.turn === step.turn && node.step === step.step)
+      const selectedNode = selected >= 0 && selected < slice.nodes.length ? slice.nodes[selected] : null
+      const selectedFindings = findingsAt(findings, nodeAt.get(selectedNode) ?? -1)
 
       const choose = (pick, key, value) => {
         setPicked((current) => ({ ...current, [pick]: value }))
@@ -2843,6 +3239,10 @@ window.__ModuleLoader__.load({
             lines: Array.isArray(answer.children) ? answer.children : [],
             total: answer.total ?? null,
             diagnostics: Array.isArray(answer.diagnostics) ? answer.diagnostics : [],
+            // The subtree reading is a reading of its own: the Host detects over the
+            // session series with the subtree cost folded in, and its Findings — the
+            // expensive subtree among them — belong to this reading, not the session's.
+            findings: findingsOf(answer),
             full: answer.full === true,
             error: null,
           })
@@ -2952,6 +3352,17 @@ window.__ModuleLoader__.load({
       // opens on an empty one.
       const storedTab = picked.tab ?? stored.costTab ?? 'session'
       const tab = storedTab === 'subagents' && spawns === 0 ? 'session' : storedTab
+      /**
+       * Which reading the Findings card describes: the session's, or — while the
+       * Subagents tab is open and the subtree has been read — that reading's own
+       * verdicts, which the Host computed over this same series (I26). The chart and
+       * the per-Step line stay the session's either way.
+       */
+      const subtreeReading = tab === 'subagents' && subtree.status === 'ok'
+      const reading = {
+        subtree: subtreeReading,
+        rows: subtreeReading ? overlayOf(allNodes, slice.nodes, subtree.findings).rows : overlay.rows,
+      }
       const controls = h('div', { className: 'dshb_cost_controls', key: 'controls' }, [
         h(Segmented, {
           key: 'projection',
@@ -3006,7 +3417,10 @@ window.__ModuleLoader__.load({
 
       const plot = buildPlot(slice.nodes, { clip, axis, metric, projection, window: { fromMs: slice.fromMs, toMs: slice.toMs } })
       const clipped = plot.points.some((point) => point.clipped)
-      const rows = topRows(slice.nodes, { metric, projection, mode: topk, count: TOP_K })
+      // A Compaction step is ranked with the Steps but draws no point of their line.
+      const rows = topRows(slice.nodes, {
+        metric, projection, mode: topk, count: TOP_K, compactions: visibleCompactions,
+      })
       const note = h('div', { className: 'dshb_cost_note', key: 'note' }, [
         h('span', { key: 'clip' }, clipped ? `${t('cost.clip', { value: costText(plot.threshold, currency) })} ` : ''),
         clipped ? h('button', { key: 'unclip', className: 'dshb_btn', onClick: () => setClip(false) }, t('cost.unclip')) : null,
@@ -3034,6 +3448,9 @@ window.__ModuleLoader__.load({
           total: shown,
           selected,
           onSelect: select,
+          overlay,
+          anomalies: payload?.anomalies ?? null,
+          compactions,
         }),
         note,
         h(CostExport, {
@@ -3067,7 +3484,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'dshb_cost_panes', key: 'panes' }, [
           h('div', { className: 'dshb_cost_pane', key: 'inspector' }, h(CostInspector, {
             t,
-            node: selected >= 0 && selected < slice.nodes.length ? slice.nodes[selected] : null,
+            node: selectedNode,
             currency,
             total,
             projection,
@@ -3077,6 +3494,8 @@ window.__ModuleLoader__.load({
             subtree,
             onLoadSubtree: loadSubtree,
             onOpenSubtree: props.openSessionCost,
+            findings: selectedFindings,
+            anomalies: payload?.anomalies ?? null,
           })),
           h('div', { className: 'dshb_cost_pane', key: tab }, tab === 'subagents'
             ? h(Subagents, {
@@ -3098,6 +3517,17 @@ window.__ModuleLoader__.load({
               selected,
               onSelect: select,
             })),
+          // The third card of the band: the Findings of the visible range, scrollable
+          // inside itself so the two readings beside it keep their height (I20).
+          h('div', { className: 'dshb_cost_pane', key: 'findings' }, h(Findings, {
+            t,
+            rows: reading.rows,
+            anomalies: payload?.anomalies ?? null,
+            currency,
+            steps: withUsage.length,
+            subtree: reading.subtree,
+            onSelect: select,
+          })),
         ]),
         ratesOpen && session.unpriced.length > 0
           ? h(RateEntry, { key: 'rates', t, models: session.unpriced, rates: payload?.fallbackRates, onSave: saveRates })
@@ -3119,13 +3549,19 @@ window.__ModuleLoader__.load({
         head,
         ...rows.map((row, position) => h('div', {
           key: row.key,
-          className: row.index === selected ? 'dshb_topk_row dshb_topk_row_on' : 'dshb_topk_row',
-          onClick: () => onSelect(row.index),
-          role: 'button',
+          className: [
+            'dshb_topk_row',
+            row.index >= 0 && row.index === selected ? 'dshb_topk_row_on' : '',
+            row.kind === 'compaction' ? 'dshb_topk_row_off' : '',
+          ].filter((part) => part !== '').join(' '),
+          onClick: row.index >= 0 ? () => onSelect(row.index) : undefined,
+          role: row.index >= 0 ? 'button' : undefined,
         }, [
           h('span', { className: 'dshb_topk_head', key: 'head' }, [
             h('span', { className: 'dshb_topk_rank', key: 'rank' }, `#${position + 1}`),
-            h('span', { key: 'turn' }, t('cost.tip.turn', { turn: row.turn, step: row.step })),
+            h('span', { key: 'turn' }, row.kind === 'compaction'
+              ? t('cost.compaction.row')
+              : t('cost.tip.turn', { turn: row.turn, step: row.step })),
             mode === 'turns' ? h('span', { className: 'dshb_cost_sub', key: 'steps' }, ` · ${t('cost.topk.ofSteps', { steps: row.steps })}`) : null,
             h('span', { className: 'dshb_cost_sub', key: 'when' }, ` · ${clock(row.tStart) ?? ''}`),
             // A row identifies itself the way the tooltip does, phase included.
@@ -3135,11 +3571,78 @@ window.__ModuleLoader__.load({
           h('span', { className: 'dshb_topk_body', key: 'body' }, [
             (row.models ?? []).join(', '),
             bucketLine(row.buckets),
+            row.kind === 'compaction'
+              ? t('cost.compaction.body', { tokens: compactNumber(row.compaction?.shadowedTokenCount ?? 0) })
+              : '',
             row.call === null || row.call === undefined ? '' : `${row.call.name} ${row.call.preview.split('\n')[0]}`,
             row.unpriced ? t('cost.topk.unpriced') : '',
             row.inProgress ? t('cost.inspector.inProgress') : '',
           ].filter((part) => part !== '').join(' · ')),
         ])),
+      ])
+    }
+
+    /**
+     * The findings card: the third card of the band under the chart (I20).
+     *
+     * It scrolls inside itself rather than extending the page, so including indicators
+     * never pushes the top-K list or the export controls away, and it says so plainly
+     * when the visible range holds nothing — an empty card would read as a failure.
+     */
+    function Findings({ t, rows, anomalies, currency, steps, onSelect, subtree = false }) {
+      const head = h('div', { className: 'dshb_cost_note', key: 'title' }, t('cost.findings.title'))
+      const scope = subtree ? h('div', { className: 'dshb_cost_note', key: 'scope' }, t('cost.findings.subtree')) : null
+      // The thresholds the Host detected under travel with the series: the card states
+      // the preset and, on hover, every effective gate — read-only, because the preset
+      // and the overrides are plugin configuration, not a view setting (I13).
+      const effective = thresholdLines(anomalies)
+      const presetLine = anomalies === null || anomalies === undefined
+        ? null
+        : h('div', {
+          className: 'dshb_cost_note',
+          key: 'preset',
+          title: effective.length === 0 ? undefined : effective.join('\n'),
+        }, t('cost.findings.preset', { preset: t(`cost.finding.preset.${anomalies.preset}`) }))
+      const note = h('div', { className: 'dshb_cost_note', key: 'legend' }, t('cost.findings.legend'))
+      if (rows.length === 0) {
+        return h('div', { className: 'dshb_findings dshb_cost_card' }, [
+          head,
+          scope,
+          presetLine,
+          h('div', { className: 'dshb_cost_note', key: 'empty' }, t('cost.findings.empty')),
+          steps > 0 && steps < 8 ? h('div', { className: 'dshb_cost_note', key: 'norm' }, t('cost.findings.norm')) : null,
+          note,
+        ])
+      }
+      return h('div', { className: 'dshb_findings dshb_cost_card' }, [
+        head,
+        scope,
+        presetLine,
+        h('div', { className: 'dshb_findings_list', key: 'list' }, rows.map((row, position) => {
+          const text = findingText(t, row, { currency })
+          return h('div', {
+            key: `${row.kind}-${row.refs?.from ?? position}-${position}`,
+            className: row.severity === 'alert'
+              ? 'dshb_finding dshb_finding_alert'
+              : row.severity === 'warn' ? 'dshb_finding dshb_finding_warn' : 'dshb_finding',
+            title: findingExplain(t, row, { currency, anomalies }).join('\n'),
+            onClick: () => onSelect(row.at),
+            role: 'button',
+          }, [
+            h('span', { className: 'dshb_finding_head', key: 'head' }, [
+              h('span', { key: 'glyph' }, FINDING_GLYPH[row.kind] ?? '·'),
+              h('span', { key: 'kind' }, t(`cost.finding.kind.${row.kind}`)),
+              h('span', { className: 'dshb_cost_sub', key: 'place' }, ` · ${findingPlace(t, row)}`),
+              row.partial ? h('span', { className: 'dshb_finding_partial', key: 'partial' }, t('cost.findings.partial')) : null,
+            ]),
+            h('span', { className: 'dshb_cost_sub', key: 'conf' }, t('cost.findings.confidence', {
+              value: row.confidence,
+              severity: t(`cost.finding.severity.${row.severity}`),
+            })),
+            h('span', { className: 'dshb_finding_text', key: 'text' }, text),
+          ])
+        })),
+        note,
       ])
     }
 
@@ -3338,7 +3841,7 @@ window.__ModuleLoader__.load({
       ])
     }
 
-    function CostChart({ t, nodes, payload, clip, currency, total, axis, metric, projection, range, topk, onWindow, selected, onSelect }) {
+    function CostChart({ t, nodes, payload, clip, currency, total, axis, metric, projection, range, topk, onWindow, selected, onSelect, overlay = null, anomalies = null, compactions = [] }) {
       const boxRef = react.useRef(null)
       const canvasRef = react.useRef(null)
       const tooltipRef = react.useRef(null)
@@ -3536,7 +4039,15 @@ window.__ModuleLoader__.load({
         ref: tooltipRef,
         className: 'dshb_cost_tooltip',
         style: { left: `${placement.left}px`, top: `${placement.top}px`, transform: placement.transform },
-      }, tooltipLines(hovered.node, { t, currency, total, intervals, projection })
+      }, tooltipLines(hovered.node, {
+        t,
+        currency,
+        total,
+        intervals,
+        projection,
+        findings: overlay === null ? [] : overlay.at.get(hovered.index) ?? [],
+        anomalies,
+      })
         .map((line, index) => h('div', { key: `line-${index}` }, line)))
 
       const marker = selected >= 0 && selected < plot.points.length ? h('div', {
@@ -3565,6 +4076,54 @@ window.__ModuleLoader__.load({
           left: `${Math.min(brush.from, brush.to)}px`,
           width: `${Math.abs(brush.to - brush.from)}px`,
         },
+      })
+
+      // The Indicator badges: one per Step, the glyph of the most severe Finding it
+      // carries plus the count of the others. An `info` Finding draws none (I19).
+      const badges = overlay === null ? [] : overlay.marks.flatMap((mark) => {
+        const point = plot.points[mark.index]
+        if (point === undefined) return []
+        const explained = (overlay.at.get(mark.index) ?? []).filter((finding) => finding.kind === mark.kind)
+        const title = explained.length === 0
+          ? t(`cost.finding.kind.${mark.kind}`)
+          : findingExplain(t, explained[0], { currency, anomalies }).join('\n')
+        return [h('button', {
+          key: `badge-${mark.index}`,
+          type: 'button',
+          className: `dshb_cost_badge dshb_cost_badge_${mark.severity}`,
+          title,
+          style: { left: `${point.x}px`, top: `${point.y}px` },
+          onClick: (event) => {
+            if (typeof event.stopPropagation === 'function') event.stopPropagation()
+            onSelect(mark.index)
+          },
+        }, [
+          h('span', { key: 'glyph' }, FINDING_GLYPH[mark.kind] ?? '·'),
+          mark.count > 1 ? h('span', { key: 'count', className: 'dshb_cost_badgeCount' }, String(mark.count)) : null,
+        ])]
+      })
+
+      // A Compaction step draws no point of the cost line, but it is real money: it
+      // gets one mark of its own at its own instant, never a Step's column (I7).
+      const compactionMarks = compactions.flatMap((node, index) => {
+        if (plot.points.length === 0) return []
+        let at = null
+        if (plot.mode === 'index') {
+          const point = plot.points.find((entry) => entry.node.tStart >= node.tStart) ?? plot.points[plot.points.length - 1]
+          at = point.x
+        } else if (node.tStart >= plot.fromMs && node.tStart <= plot.toMs) {
+          at = plot.xOf(node.tStart)
+        }
+        if (at === null) return []
+        return [h('div', {
+          key: `compaction-${node.compaction?.id ?? index}`,
+          className: 'dshb_cost_compaction',
+          title: t('cost.compaction.mark', {
+            cost: costText(node.cost ?? 0, currency),
+            tokens: compactNumber(node.compaction?.shadowedTokenCount ?? 0),
+          }),
+          style: { left: `${at}px` },
+        })]
       })
 
       return h('div', null, [
@@ -3600,11 +4159,113 @@ window.__ModuleLoader__.load({
             selection,
             ...spawns,
             marker,
+            ...compactionMarks,
+            ...badges,
             tooltip,
           ]),
         ]),
         h('div', { key: 'axis', className: 'dshb_cost_axis', style: { marginLeft: 64 } }, ticks),
       ])
+    }
+
+    /** A share as a percentage, at the precision its own size deserves. */
+    function percentText(share) {
+      const value = (share ?? 0) * 100
+      return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)}%`
+    }
+
+    /** A ratio as `4.2×`, which is how a spike names its distance from the median. */
+    function multipleText(value, base) {
+      if (!(base > 0) || !Number.isFinite(value)) return '—'
+      return `${(value / base).toFixed(1)}×`
+    }
+
+    /**
+     * The numbers behind one Finding, in the reader's language.
+     *
+     * The Host reports structured evidence (I23) and every sentence is built here, so
+     * the Russian UI gets Russian sentences: the numbers, the threshold they cleared
+     * and the baseline they were measured against are all named.
+     */
+    function findingText(t, finding, options = {}) {
+      const { currency = 'USD' } = options
+      const e = finding.evidence ?? {}
+      const money = (value) => costText(value ?? 0, currency)
+      const tokens = (value) => compactNumber(value ?? 0)
+      const z = (value) => (value === null || value === undefined ? '—' : String(value))
+      switch (finding.kind) {
+        case 'spike':
+          return t('cost.finding.spike.text', {
+            cost: money(e.value),
+            multiple: multipleText(e.value, e.median),
+            median: money(e.median),
+            threshold: money(e.threshold),
+            z: z(e.z),
+            share: percentText(e.share),
+          })
+        case 'verbose-output':
+          return t('cost.finding.verbose.text', {
+            value: tokens(e.value), threshold: tokens(e.threshold), median: tokens(e.median), z: z(e.z),
+          })
+        case 'context-growth':
+          return t('cost.finding.growth.text', {
+            rise: money(e.value), median: money(e.median), steps: e.steps, r2: z(e.r2), threshold: money(e.threshold),
+          })
+        case 'retry-storm':
+          return e.metric === 'retriedSteps'
+            ? t('cost.finding.retry.turn', { count: e.value, threshold: e.threshold, turn: e.turn, cost: money(e.cost) })
+            : t('cost.finding.retry.step', { count: e.value, threshold: e.threshold, cost: money(e.cost) })
+        case 'cache-miss':
+          return t('cost.finding.cache.text', {
+            share: percentText(e.value), steps: e.steps, threshold: percentText(e.threshold),
+          })
+        case 'tool-output-inflation':
+          return t('cost.finding.tool.text', {
+            delta: tokens(e.value), threshold: tokens(e.threshold), tools: (e.tools ?? []).join(', '),
+          })
+        case 'post-compaction-spike':
+          return t('cost.finding.compaction.text', {
+            cost: money(e.compactionCost),
+            value: Number(e.value ?? 0).toFixed(1),
+            threshold: String(e.threshold),
+            tokens: tokens(e.shadowedTokenCount),
+          })
+        case 'expensive-subtree':
+          return t('cost.finding.subtree.text', {
+            share: percentText(e.value), cost: money(e.subtreeCost), session: money(e.sessionCost),
+          })
+        case 'tariff-attributable':
+          return t('cost.finding.tariff.text', {
+            share: percentText(e.value), delta: money(e.delta), total: money(e.total),
+          })
+        case 'pricing-gap':
+          return t('cost.finding.gap.text', {
+            share: percentText(e.value), steps: e.steps, tokens: tokens(e.unpricedTokens),
+          })
+        default:
+          return t('cost.finding.unknown', { kind: String(finding.kind) })
+      }
+    }
+
+    /**
+     * The lines that explain one Finding: what its Indicator detects, the numbers that
+     * cleared which threshold, the preset in force, and the sentence that confidence is
+     * a ranking aid rather than a probability (I22).
+     */
+    function findingExplain(t, finding, options = {}) {
+      const rows = [
+        t(`cost.finding.detect.${finding.kind}`),
+        findingText(t, finding, options),
+      ]
+      const preset = options.anomalies?.preset
+      if (preset !== undefined && preset !== null) {
+        rows.push(t('cost.finding.preset', { preset: t(`cost.finding.preset.${preset}`) }))
+      }
+      rows.push(t('cost.finding.ranking', {
+        confidence: finding.confidence,
+        severity: t(`cost.finding.severity.${finding.severity}`),
+      }))
+      return rows
     }
 
     /** A Step's share of the session, as a percentage of two significant digits. */
@@ -3626,7 +4287,7 @@ window.__ModuleLoader__.load({
      * @returns one string per line.
      */
     function tooltipLines(node, options = {}) {
-      const { t = (key) => key, currency = 'USD', total = 0, intervals = [], projection = 'fact' } = options
+      const { t = (key) => key, currency = 'USD', total = 0, intervals = [], projection = 'fact', findings = [], anomalies = null } = options
       const models = Object.keys(node.byModel ?? {}).join(', ')
       const head = t('cost.tip.turn', { turn: node.turn, step: node.step })
       const money = projectionOf(node, projection)?.cost ?? 0
@@ -3641,6 +4302,21 @@ window.__ModuleLoader__.load({
       if (projection !== 'fact') lines.push(`${t('cost.proj.fact')}: ${costText(node.cost ?? 0, currency)}`)
       if (node.unpriced === true) lines.push(t('cost.tip.unpriced'))
       if (node.retries > 0) lines.push(t('cost.inspector.retries', { count: node.retries }))
+      // What the Indicators found on this Step, named where the reader is already
+      // looking. The full explanation stays in the inspector and the findings list.
+      for (const finding of findings.slice(0, 3)) {
+        lines.push(`${FINDING_GLYPH[finding.kind] ?? '·'} ${t(`cost.finding.kind.${finding.kind}`)} · ${findingText(t, finding, { currency })}`)
+      }
+      if (findings.length > 0) {
+        const ranking = t('cost.finding.ranking', {
+          confidence: findings[0].confidence,
+          severity: t(`cost.finding.severity.${findings[0].severity}`),
+        })
+        const preset = anomalies?.preset
+        lines.push(preset === undefined || preset === null
+          ? ranking
+          : `${t('cost.finding.preset', { preset: t(`cost.finding.preset.${preset}`) })} · ${ranking}`)
+      }
       return lines
     }
 
@@ -3781,7 +4457,7 @@ window.__ModuleLoader__.load({
      * Turn is not part of it: the inspector says so and reads the session's words only
      * when the reader asks, with the explicit `Load older` action.
      */
-    function CostInspector({ t, node, currency, total, projection = 'fact', peakIntervals, inspectCall, loadPrompt, subtree = null, onLoadSubtree = null, onOpenSubtree = null }) {
+    function CostInspector({ t, node, currency, total, projection = 'fact', peakIntervals, inspectCall, loadPrompt, subtree = null, onLoadSubtree = null, onOpenSubtree = null, findings = [], anomalies = null }) {
       const [prompt, setPrompt] = react.useState({ key: null, status: 'idle', error: null, text: null })
       if (node === null || node === undefined) {
         return h('div', { className: 'dshb_cost_card' }, h('div', { className: 'dshb_cost_note' }, t('cost.inspector.empty')))
@@ -3866,6 +4542,23 @@ window.__ModuleLoader__.load({
         ]),
         table,
         flags.length === 0 ? null : h('div', { className: 'dshb_flag', key: 'flags' }, flags.join(' · ')),
+        // What the Indicators make of this Step, with the numbers that cleared which
+        // threshold and the preset they were detected under (I22).
+        findings.length === 0 ? null : h('div', { className: 'dshb_finding_detail', key: 'findings' },
+          findings.flatMap((finding) => [
+            h('div', { className: 'dshb_finding_detailHead', key: `${finding.kind}-head` }, [
+              h('span', { key: 'glyph' }, FINDING_GLYPH[finding.kind] ?? '·'),
+              h('span', { key: 'kind' }, ` ${t(`cost.finding.kind.${finding.kind}`)}`),
+              h('span', { className: 'dshb_cost_sub', key: 'conf' }, ` · ${t('cost.findings.confidence', {
+                value: finding.confidence,
+                severity: t(`cost.finding.severity.${finding.severity}`),
+              })}`),
+            ]),
+            ...findingExplain(t, finding, { currency, anomalies }).map((line, index) => h('div', {
+              className: 'dshb_cost_note',
+              key: `${finding.kind}-line-${index}`,
+            }, line)),
+          ])),
         // The Turn's prompt comes before the calls: it is the context the calls
         // belong to, and the projection carries usage rather than messages — hence
         // the explicit "load older" action instead of hidden auto-loading.
@@ -4027,6 +4720,8 @@ window.__ModuleLoader__.load({
       arrowDelta, nextSelection, subtreeOf, stepGroups, Subagents, SubagentOpen, openSessionCost, preferCostView,
       costHistory, exportFileName, truncateText, EXPORT_DETAILS, CostExport, saveTextFile, readSeries, readText, promptForNode,
       valueAxis, compactNumber, tickLabel, tooltipLines,
+      Findings, findingsOf, overlayOf, overlayMemo, findingsAt, findingText, findingExplain, thresholdLines,
+      findingPlace, findingRank, MAX_BADGES, FINDING_GLYPH, compactionRows, percentText,
     }
     return module.exports
   },
