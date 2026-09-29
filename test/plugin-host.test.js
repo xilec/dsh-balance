@@ -890,6 +890,86 @@ test('a write that arrives while the state is still loading survives the load', 
   }
 })
 
+test('two corrections written at the same time both land on disk', async () => {
+  await withPlugin(async ({ ctx, home }) => {
+    const { readFile } = await import('node:fs/promises')
+    const read = response()
+    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), read)
+    const today = JSON.parse(read.body).ledger.todayKey
+    // The browser half heartbeats on every poll while a correction awaits its own
+    // write, so two writes of the state document in flight is the normal case, not
+    // an exotic one: one temp name per process lost one of every pair.
+    const [first, second] = [response(), response()]
+    await Promise.all([
+      ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: today, amount: 1.5 }), first),
+      ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: '2026-09-01', amount: 2.5 }), second),
+    ])
+    assert.equal(first.status, 200, first.body)
+    assert.equal(second.status, 200, second.body)
+    const state = JSON.parse(await readFile(join(home, 'dsh-balance', 'state.json'), 'utf8'))
+    assert.equal(state.overrides[today].amount, 1.5)
+    assert.equal(state.overrides['2026-09-01'].amount, 2.5)
+    assert.deepEqual(ctx.warns.filter((line) => line.includes('cannot write state')), [],
+      'no write lost its temp file to a concurrent one')
+  })
+})
+
+test('a state write that cannot land is reported and does not wedge the next one', async () => {
+  await withPlugin(async ({ ctx, home }) => {
+    const { mkdir, readFile, rm } = await import('node:fs/promises')
+    // A directory in place of the document: the rename cannot replace it, so every
+    // write fails from here on.
+    const statePath = join(home, 'dsh-balance', 'state.json')
+    await mkdir(statePath, { recursive: true })
+    const failed = response()
+    await ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: '2026-09-02', amount: 3 }), failed)
+    assert.equal(failed.status, 500, 'a change that is not on disk is not answered as saved')
+    assert.equal(JSON.parse(failed.body).ok, false)
+    const settings = response()
+    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { costMetric: 'output' }), settings)
+    assert.equal(settings.status, 500)
+    // The plugin keeps running: the change is still served, from memory.
+    const read = response()
+    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), read)
+    assert.equal(JSON.parse(read.body).ledger.rows.find((row) => row.key === '2026-09-02').spend, 3)
+
+    await rm(statePath, { recursive: true, force: true })
+    const next = response()
+    await ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: '2026-09-03', amount: 4 }), next)
+    assert.equal(next.status, 200, 'the write queued behind the failure still ran')
+    const state = JSON.parse(await readFile(statePath, 'utf8'))
+    assert.equal(state.overrides['2026-09-03'].amount, 4)
+    assert.equal(state.overrides['2026-09-02'].amount, 3, 'and the correction that could not be written is on disk too')
+  })
+})
+
+test('the sample log is thinned while the Host runs, not only at startup', async () => {
+  await withPlugin(async ({ ctx, home, setBalance }) => {
+    const { appendFile, mkdir, readFile } = await import('node:fs/promises')
+    const dir = join(home, 'dsh-balance')
+    await mkdir(dir, { recursive: true })
+    // History that crossed the retention window without the Host ever restarting:
+    // three samples of one hour, all older than keepDays.
+    const old = Date.now() - 30 * 86_400_000
+    const line = (offset, total) => `${JSON.stringify({ t: old + offset, currency: 'CNY', total, granted: 0, toppedUp: total })}\n`
+    await appendFile(join(dir, 'samples.ndjson'), [line(0, 10), line(60_000, 9.5), line(120_000, 9)].join(''), 'utf8')
+
+    // Every sample carries news, so each refresh appends one and the log crosses the
+    // interval between two thinning passes.
+    for (let index = 0; index < 100; index += 1) {
+      setBalance(100 - index / 100)
+      await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    }
+
+    const { parseSamples } = await import('../src/history.js')
+    const stored = parseSamples(await readFile(join(dir, 'samples.ndjson'), 'utf8'))
+    const thinned = stored.filter((sample) => sample.t < Date.now() - 7 * 86_400_000)
+    assert.equal(thinned.length, 1, 'the old hour was thinned to its last sample without a restart')
+    assert.equal(thinned[0].total, 9)
+    assert.ok(stored.length >= 100, 'and the samples appended since were kept')
+  }, { config: { keepDays: 7 } })
+})
+
 test('the sampling loop stops for good when the plugin is disposed with a fetch in flight', async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
   const previousHome = process.env.DSH_HOME

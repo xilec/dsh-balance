@@ -246,6 +246,18 @@ test('serialize/parse round-trips', () => {
   assert.deepEqual(parseSamples(serializeSamples(samples)), samples)
 })
 
+test('a limit keeps the newest lines of the log', () => {
+  // The log is append-only, so its tail is its present. Reading a log nobody thinned
+  // used to materialise every line — a million objects for a file the caller throws
+  // almost all of away — before the cap that was meant to bound it could fire.
+  const many = []
+  for (let i = 0; i < 5000; i += 1) many.push({ t: 1000 + i, total: i })
+  const text = serializeSamples(many)
+  assert.deepEqual(parseSamples(text, { limit: 3 }).map((s) => s.total), [4997, 4998, 4999])
+  assert.equal(parseSamples(text, { limit: many.length }).length, many.length)
+  assert.deepEqual(parseSamples(text).map((s) => s.total), many.map((s) => s.total))
+})
+
 test('compaction keeps every recent sample and one per hour before that', () => {
   const now = at('2026-09-24T12:00:00Z')
   const hour = 3600_000

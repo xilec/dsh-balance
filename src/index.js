@@ -28,15 +28,25 @@ import {
 } from './pricing.js'
 import { createFindingsMemo, detectFindings, normalizeAnomalies } from './indicators.js'
 import { SESSION_COST_KEY, makeFallbackResolver, makeSessionCostProjection, seriesPayload, subtreeSummary } from './session-cost.js'
-import { appendSample, readSamplesCompacting, readState, writeState } from './store.js'
+import { MAX_SAMPLES, appendSample, readSamplesCompacting, readState, writeState } from './store.js'
 
 export const name = 'dsh-balance'
 
 /** How often a fetch is treated as sampled even when the balance did not move. */
 const HEARTBEAT_MS = 30 * 60 * 1000
 
-/** Upper bound on samples held in memory (roughly a year at a 5 minute cadence). */
-const MAX_SAMPLES = 200_000
+/**
+ * How many samples are appended between two passes of retention thinning.
+ *
+ * A counter and not a wall-clock timer: what has to stay bounded is the number of
+ * lines appended since the last pass, and that grows with the append rate rather
+ * than with time. Every 100 samples is about eight hours at the default cadence and
+ * half an hour at the fastest one, and a cadence sparse enough never to reach 100
+ * is a cadence at which the log barely grows — while the Host is down the start
+ * thins the log anyway. It also needs no timer to clear when the plugin is
+ * disposed, and a test can drive it by appending real samples.
+ */
+const COMPACT_EVERY_SAMPLES = 100
 
 /** Plugin configuration; every field is overridable from the profile patch row. */
 export const Config = Schema.object({
@@ -242,8 +252,36 @@ export function apply(ctx, config) {
    */
   let uiPrefs = {}
 
-  const persist = async () => {
-    if (dir === '') return
+  /**
+   * The write chain: at most one state write is ever in flight.
+   *
+   * The routes write this file concurrently by design — the browser half
+   * heartbeats on every poll while a settings or override write awaits its own —
+   * and two `writeState` calls in flight could interleave on one temp file. The
+   * chain is kept here rather than around the write in `store.js` because the
+   * ordering that matters is the ordering of the *documents*: the state below is
+   * read when the write runs, so a queued write can only write state at least as
+   * new as the one before it.
+   */
+  let persistChain = Promise.resolve()
+
+  /**
+   * Write the mutable state to disk, one write at a time.
+   *
+   * @returns whether the state is on disk, so a route never answers `ok: true` for a
+   * change that is not there. A failed write warns and answers `false`; it never
+   * rejects, which is what keeps the chain usable for the writes behind it. Without
+   * a resolvable harness home there is nothing to write and nothing to fail: the
+   * plugin keeps its history in memory and must never fail a request for it.
+   */
+  const persist = () => {
+    if (dir === '') return Promise.resolve(true)
+    const run = persistChain.then(writeStateOnce, writeStateOnce)
+    persistChain = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  const writeStateOnce = async () => {
     try {
       await writeState(dir, {
         version: 1,
@@ -254,8 +292,10 @@ export function apply(ctx, config) {
         prefs: uiPrefs,
         updatedAt: Date.now(),
       })
+      return true
     } catch (error) {
       warn(`cannot write state: ${message(error)}`)
+      return false
     }
   }
 
@@ -359,6 +399,9 @@ export function apply(ctx, config) {
     return process.env[runtime.apiKeyRef] ?? ''
   }
 
+  /** Appends since the last thinning pass; see {@link COMPACT_EVERY_SAMPLES}. */
+  let appended = 0
+
   /** Append one sample when it carries news (a new value, or the heartbeat). */
   const recordSample = async (balances, at) => {
     const info = balances.find((entry) => entry.currency === runtime.currency) ?? balances[0]
@@ -381,6 +424,28 @@ export function apply(ctx, config) {
       await appendSample(dir, sample)
     } catch (error) {
       warn(`cannot append a sample: ${message(error)}`)
+      return
+    }
+    appended += 1
+    if (appended >= COMPACT_EVERY_SAMPLES) await thinSamples()
+  }
+
+  /**
+   * Thin the log again while the Host runs.
+   *
+   * `load()` is the only place compaction used to happen, so a Host that stays up
+   * for months keeps appending and never thins: the log grows at the sampling
+   * cadence (~11 MB/year at the default one) and a start at the maximum `keepDays`
+   * then reads a hundred megabytes. This runs the same pass and then adopts what
+   * it kept, which is what the next start would have loaded.
+   */
+  const thinSamples = async () => {
+    appended = 0
+    if (dir === '') return
+    try {
+      samples = await readSamplesCompacting(dir, { keepDays: runtime.keepDays })
+    } catch (error) {
+      warn(`cannot compact the sample log: ${message(error)}`)
     }
   }
 
@@ -1092,7 +1157,12 @@ export function apply(ctx, config) {
             },
           }
         }
-        await persist()
+        // The correction is the reader's own figure: answering `ok: true` for a
+        // write that did not land is how a hand-entered day used to disappear.
+        if (!await persist()) {
+          sendJson(res, 500, { ok: false, error: 'the correction is in memory but was not written' })
+          return
+        }
         sendJson(res, 200, { ok: true, overrides, ledger: ledgerPayload() })
     })
 
@@ -1119,7 +1189,10 @@ export function apply(ctx, config) {
           changed.push(key)
         }
         if (changed.includes('refreshIntervalMs')) resetLoop()
-        if (changed.length > 0) await persist()
+        if (changed.length > 0 && !await persist()) {
+          sendJson(res, 500, { ok: false, error: 'the settings are in memory but were not written' })
+          return
+        }
         sendJson(res, 200, {
           ok: true,
           changed,

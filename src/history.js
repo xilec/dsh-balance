@@ -434,14 +434,41 @@ export function compactSamples(samples, options = {}) {
   return [...hourly.values(), ...kept].sort((a, b) => a.t - b.t)
 }
 
-/** Parse newline-delimited JSON samples, skipping damaged lines. */
-export function parseSamples(text) {
+/**
+ * Parse newline-delimited JSON samples, skipping damaged lines.
+ *
+ * The log is append-only, so the newest samples are its last lines: `limit` keeps
+ * only that many of them, and the lines before them are counted past without ever
+ * being sliced out of the text. That is what bounds the cost of reading a log
+ * nobody thinned — a file of a million lines used to materialise a million objects
+ * before the caller threw almost all of them away.
+ *
+ * @param text - the whole log, as read from disk.
+ * @param options.limit - how many of the newest samples to materialise (all of
+ * them when absent).
+ * @returns the parsed samples, ascending by time.
+ */
+export function parseSamples(text, options = {}) {
+  const source = String(text ?? '')
+  const limit = Number.isFinite(options.limit) && options.limit > 0 ? Math.floor(options.limit) : Infinity
+  let lines = 0
+  for (let at = source.indexOf('\n'); at !== -1; at = source.indexOf('\n', at + 1)) lines += 1
+  if (source !== '' && !source.endsWith('\n')) lines += 1
+  let skip = Math.max(0, lines - limit)
   const out = []
-  for (const line of String(text ?? '').split('\n')) {
-    const trimmed = line.trim()
-    if (trimmed === '') continue
+  let cursor = 0
+  while (cursor < source.length) {
+    let end = source.indexOf('\n', cursor)
+    if (end === -1) end = source.length
+    const line = source.slice(cursor, end).trim()
+    cursor = end + 1
+    if (skip > 0) {
+      skip -= 1
+      continue
+    }
+    if (line === '') continue
     try {
-      const value = JSON.parse(trimmed)
+      const value = JSON.parse(line)
       if (value && typeof value.t === 'number' && typeof value.total === 'number') out.push(value)
     } catch {
       /* a torn tail line from a crash is expected and simply dropped */
