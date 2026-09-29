@@ -3,6 +3,7 @@
   "entry": [
     "src/index.js",
     "client/client.js",
+    "scripts/*.mjs",
     "test/*.test.js"
   ],
   "project": [
