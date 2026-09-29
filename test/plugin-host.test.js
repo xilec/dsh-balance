@@ -1,10 +1,48 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { mkdtempSync } from 'node:fs'
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { homedir, tmpdir } from 'node:os'
+import { isAbsolute, join, relative } from 'node:path'
 import { dayKeyOf, parseSamples } from '../src/history.js'
+
+/**
+ * The home the plugin writes under when a test does not name one itself.
+ *
+ * A test that reached the store without setting `$DSH_HOME` resolved the harness
+ * home to the developer's real `~/.dsh` and wrote there, and a helper's own
+ * save/restore of the variable is a convention rather than a guarantee. This is
+ * the guarantee: a missing override becomes a throwaway directory instead. The
+ * directory is left in place on purpose — nothing deletes a home here, least of
+ * all a real one, and a deleted suite home would leave every later test pointing
+ * at a path that is not there.
+ */
+const SUITE_HOME = mkdtempSync(join(tmpdir(), 'dsh-balance-suite-home-'))
+
+/** Whether `path` lies inside `dir`, without the prefix-match traps. */
+function inside(dir, path) {
+  const step = relative(dir, path)
+  return step !== '' && !step.startsWith('..') && !isAbsolute(step)
+}
+
+/**
+ * Point a missing `$DSH_HOME` at the throwaway suite home, leaving a chosen one alone.
+ *
+ * A blank value counts as missing: the harness reads one as unset, so the net
+ * cannot treat it as a decision.
+ *
+ * @param env - the environment mapping to read and write.
+ * @returns the home in effect afterwards.
+ */
+function ensureSuiteHome(env = process.env) {
+  if (env.DSH_HOME === undefined || env.DSH_HOME.trim() === '') env.DSH_HOME = SUITE_HOME
+  return env.DSH_HOME
+}
+
+/** The home the process brought with it, and the one the plugin therefore sees. */
+const inheritedHome = process.env.DSH_HOME
+const suiteHome = ensureSuiteHome()
 
 /** A request stub that emits an optional JSON body. */
 function request(method, url, body) {
@@ -126,6 +164,50 @@ async function withPlugin(run, options = {}) {
     await rm(home, { recursive: true, force: true })
   }
 }
+
+test('a missing DSH_HOME becomes a throwaway home, a chosen one is left alone', () => {
+  assert.equal(ensureSuiteHome({}), SUITE_HOME, 'a test that sets no home gets the suite one')
+  assert.equal(ensureSuiteHome({ DSH_HOME: '' }), SUITE_HOME, 'so does a blank one, which the harness reads as unset')
+  assert.equal(ensureSuiteHome({ DSH_HOME: '   ' }), SUITE_HOME, 'and one holding nothing but whitespace')
+  assert.equal(ensureSuiteHome({ DSH_HOME: '/tmp/a-home-of-my-own' }), '/tmp/a-home-of-my-own', 'a home the caller named is not overruled')
+  assert.ok(inside(tmpdir(), SUITE_HOME), 'the suite home is under the system temp directory')
+  assert.equal(inside(join(homedir(), '.dsh'), SUITE_HOME), false, 'and never inside the real harness home')
+  // The net is wired into the module, not merely defined next to it: this process is
+  // the evidence, and the value is the inherited one when the environment had it.
+  assert.equal(suiteHome, inheritedHome ?? SUITE_HOME)
+})
+
+test('a run that names no DSH_HOME writes under the suite home', {
+  skip: inheritedHome !== undefined && 'the environment supplies a DSH_HOME, so the suite home is not ours to write to',
+}, async () => {
+  // The shape of the mistake this file once made: no home of its own, so the net
+  // decides. Every per-test helper above and below sets one and restores it, which
+  // is the convention; this is what happens to the test that does not.
+  const previousFetch = globalThis.fetch
+  const ctx = hostContext()
+  globalThis.fetch = async () => ({ ok: true, json: async () => balanceBody(12.34) })
+  try {
+    const module = await import(`../src/index.js?suite-home=${encodeURIComponent(SUITE_HOME)}`)
+    module.apply(ctx, module.Config({ apiKey: 'test-key' }))
+    // Both of the store's paths, so the assertion covers the sample log and the
+    // state document rather than whichever one this run happened to touch.
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    const saved = response()
+    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { costMetric: 'output' }), saved)
+    assert.equal(saved.status, 200, saved.body)
+    // The whole of what the run wrote, read from the home the net named. A path is
+    // what is asserted, not a real directory: the developer's own home is never
+    // opened here, and the suite home stays on disk so nothing is left pointing at
+    // a home that is gone.
+    const dir = join(suiteHome, 'dsh-balance')
+    const written = (await readdir(dir)).sort()
+    assert.deepEqual(written, ['samples.ndjson', 'state.json'], 'the run wrote its two files and nothing else')
+    assert.equal(inside(join(homedir(), '.dsh'), dir), false, 'the store it wrote to is not the developer home')
+  } finally {
+    ctx.dispose()
+    globalThis.fetch = previousFetch
+  }
+})
 
 test('the plugin registers its routes and its projection unit', async () => {
   await withPlugin(async ({ ctx, module }) => {
@@ -888,6 +970,134 @@ test('a write that arrives while the state is still loading survives the load', 
     else process.env.DSH_HOME = previousHome
     globalThis.fetch = previousFetch
   }
+})
+
+test('the client heartbeat that lands during the load does not blank the stored state', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
+  const previousHome = process.env.DSH_HOME
+  const previousFetch = globalThis.fetch
+  process.env.DSH_HOME = home
+  globalThis.fetch = async () => ({ ok: true, json: async () => balanceBody(12.34) })
+  const ctx = hostContext()
+  try {
+    const { mkdir, writeFile, readFile, rm } = await import('node:fs/promises')
+    await mkdir(join(home, 'dsh-balance'), { recursive: true })
+    // A document big enough that reading it outlasts the heartbeat below: the heartbeat
+    // persists the whole state, so a write built before the load has restored it would
+    // put an empty document where every correction and every panel choice is.
+    const overrides = {}
+    for (let i = 0; i < 60_000; i += 1) {
+      overrides[`2026-09-${String((i % 28) + 1).padStart(2, '0')}-${String(i).padStart(5, '0')}`] = { amount: 1, at: Date.now() }
+    }
+    await writeFile(join(home, 'dsh-balance', 'state.json'), JSON.stringify({
+      version: 1,
+      overrides,
+      prefs: { costMetric: 'output' },
+      client: { version: '9.9.9', at: 1234, count: 7 },
+    }), 'utf8')
+    const module = await import(`../src/index.js?hello-race=${encodeURIComponent(home)}`)
+    module.apply(ctx, module.Config({ apiKey: 'test-key' }))
+    const res = response()
+    await ctx.routes.get('/dsh-balance/hello')(request('POST', '/dsh-balance/hello', { phase: 'mount', version: 'test' }), res)
+    assert.equal(res.status, 200, res.body)
+    // The heartbeat's own write is fire-and-forget, so the file is read until it lands.
+    let state = {}
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      state = JSON.parse(await readFile(join(home, 'dsh-balance', 'state.json'), 'utf8'))
+      if (state.client?.mounts === 1) break
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    assert.equal(state.client?.mounts, 1, 'the heartbeat landed on top of the loaded state')
+    assert.equal(Object.keys(state.overrides ?? {}).length, Object.keys(overrides).length, 'every stored correction is still on disk')
+    assert.equal(state.prefs.costMetric, 'output', 'and so is the stored panel choice')
+    assert.equal(state.client.version, 'test', 'with the heartbeat’s own identity on top')
+    await rm(home, { recursive: true, force: true })
+  } finally {
+    ctx.dispose()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('two corrections written at the same time both land on disk', async () => {
+  await withPlugin(async ({ ctx, home }) => {
+    const { readFile } = await import('node:fs/promises')
+    const read = response()
+    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), read)
+    const today = JSON.parse(read.body).ledger.todayKey
+    // The browser half heartbeats on every poll while a correction awaits its own
+    // write, so two writes of the state document in flight is the normal case, not
+    // an exotic one: one temp name per process lost one of every pair.
+    const [first, second] = [response(), response()]
+    await Promise.all([
+      ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: today, amount: 1.5 }), first),
+      ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: '2026-09-01', amount: 2.5 }), second),
+    ])
+    assert.equal(first.status, 200, first.body)
+    assert.equal(second.status, 200, second.body)
+    const state = JSON.parse(await readFile(join(home, 'dsh-balance', 'state.json'), 'utf8'))
+    assert.equal(state.overrides[today].amount, 1.5)
+    assert.equal(state.overrides['2026-09-01'].amount, 2.5)
+    assert.deepEqual(ctx.warns.filter((line) => line.includes('cannot write state')), [],
+      'no write lost its temp file to a concurrent one')
+  })
+})
+
+test('a state write that cannot land is reported and does not wedge the next one', async () => {
+  await withPlugin(async ({ ctx, home }) => {
+    const { mkdir, readFile, rm } = await import('node:fs/promises')
+    // A directory in place of the document: the rename cannot replace it, so every
+    // write fails from here on.
+    const statePath = join(home, 'dsh-balance', 'state.json')
+    await mkdir(statePath, { recursive: true })
+    const failed = response()
+    await ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: '2026-09-02', amount: 3 }), failed)
+    assert.equal(failed.status, 500, 'a change that is not on disk is not answered as saved')
+    assert.equal(JSON.parse(failed.body).ok, false)
+    const settings = response()
+    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { costMetric: 'output' }), settings)
+    assert.equal(settings.status, 500)
+    // The plugin keeps running: the change is still served, from memory.
+    const read = response()
+    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), read)
+    assert.equal(JSON.parse(read.body).ledger.rows.find((row) => row.key === '2026-09-02').spend, 3)
+
+    await rm(statePath, { recursive: true, force: true })
+    const next = response()
+    await ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: '2026-09-03', amount: 4 }), next)
+    assert.equal(next.status, 200, 'the write queued behind the failure still ran')
+    const state = JSON.parse(await readFile(statePath, 'utf8'))
+    assert.equal(state.overrides['2026-09-03'].amount, 4)
+    assert.equal(state.overrides['2026-09-02'].amount, 3, 'and the correction that could not be written is on disk too')
+  })
+})
+
+test('the sample log is thinned while the Host runs, not only at startup', async () => {
+  await withPlugin(async ({ ctx, home, setBalance }) => {
+    const { appendFile, mkdir, readFile } = await import('node:fs/promises')
+    const dir = join(home, 'dsh-balance')
+    await mkdir(dir, { recursive: true })
+    // History that crossed the retention window without the Host ever restarting:
+    // three samples of one hour, all older than keepDays.
+    const old = Date.now() - 30 * 86_400_000
+    const line = (offset, total) => `${JSON.stringify({ t: old + offset, currency: 'CNY', total, granted: 0, toppedUp: total })}\n`
+    await appendFile(join(dir, 'samples.ndjson'), [line(0, 10), line(60_000, 9.5), line(120_000, 9)].join(''), 'utf8')
+
+    // Every sample carries news, so each refresh appends one and the log crosses the
+    // interval between two thinning passes.
+    for (let index = 0; index < 100; index += 1) {
+      setBalance(100 - index / 100)
+      await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    }
+
+    const { parseSamples } = await import('../src/history.js')
+    const stored = parseSamples(await readFile(join(dir, 'samples.ndjson'), 'utf8'))
+    const thinned = stored.filter((sample) => sample.t < Date.now() - 7 * 86_400_000)
+    assert.equal(thinned.length, 1, 'the old hour was thinned to its last sample without a restart')
+    assert.equal(thinned[0].total, 9)
+    assert.ok(stored.length >= 100, 'and the samples appended since were kept')
+  }, { config: { keepDays: 7 } })
 })
 
 test('the sampling loop stops for good when the plugin is disposed with a fetch in flight', async (t) => {
