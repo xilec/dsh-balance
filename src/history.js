@@ -44,34 +44,96 @@ const DEFAULT_SPEND_MIN_DELTA = 0.001
 const round6 = (value) => Math.round(value * 1e6) / 1e6
 
 /**
+ * Cached formatter per IANA zone, `null` where the runtime rejects the name.
+ *
+ * Building a formatter costs microseconds and the ledger asks for calendar fields once per
+ * sample, so building one per call spent seconds inside a single ledger build. The zone is one
+ * panel setting, so this holds a handful of entries; the map is capped anyway and dropped
+ * wholesale when it overflows, which keeps a caller that passes many zone names from growing it
+ * without bound and needs no eviction policy to reason about.
+ */
+const FORMATTER_CACHE_LIMIT = 16
+const zoneFormatters = new Map()
+
+/**
+ * Where the two-digit hour starts in this formatter's output, or `-1` when the output is not
+ * the `YYYY-MM-DD<separator>HH` shape the fast path slices.
+ *
+ * `format` is about twice as fast as `formatToParts`, which allocates an array and five part
+ * objects per sample, but reading it depends on the pattern — so the shape is confirmed once
+ * per zone against two known instants before anything is sliced out of it.
+ */
+function probeHourAt(formatter) {
+  const noon = formatter.format(Date.UTC(2026, 0, 2, 12))
+  const midnight = formatter.format(Date.UTC(2026, 0, 2, 0))
+  const shape = /^\d{4}-\d{2}-\d{2}[^\d]*\d{2}$/
+  if (!shape.test(noon) || !shape.test(midnight)) return -1
+  // Noon UTC is one of three local dates, so the front of the string is what makes it a date.
+  if (!['2026-01-01', '2026-01-02', '2026-01-03'].includes(noon.slice(0, 10))) return -1
+  return noon.length - 2
+}
+
+/**
+ * The formatter for an IANA zone, with the hour offset in its output.
+ *
+ * @param zone - IANA zone name.
+ * @returns `{ format, hourAt }`, or null when the runtime does not know the zone.
+ */
+function formatterFor(zone) {
+  const cached = zoneFormatters.get(zone)
+  if (cached !== undefined) return cached
+  if (zoneFormatters.size >= FORMATTER_CACHE_LIMIT) zoneFormatters.clear()
+  let entry = null
+  try {
+    const format = new Intl.DateTimeFormat('en-CA', {
+      timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
+      // `h23` rather than `hour12: false`: some ICU versions answer `24` for midnight, which
+      // would be a different thinning bucket than `00`.
+      hour: '2-digit', hourCycle: 'h23',
+    })
+    entry = { format, hourAt: probeHourAt(format) }
+  } catch {
+    /* an unknown zone falls back to the host's own, as the read route requires */
+  }
+  zoneFormatters.set(zone, entry)
+  return entry
+}
+
+/**
+ * Calendar fields of an instant in the host's own zone.
+ *
+ * @param tsMs - epoch milliseconds.
+ * @returns `{ dateKey, hour }`, the key being `YYYY-MM-DD`.
+ */
+function hostFields(tsMs) {
+  const d = new Date(tsMs)
+  const month = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return { dateKey: `${d.getFullYear()}-${month}-${day}`, hour: d.getHours() }
+}
+
+/**
  * Calendar fields of an instant in a zone.
+ *
+ * The hour travels with the day because the retention thinning buckets on the pair: one sample
+ * per clock hour of this zone, which is the only hour whose last sample is a sample of the day
+ * the ledger attributes it to.
  *
  * @param tsMs - epoch milliseconds.
  * @param zone - IANA zone name, or `local`/undefined for the host's own zone.
- * @returns `{ dateKey, hour, minute }`, the key being `YYYY-MM-DD`.
+ * @returns `{ dateKey, hour }`, the key being `YYYY-MM-DD`.
  */
 function zoneFields(tsMs, zone) {
-  if (!zone || zone === 'local') {
-    const d = new Date(tsMs)
-    const month = String(d.getMonth() + 1).padStart(2, '0')
-    const day = String(d.getDate()).padStart(2, '0')
-    return { dateKey: `${d.getFullYear()}-${month}-${day}`, hour: d.getHours(), minute: d.getMinutes() }
+  if (!zone || zone === 'local') return hostFields(tsMs)
+  const entry = formatterFor(zone)
+  if (entry === null) return hostFields(tsMs)
+  if (entry.hourAt < 0) {
+    const parts = entry.format.formatToParts(tsMs)
+    const get = (type) => parts.find((p) => p.type === type)?.value ?? ''
+    return { dateKey: `${get('year')}-${get('month')}-${get('day')}`, hour: Number(get('hour')) }
   }
-  let parts
-  try {
-    parts = new Intl.DateTimeFormat('en-CA', {
-      timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', hour12: false,
-    }).formatToParts(new Date(tsMs))
-  } catch {
-    return zoneFields(tsMs, 'local')
-  }
-  const get = (type) => parts.find((p) => p.type === type)?.value ?? ''
-  return {
-    dateKey: `${get('year')}-${get('month')}-${get('day')}`,
-    hour: Number(get('hour')),
-    minute: Number(get('minute')),
-  }
+  const text = entry.format.format(tsMs)
+  return { dateKey: text.slice(0, 10), hour: Number(text.slice(entry.hourAt, entry.hourAt + 2)) }
 }
 
 /** The `YYYY-MM-DD` day key of an instant in a zone. */
@@ -210,15 +272,45 @@ export function buildLedger(options) {
   const todayKey = dayKeyOf(nowMs, zone)
   const keys = recentDayKeys(todayKey, days)
 
+  // One calendar lookup per sample, reused by everything below. The fold used to ask for the
+  // day of both ends of every interval, which is two lookups per interval, and the manual
+  // bases asked again for every sample of their own day.
+  const dayKeys = series.map((one) => zoneFields(one.t, zone).dateKey)
+
   const sampled = new Map()
   const coarseKeys = new Set()
-  for (const interval of intervals) {
-    if (interval.spend <= 0) continue
-    const fromKey = dayKeyOf(interval.from, zone)
-    const toKey = dayKeyOf(interval.to, zone)
+  for (let i = 1; i < series.length; i += 1) {
+    // `movements` emits one interval per consecutive pair, in order, so interval `i - 1`
+    // belongs to the samples `i - 1` and `i`.
+    if (intervals[i - 1].spend <= 0) continue
+    const fromKey = dayKeys[i - 1]
+    const toKey = dayKeys[i]
     const target = toKey
-    sampled.set(target, round6((sampled.get(target) ?? 0) + interval.spend))
+    sampled.set(target, round6((sampled.get(target) ?? 0) + intervals[i - 1].spend))
     if (fromKey !== toKey) coarseKeys.add(target)
+  }
+
+  /**
+   * The samples and credits of each day, indexed by day key, built on the first manual base.
+   *
+   * The bases re-filtered the whole series (and the whole credit list) once per row, which
+   * made a read O(days × samples); the index costs one pass and is skipped entirely by the
+   * ledgers that hold no anchored base.
+   */
+  let byDay = null
+  const dayIndex = () => {
+    if (byDay !== null) return byDay
+    byDay = new Map()
+    const bucket = (key) => {
+      const found = byDay.get(key)
+      if (found !== undefined) return found
+      const created = { samples: [], credits: [] }
+      byDay.set(key, created)
+      return created
+    }
+    for (let i = 0; i < series.length; i += 1) bucket(dayKeys[i]).samples.push(series[i])
+    for (const credit of credits) bucket(dayKeyOf(credit.t, zone)).credits.push(credit)
+    return byDay
   }
 
   /**
@@ -236,13 +328,14 @@ export function buildLedger(options) {
    */
   const addedSince = (key, entry) => {
     if (entry === null || entry.at === null || entry.balance === null) return 0
-    const samples = series.filter((sample) => dayKeyOf(sample.t, zone) === key)
-    const newest = samples[samples.length - 1]
+    const day = dayIndex().get(key)
+    if (day === undefined) return 0
+    const newest = day.samples[day.samples.length - 1]
     // A correction made after that day's last sample has nothing left to measure:
     // the base is the user's final word for the day.
     if (newest === undefined || entry.at > newest.t) return 0
-    const creditsSince = credits.reduce((total, credit) => (
-      credit.t > entry.at && dayKeyOf(credit.t, zone) === key ? total + credit.amount : total
+    const creditsSince = day.credits.reduce((total, credit) => (
+      credit.t > entry.at ? total + credit.amount : total
     ), 0)
     return Math.max(0, round6(entry.balance - newest.total + creditsSince))
   }
@@ -313,11 +406,13 @@ export function medianGapMs(series) {
  * @param samples - any sample list.
  * @param options.nowMs - the instant retention is measured from.
  * @param options.keepDays - full-resolution window in days (default 7).
+ * @param options.zone - the ledger's day boundary; the thinned hours are its clock hours.
  * @returns the retained samples, ascending.
  */
 export function compactSamples(samples, options = {}) {
   const nowMs = options.nowMs ?? Date.now()
   const keepDays = options.keepDays ?? 7
+  const zone = options.zone ?? 'local'
   const fullFrom = nowMs - keepDays * 24 * HOUR_MS
   const hourly = new Map()
   const kept = []
@@ -326,11 +421,15 @@ export function compactSamples(samples, options = {}) {
       kept.push(sample)
       continue
     }
-    const hour = Math.floor(sample.t / HOUR_MS)
-    const previous = hourly.get(hour)
+    // The bucket has to be a clock hour of the ledger's zone. A UTC hour straddles local
+    // midnight wherever the offset is not a whole number of hours (+05:30, +05:45, +09:30),
+    // and then the last sample kept before the boundary is not a sample of the day it
+    // belongs to — the thinned history loses that day's own last hour.
+    const { dateKey, hour } = zoneFields(sample.t, zone)
+    const previous = hourly.get(`${dateKey}T${hour}`)
     // One sample per hour: keep the last of the hour, which carries the end state.
-    if (previous === undefined) hourly.set(hour, sample)
-    else if (previous.t <= sample.t) hourly.set(hour, sample)
+    if (previous === undefined) hourly.set(`${dateKey}T${hour}`, sample)
+    else if (previous.t <= sample.t) hourly.set(`${dateKey}T${hour}`, sample)
   }
   return [...hourly.values(), ...kept].sort((a, b) => a.t - b.t)
 }

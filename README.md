@@ -153,7 +153,8 @@ and a value written there outranks the row for that key only.
 | `anomalies.thresholds` | `{}` | Per-Indicator threshold overrides, by Indicator id and field name |
 
 State lives in `$DSH_HOME/dsh-balance/`: `samples.ndjson` is the append-only
-sample log (thinned to one sample per hour beyond `keepDays`), `state.json` holds
+sample log (thinned to one sample per clock hour of `dayZone` beyond `keepDays`),
+`state.json` holds
 the day overrides, the settings and the last client contact.
 
 ## Cost anomalies

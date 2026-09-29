@@ -262,10 +262,13 @@ export function apply(ctx, config) {
   const load = async () => {
     if (dir === '') return
     try {
-      const [stored, state] = await Promise.all([
-        readSamplesCompacting(dir, { keepDays: runtime.keepDays }),
-        readState(dir),
-      ])
+      const state = await readState(dir)
+      // Thinning buckets the old samples on the ledger's clock hours, so the zone the
+      // reader sees has to be known before the log is compacted: it is stored in the
+      // state document next to the samples, and dropping samples cannot be undone.
+      const storedZone = state.prefs?.dayZone
+      const zone = MUTABLE_SETTINGS.dayZone(storedZone) ? storedZone : runtime.dayZone
+      const stored = await readSamplesCompacting(dir, { keepDays: runtime.keepDays, zone })
       samples = stored
       if (state.overrides !== null && typeof state.overrides === 'object') overrides = state.overrides
       // Everything the file holds is taken into memory first: a write triggered

@@ -257,6 +257,47 @@ test('compaction keeps every recent sample and one per hour before that', () => 
   assert.equal(kept.filter((s) => s.t < now - 7 * 24 * hour).length, 1) // all ten fall in one hour
 })
 
+test('thinned hours are the clock hours of the ledger\'s zone, not UTC ones', () => {
+  // Kolkata is +05:30, so a UTC hour covers 23:30 of one local day and 00:30 of the next:
+  // bucketing by UTC hour hands the bucket's last sample (00:25 local) to the next day and
+  // leaves the day before it without its own last half hour.
+  const zone = 'Asia/Kolkata'
+  const now = at('2026-09-30T12:00:00Z')
+  const samples = []
+  for (let i = 0; i < 288 * 2; i += 1) samples.push({ t: at('2026-09-20T00:00:00Z') + i * 5 * 60_000, total: i })
+  const kept = compactSamples(samples, { nowMs: now, keepDays: 7, zone })
+  const newestOfDay = new Map()
+  for (const one of kept) newestOfDay.set(dayKeyOf(one.t, zone), one)
+  const lastOfDay = new Map()
+  for (const one of samples) lastOfDay.set(dayKeyOf(one.t, zone), one)
+  assert.deepEqual([...newestOfDay.keys()], [...lastOfDay.keys()], 'every sampled day is still there')
+  for (const [key, newest] of newestOfDay) {
+    // One sample per clock hour, last of the hour: the newest sample of a day is therefore
+    // the newest sample that day ever had, and the day boundary survives the thinning.
+    assert.equal(newest.t, lastOfDay.get(key).t, `${key} keeps the last sample of its own last hour`)
+  }
+})
+
+test('a ledger over a full history costs no formatter per sample', () => {
+  const zone = 'Europe/Berlin'
+  const now = at('2026-09-30T12:00:00Z')
+  const count = 35_000 // 120 days at the 5-minute cadence of the default keepDays
+  const samples = []
+  for (let i = 0; i < count; i += 1) {
+    samples.push({ t: now - (count - i) * 5 * 60_000, total: 100 - (i % 97) * 0.01, currency: 'CNY' })
+  }
+  const started = process.hrtime.bigint()
+  const ledger = buildLedger({ samples, zone, nowMs: now, days: 30 })
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6
+  assert.equal(ledger.rows.length, 30)
+  // What this protects against is the per-call `new Intl.DateTimeFormat(...)`: the same build
+  // spent 2.8 s here before the formatters were cached, and 15 s at the sample cap, and the
+  // 15 s browser poll runs it in the dsh process that every pane shares. The build now costs
+  // ~55 ms on the machine that measured it, so the budget sits an order of magnitude above
+  // that — loose enough not to redden a slow runner, and still two orders below the cost.
+  assert.ok(elapsedMs < 600, `ledger over ${count} samples in ${zone} took ${elapsedMs.toFixed(0)} ms`)
+})
+
 test('calibration needs two samples inside the window and says what it covers', () => {
   const samples = [
     sample('2026-09-24T09:00:00Z', 100),
