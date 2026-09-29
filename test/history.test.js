@@ -278,7 +278,7 @@ test('thinned hours are the clock hours of the ledger\'s zone, not UTC ones', ()
   }
 })
 
-test('a ledger over a full history costs no formatter per sample', () => {
+test('a ledger over a full history builds no formatter per sample', () => {
   const zone = 'Europe/Berlin'
   const now = at('2026-09-30T12:00:00Z')
   const count = 35_000 // 120 days at the 5-minute cadence of the default keepDays
@@ -286,16 +286,40 @@ test('a ledger over a full history costs no formatter per sample', () => {
   for (let i = 0; i < count; i += 1) {
     samples.push({ t: now - (count - i) * 5 * 60_000, total: 100 - (i % 97) * 0.01, currency: 'CNY' })
   }
-  const started = process.hrtime.bigint()
-  const ledger = buildLedger({ samples, zone, nowMs: now, days: 30 })
-  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6
-  assert.equal(ledger.rows.length, 30)
   // What this protects against is the per-call `new Intl.DateTimeFormat(...)`: the same build
   // spent 2.8 s here before the formatters were cached, and 15 s at the sample cap, and the
-  // 15 s browser poll runs it in the dsh process that every pane shares. The build now costs
-  // ~55 ms on the machine that measured it, so the budget sits an order of magnitude above
-  // that — loose enough not to redden a slow runner, and still two orders below the cost.
-  assert.ok(elapsedMs < 600, `ledger over ${count} samples in ${zone} took ${elapsedMs.toFixed(0)} ms`)
+  // 15 s browser poll runs it in the dsh process that every pane shares. The count is read
+  // rather than the clock, because a wall-clock budget is a statement about the runner and
+  // not about the code: this build costs tens of milliseconds here and would be several
+  // times that on a loaded machine, while the counts below are the two shapes the fix
+  // removed — one formatter for the whole build, and one calendar lookup per sample rather
+  // than two per interval plus one per override row.
+  const real = Intl.DateTimeFormat
+  let built = 0
+  let formatted = 0
+  Intl.DateTimeFormat = class extends real {
+    constructor(...args) {
+      super(...args)
+      built += 1
+    }
+
+    format(...args) {
+      formatted += 1
+      return super.format(...args)
+    }
+  }
+  let ledger
+  try {
+    ledger = buildLedger({ samples, zone, nowMs: now, days: 30 })
+  } finally {
+    Intl.DateTimeFormat = real
+  }
+  assert.equal(ledger.rows.length, 30)
+  // The zone is one panel setting, so the build may add the formatter the cache is missing
+  // — at most one, and none at all when an earlier case already warmed the entry.
+  assert.ok(built <= 1, `the build constructed ${built} formatters for one zone`)
+  // One lookup per sample, plus today and the three window-coverage keys.
+  assert.ok(formatted <= count + 8, `the build formatted ${formatted} instants for ${count} samples`)
 })
 
 test('calibration needs two samples inside the window and says what it covers', () => {

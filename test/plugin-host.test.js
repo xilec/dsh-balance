@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { dayKeyOf, parseSamples } from '../src/history.js'
 
 /** A request stub that emits an optional JSON body. */
 function request(method, url, body) {
@@ -328,6 +329,58 @@ test('a fresh start reads the composition row', async () => {
     assert.equal(payload.sampling.refreshIntervalMs, 300000)
     assert.equal(payload.balance.currencyPreference, 'USD')
   })
+})
+
+test('the log is thinned in the zone the reader stored, not in UTC', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const ctx = hostContext()
+  try {
+    const module = await import(`../src/index.js?zone=${encodeURIComponent(home)}`)
+    const { mkdir, readFile, writeFile } = await import('node:fs/promises')
+    await mkdir(join(home, 'dsh-balance'), { recursive: true })
+    // Two days at the default cadence, far enough back to be past the retention
+    // window, so the read thins them and writes the survivors back to the log.
+    const zone = 'Asia/Kolkata'
+    const start = Date.now() - 200 * 24 * 3600_000
+    const samples = []
+    for (let i = 0; i < 288 * 2; i += 1) {
+      samples.push({ t: start + i * 5 * 60_000, currency: 'CNY', total: 100 - i * 0.01 })
+    }
+    await writeFile(join(home, 'dsh-balance', 'samples.ndjson'),
+      samples.map((one) => JSON.stringify(one)).join('\n') + '\n', 'utf8')
+    await writeFile(join(home, 'dsh-balance', 'state.json'), JSON.stringify({
+      version: 1,
+      prefs: { dayZone: zone },
+    }), 'utf8')
+
+    // The composed config says UTC and only the stored preference says Kolkata, so
+    // thinning in Kolkata is possible only when the state document is read before the
+    // log is compacted. A host whose own zone happens to be Kolkata would pass either
+    // way, which is why the config, not the host clock, carries the difference.
+    module.apply(ctx, module.Config({ apiKey: 'test-key', currency: 'CNY', dayZone: 'UTC' }))
+    await new Promise((resolve) => setTimeout(resolve, 60))
+
+    const kept = parseSamples(await readFile(join(home, 'dsh-balance', 'samples.ndjson'), 'utf8'))
+    assert.ok(kept.length < samples.length / 5, `the log was thinned: ${kept.length} of ${samples.length}`)
+    // Kolkata is +05:30, so a UTC hour keeps the sample at 18:55Z — half a local
+    // hour into the *next* day — and the day before it loses the last half hour it
+    // had. One sample per clock hour of the stored zone is what keeps it.
+    const newestOfDay = new Map()
+    for (const one of kept) newestOfDay.set(dayKeyOf(one.t, zone), one)
+    const lastOfDay = new Map()
+    for (const one of samples) lastOfDay.set(dayKeyOf(one.t, zone), one)
+    assert.deepEqual([...newestOfDay.keys()], [...lastOfDay.keys()], 'every logged day is still there')
+    for (const [key, newest] of newestOfDay) {
+      assert.equal(newest.t, lastOfDay.get(key).t, `${key} keeps the last sample of its own day`)
+    }
+  } finally {
+    ctx.dispose()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    await rm(home, { recursive: true, force: true })
+  }
 })
 
 test('an override from the previous release gets its balance anchor back', async () => {
