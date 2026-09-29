@@ -3775,8 +3775,12 @@ window.__ModuleLoader__.load({
           }
           const rate = {}
           for (const key of RATE_KEYS) {
-            const value = Number(row[key])
-            if (!Number.isFinite(value) || value < 0) {
+            // An untouched field is not a rate of zero: Number('') is 0, which would
+            // pass the checks below and quietly under-price the model. The spec wants
+            // the row written only when every rate is a non-negative number.
+            const text = String(row[key] ?? '').trim()
+            const value = Number(text)
+            if (text === '' || !Number.isFinite(value) || value < 0) {
               setStatus(t('cost.rates.invalid'))
               return
             }

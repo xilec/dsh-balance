@@ -1679,6 +1679,25 @@ test('the rate editor writes the rates it holds, and an empty row clears one', a
   tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
   await find(tree, (element) => element.props?.className?.includes?.('dshb_rates_save') === true)[0].props.onClick()
   assert.equal(writes.length, 2, 'a negative rate is not written')
+
+  // A partly filled row is refused too: the two fields left empty are not rates of
+  // zero, and writing them as such would under-price the model on screen.
+  react.beginRender()
+  tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
+  find(tree, (element) => element.type === 'input').forEach((input, index) => {
+    input.props.onChange({ target: { value: index === 0 ? '2' : '' } })
+  })
+  react.beginRender()
+  tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
+  textOf(tree)
+  react.beginRender()
+  tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
+  await find(tree, (element) => element.props?.className?.includes?.('dshb_rates_save') === true)[0].props.onClick()
+  react.beginRender()
+  tree = react.createElement(RateEntry, { t: (key) => key, models: ['reseller-model'], rates, onSave })
+  assert.match(textOf(tree), /cost\.rates\.invalid/, 'the reader is told what is wrong with the row')
+  assert.equal(writes.length, 2, 'a partly filled row is not written')
+
   assert.equal(exported.__internals.RateEntry({ t: (key) => key, models: [], rates: {}, onSave }), null, 'no model, no editor')
   react.stop()
 })
