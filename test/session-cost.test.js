@@ -666,3 +666,102 @@ test('a Compaction step holds no call, no retry and no spawn, and survives a che
   broken.pendingCompactions[0].compaction = { model: 'deepseek-flash', shadowedTokenCount: 1 }
   assert.throws(() => unit.stateSchema.parse(JSON.parse(JSON.stringify(broken))), 'a compaction node needs its id')
 })
+
+/** One priced Step, so a case can assert the rest of the series survived. */
+const pricedStep = (time, turn, step) => message(time, turn, step, 1e6, 0, 0)
+
+test('an event with no data contributes nothing and leaves the rest of the session priced', () => {
+  const unit = projection()
+  const time = bjt(2026, 9, 24, 10, 0)
+  // Every family that reads `event.data`, with the field missing entirely: one of
+  // these used to throw out of the fold, and the Host answers a throw from the fold
+  // with `unknown-session` for the whole session.
+  const headless = [
+    { type: 'request/header', time },
+    { type: 'request/context', time },
+    { type: 'step/start', time },
+    { type: 'step/end', time },
+    { type: 'llm/retry-started', time },
+    { type: 'tool/call', time },
+    { type: 'assistant/message', time },
+    { type: 'assistant/attempt', time },
+    { type: 'subagent/catalog', time },
+    { type: 'compaction/summary', time },
+  ]
+  const state = fold(unit, sequenced([
+    ...pricedStep(time, 1, 1),
+    ...headless,
+    ...pricedStep(time + 2000, 1, 2),
+  ]))
+  const nodes = seriesPayload(state, { currency: 'CNY' })
+  const view = unit.wire.view(state)
+  assert.deepEqual(nodes.map((node) => [node.turn, node.step, node.cost]), [
+    [1, 1, 2],
+    [1, 2, 2],
+  ], 'only the two real Steps are in the series, each priced as before')
+  assert.equal(view.cost, 4)
+  assert.equal(view.steps, 2)
+  assert.equal(nodes.reduce((sum, node) => sum + node.cost, 0), view.cost, 'the sum invariant still holds exactly')
+  unit.stateSchema.parse(JSON.parse(JSON.stringify(state)), 'and the state is still one it can checkpoint')
+})
+
+test('a partially shaped event contributes nothing, and a located Step with no usage still opens its node', () => {
+  const unit = projection()
+  const time = bjt(2026, 9, 24, 10, 0)
+  const unlocatable = [
+    { type: 'request/header', time, data: { header: {} } },
+    { type: 'request/context', time, data: {} },
+    { type: 'step/start', time, data: { turn: 1 } },
+    { type: 'step/start', time, data: { turn: null, step: 1 } },
+    { type: 'step/start', time, data: { turn: '1', step: 1 } },
+    { type: 'step/start', time, data: { turn: 1, step: -1 } },
+    { type: 'assistant/message', time, data: { turn: 1, step: 1, usage: { inputTokens: 1e6 } } },
+  ]
+  const state = fold(unit, sequenced([
+    ...pricedStep(time, 1, 1),
+    ...unlocatable,
+    // A Step that opened and was never priced is a node of the series all the same:
+    // the series has one node per `(Turn, Step)`, not one per priced Step.
+    { type: 'step/start', time: time + 1000, data: { turn: 1, step: 2 } },
+    ...pricedStep(time + 2000, 2, 1),
+    // A compaction is placed by its own id, not by a location, so it is still a node
+    // when it names no usable Turn — and it lands on the Turn whose context it rewrote.
+    { type: 'compaction/summary', time: time + 2500, data: { compactionId: 'cmp-1', turn: 'two' } },
+  ]))
+  const nodes = seriesPayload(state, { currency: 'CNY' })
+  const view = unit.wire.view(state)
+  assert.deepEqual(nodes.map((node) => [node.kind, node.turn, node.step, node.hasUsage, node.cost]), [
+    ['step', 1, 1, true, 2],
+    ['step', 1, 2, false, 0],
+    ['step', 2, 1, true, 2],
+    ['compaction', 2, null, false, 0],
+  ], 'only the located Step opened a node, it is visible with no cost, and the compaction kept its own rule')
+  assert.equal(view.cost, 4, 'the unlocatable report is not billed onto a Step that never made it')
+  assert.equal(view.steps, 3, 'a Compaction step is not a Step the reader walks through')
+  assert.equal(nodes.reduce((sum, node) => sum + node.cost, 0), view.cost, 'the sum invariant still holds exactly')
+  unit.stateSchema.parse(JSON.parse(JSON.stringify(state)), 'and no node was written the schema would refuse')
+})
+
+test('a tool call whose own fields are missing is still the call the log recorded', () => {
+  const unit = projection()
+  const time = bjt(2026, 9, 24, 10, 0)
+  const state = fold(unit, sequenced([
+    ...pricedStep(time, 1, 1),
+    { type: 'tool/call', time: time + 500, data: { turn: 1, step: 1, name: null, callId: null, arguments: null } },
+  ]))
+  const [node] = seriesPayload(state, { currency: 'CNY' })
+  assert.deepEqual(node.calls.map((call) => [call.name, call.callId, call.preview]), [['', '', '']])
+  assert.equal(node.cost, 2, 'a call prices nothing, so the money is unchanged')
+})
+
+test('a fault in the fold is still a fault, not an empty series', () => {
+  const unit = projection()
+  const time = bjt(2026, 9, 24, 10, 0)
+  const events = pricedStep(time, 1, 1)
+  // A malformed event is skipped by a shape check; a state whose own internals are
+  // broken is our bug, and must still throw rather than fold into an empty series.
+  const broken = { ...unit.init(), byModel: null }
+  assert.throws(() => fold(unit, events.reduce((state) => broken, unit.init())), TypeError)
+  const throwingConfig = makeSessionCostProjection(() => { throw new Error('the rule is unreadable') })
+  assert.throws(() => fold(throwingConfig, events), /the rule is unreadable/)
+})

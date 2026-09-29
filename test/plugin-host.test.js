@@ -1393,3 +1393,44 @@ test('the anomaly thresholds are configuration, not something the panel can edit
     },
   })
 })
+
+test('a stored log with one malformed event is still a session with a cost, and still a priced child', async () => {
+  const time = Date.UTC(2026, 8, 24, 2, 0)
+  // The log the harness handed over, with one entry whose `data` never made it to disk.
+  // The fold reads it, finds no `(Turn, Step)` to place it at, and skips it — instead of
+  // throwing, which `projectionStateOf` answers as `unknown-session` for the whole session
+  // and as an `unavailable` diagnostic for a child line.
+  const log = (turn, step) => [
+    { type: 'step/start', seq: 1, time, data: { turn, step } },
+    { type: 'request/header', seq: 2, time, data: { header: { config: { model: 'deepseek-flash' } } } },
+    { type: 'assistant/message', seq: 3, time: time + 1000 },
+    { type: 'tool/call', seq: 4, time: time + 1500, data: { turn, step, callId: 'call-1', name: 'bash', arguments: '{}' } },
+    { type: 'assistant/message', seq: 5, time: time + 2000, data: { turn, step, usage: { inputTokens: 1e6, outputTokens: 1e6 } } },
+    { type: 'step/end', seq: 6, time: time + 2500, data: { turn, step } },
+  ]
+  await withPlugin(async ({ ctx }) => {
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    const own = response()
+    await ctx.routes.get('/dsh-balance/session-cost')(request('GET', '/dsh-balance/session-cost?sessionId=session-1'), own)
+    const series = JSON.parse(own.body)
+    assert.equal(series.ok, true, own.body)
+    assert.equal(series.nodes.length, 1, 'the priced Step is the whole series')
+    assert.equal(series.nodes[0].cost, 10, 'and it is priced at 1M miss plus 1M output')
+    assert.equal(series.nodes[0].calls.length, 1, 'the malformed event cost the Step nothing but its call')
+
+    const tree = response()
+    await ctx.routes.get('/dsh-balance/session-cost/children')(request('GET', '/dsh-balance/session-cost/children?sessionId=session-1'), tree)
+    const payload = JSON.parse(tree.body)
+    assert.equal(payload.ok, true, tree.body)
+    assert.deepEqual(payload.diagnostics, [], 'a child whose log holds one bad entry is not a branch that could not be read')
+    assert.deepEqual(payload.children.map((child) => [child.id, child.cost]), [['child-1', 10]])
+  }, {
+    sessionOf: () => undefined,
+    readSession: async (id) => ({ session: { id }, inheritedEventCount: 0, events: log(1, 1) }),
+    subagents: {
+      async listChildren() {
+        return [{ id: 'child-1', createdAt: time, mode: 'continuable', label: 'Survey the tree' }]
+      },
+    },
+  })
+})
