@@ -1,6 +1,6 @@
 {
   "name": "dsh-balance",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DeepSeek account balance history and spend in the dsh shell: 1d/1w/1m cost measured from balance differences, with a per-day ledger and session cost estimate",
   "type": "module",
   "license": "MIT",

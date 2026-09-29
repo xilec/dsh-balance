@@ -21,7 +21,7 @@ window.__ModuleLoader__.load({
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
     const react = require('react')
 
-    const VERSION = '0.1.0'
+    const VERSION = '0.2.0'
     const NS = 'dsh-balance'
 
     /** Provider whose requests the published pricing rule bills. */
