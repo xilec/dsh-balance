@@ -99,11 +99,23 @@ export const Config = Schema.object({
   }).default({ preset: 'balanced', thresholds: {} }),
 })
 
+/**
+ * What one field of a rate entry is worth, or NaN when it is not a rate at all.
+ *
+ * A hand-written body can hold a blank string, a boolean or a list, and `Number`
+ * calls all three zero: the reader would get a model priced by rates nobody typed.
+ * Only a number, or a string that reads as one, is a rate.
+ */
+function rateOf(value) {
+  if (typeof value === 'number') return value
+  return typeof value === 'string' && value.trim() !== '' ? Number(value) : Number.NaN
+}
+
 /** A rate map is accepted only when every entry is a set of non-negative numbers. */
 function isFallbackRates(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
   return Object.entries(value).every(([model, rate]) => model !== '' && rate !== null && typeof rate === 'object' &&
-    ['cacheHit', 'cacheMiss', 'output'].every((key) => Number.isFinite(Number(rate[key])) && Number(rate[key]) >= 0))
+    ['cacheHit', 'cacheMiss', 'output'].every((key) => Number.isFinite(rateOf(rate[key])) && rateOf(rate[key]) >= 0))
 }
 
 /** Drop the entries a hand-written settings body got wrong instead of storing them. */

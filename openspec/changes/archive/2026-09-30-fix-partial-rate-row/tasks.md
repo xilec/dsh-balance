@@ -33,3 +33,25 @@
   from the branch, the case fails on the status assertion, with the tree reporting
   `cost.rates.saved` — the old code wrote `{ cacheMiss: 2, cacheHit: 0, output: 0 }`, which is
   the finding
+- [x] 2.3 Cover the cases the review named: a row of deliberate zeros is written, the empty
+  field may sit first, and a field holding only spaces counts as empty
+  — done: the same test types `['0','0','0']` and asserts the write reaches `onSave` with three
+  zeros, then `['', '2', '']` and `['2', ' ', '']` and asserts both are refused
+- [x] 2.4 Cover the Host's half of the same rule in `test/plugin-host.test.js`: a body whose
+  rate field is a blank string is refused with 400, and a body of zeros is accepted
+  — done: both cases sit beside the negative-rate rejection, and the accepted zero row is read
+  back from the response body
+
+## 3. Teach the Host the same rule
+
+- [x] 3.1 In `src/index.js`, stop reading a rate field with bare `Number()`: `Number('')`,
+  `Number(null)`, `Number(false)` and `Number([])` are all zero, so `isFallbackRates` accepted a
+  hand-written body that priced a model at nothing; read the field through `rateOf`, which takes
+  a number or a string that reads as one and nothing else
+  — done: `rateOf` guards the four shapes `Number` folds to zero, `isFallbackRates` uses it for
+  both the finite and the non-negative test, and a stored zero still passes
+- [x] 3.2 Verify the client and the Host now agree on one definition of a valid rate: a number
+  that is finite and non-negative, or a string that reads as one; no `Number()`-only coercion
+  is left on either side of the settings write
+  — done: the two read sites are the editor's write loop and `rateOf`; searching the rate paths
+  for a `Number(` coercion finds nothing else that can turn a blank field into a rate

@@ -491,6 +491,22 @@ test('a fallback rate entered through the settings route reprices the session', 
     await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { fallbackRates: { 'reseller-model': { cacheMiss: -1 } } }), rejected)
     assert.equal(rejected.status, 400, 'a negative rate is rejected')
 
+    // A blank field is not a rate of zero: the same hole the browser editor refuses
+    // has to be refused here too, or a hand-written body prices a model for nothing.
+    const blank = response()
+    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', {
+      fallbackRates: { 'reseller-model': { cacheMiss: 2, cacheHit: '', output: '' } },
+    }), blank)
+    assert.equal(blank.status, 400, 'a blank rate is rejected rather than stored as zero')
+
+    // Zero, on the other hand, is a price the reader may mean.
+    const free = response()
+    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', {
+      fallbackRates: { 'reseller-model': { cacheHit: 0, cacheMiss: 0, output: 0 } },
+    }), free)
+    assert.equal(free.status, 200, 'a rate of zero is a rate')
+    assert.deepEqual(JSON.parse(free.body).fallbackRates, { 'reseller-model': { cacheHit: 0, cacheMiss: 0, output: 0 } })
+
     const saved = response()
     await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', {
       fallbackRates: { 'reseller-model': { cacheHit: 0.1, cacheMiss: 2, output: 8 } },

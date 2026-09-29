@@ -7,9 +7,9 @@ See `proposal.md` — Why.
 The facts that shape the approach:
 
 - The fallback-rate editor is one component, `RateEntry` (`client/client.js:3745`), rendered in
-  two places: the Cost view (`client.js:3533`) and the Settings tab (`client.js:3839`). Both
-  pass their own `onSave`, so the acceptance of a row lives in the component and there is a
-  single write loop to fix.
+  three places: the Settings tab (`client.js:1672`), the Cost view (`client.js:3533`) and the
+  Cost view's empty state (`client.js:3843`). Each passes its own `onSave`, so the acceptance
+  of a row lives in the component and there is a single write loop to fix.
 - Its save handler has two stages. First `filled` counts the fields whose
   `String(row[key] ?? '').trim()` is non-empty: zero filled means "remove the entry", which is
   the only way a model leaves the store. Then a second loop converts every key of the row and
@@ -45,7 +45,7 @@ The facts that shape the approach:
   message on every keystroke of a half-typed number is worse than one message on save.
 - Migrating rows already stored with a zero. Zero is a legitimate price — a free cache hit is
   not unheard of — and the stored payload is not this component's to reinterpret.
-- Changing the note, the field order, the step, or anything on the Host side.
+- Changing the note, the field order, the step, or the Host's rate-key set and defaults.
 
 ## Decisions
 
@@ -70,11 +70,18 @@ what the count uses, so `' '` and `'-'` both refuse. A reader who typed a sign a
 the same message as one who typed a negative rate: the existing text is accurate for both, and a
 second key would mean translating and deciding a wording nobody asked for.
 
-**Both editors are fixed by the one change.** The brief mentions a second editor; there is one
-component behind both entry points, so fixing the loop fixes the Settings tab and the Cost view
-together. Verified by reading every `RateEntry` render site rather than by assumption — the only
-other rate-shaped loop in the file is `rateDraftOf`, which reads stored rates through
-`Number.isFinite` and has no reader input to misread.
+**Every editor is fixed by the one change.** The brief mentions a second editor; there is one
+component behind all three entry points, so fixing the loop fixes the Settings tab, the Cost
+view and its empty state together. Verified by reading every `RateEntry` render site rather
+than by assumption — the only other rate-shaped loop in the file is `rateDraftOf`, which reads
+stored rates through `Number.isFinite` and has no reader input to misread.
+
+**The Host's own check learns the same rule.** `isFallbackRates` (`src/index.js`) asked
+`Number(rate[key])` the same question the client asked, so a body with a blank field was
+accepted there and stored as a rate of zero. The client refusing what the Host accepts is only
+half a fix: the settings route is reachable by any caller, so `rateOf` now reads a field the
+way the editor does — a number, or a string that reads as one. This stays inside the change
+because it is the same defect on the other side of the wire, not a new requirement.
 
 ## Risks / Trade-offs
 
@@ -87,14 +94,19 @@ other rate-shaped loop in the file is `rateDraftOf`, which reads stored rates th
 - [An existing test could have depended on the loose conversion] → `test/client.test.js` has
   three rate-editor cases (all-empty, complete, negative) and none of them types a partial row,
   which is the reviewer's point. `npm test` decides.
+- [Tightening the Host's check could drop an entry that used to load] → Only an entry that
+  cannot be a rate anyone meant: a blank, boolean or list field. A number, and a string that
+  reads as one, still pass, and a stored zero is untouched. The Host's config schema already
+  rejects a blank field before `apply`, so the reachable case was the settings route.
 - [jscpd flags the repeated `.trim()` expression] → The expression already appears once in the
   same function; two adjacent occurrences in a seven-line loop are the kind of thing the gate
   exists to catch, and it is re-run before the PR.
 
 ## Migration Plan
 
-None. The change is a client-side guard in one save handler plus a test; nothing is stored,
-migrated or republished. Reverting the commit restores the old acceptance.
+None. The change is a guard in the editor's save handler, the matching guard on the Host, and
+tests; nothing stored is migrated or republished. Reverting the commits restores the old
+acceptance.
 
 ## Open Questions
 
