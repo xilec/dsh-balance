@@ -144,6 +144,49 @@ function hostContext(options = {}) {
   }
 }
 
+/**
+ * Yield to the real event loop until `reached` holds, or fail naming what never came.
+ *
+ * A wait written as a fixed number of `setImmediate` hops is a timeout wearing a loop's
+ * clothes: it passes on a fast machine and expires on a loaded one, and the suite goes
+ * red on a colleague's box for a reason that has nothing to do with the code. This waits
+ * on the event instead, and `turns` is a backstop against hanging forever rather than the
+ * thing being asserted.
+ *
+ * @param reached - the condition to wait for; awaited, so it may be async.
+ * @param what - what the wait was for, named in the failure.
+ * @param turns - how many event-loop hops to allow before giving up.
+ * @returns nothing; it resolves once `reached` holds.
+ */
+async function eventually(reached, what, turns = 20_000) {
+  for (let turn = 0; turn < turns; turn += 1) {
+    if (await reached()) return
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+  assert.fail(`gave up after ${turns} event-loop turns waiting for ${what}`)
+}
+
+/**
+ * Advance a mocked clock in steps, yielding after each, until `reached` holds.
+ *
+ * The mocked clock says *when* a timer may fire; the real event loop says how long the
+ * work that timer starts takes to get through its own awaits and its file writes. A test
+ * that ticks N times and counts what it got therefore measures the machine, not the loop.
+ * This advances until the loop has actually done the thing.
+ *
+ * @param t - the test context whose `mock.timers` are enabled.
+ * @param reached - the condition to wait for.
+ * @param what - what the wait was for, named in the failure.
+ * @param stepMs - how far to advance the clock per step.
+ * @returns nothing; it resolves once `reached` holds.
+ */
+async function ticking(t, reached, what, stepMs = 1000) {
+  await eventually(() => {
+    t.mock.timers.tick(stepMs)
+    return reached()
+  }, what)
+}
+
 /** A balance endpoint response. */
 const balanceBody = (total, extra = {}) => ({
   is_available: true,
@@ -189,6 +232,39 @@ async function readPayload(ctx) {
   const res = response()
   await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), res)
   return JSON.parse(res.body)
+}
+
+/**
+ * Read `state.json` until it says what the caller is waiting for.
+ *
+ * The heartbeat route persists without awaiting, so a test that wants to see its write
+ * has to go on looking. How long to keep looking is the caller's business, not a
+ * duration the test guesses: `reached` is the condition, and this returns as soon as the
+ * document satisfies it. The read itself yields, so the write in flight gets its turns.
+ *
+ * @param home - the harness home the plugin was given.
+ * @param reached - the condition on the parsed document to wait for.
+ * @param what - what the wait was for, named if it never comes.
+ * @returns the document that satisfied `reached`.
+ */
+async function readStateWhen(home, reached, what = 'the state document to be written') {
+  const { readFile } = await import('node:fs/promises')
+  const path = join(home, 'dsh-balance', 'state.json')
+  let stored = {}
+  // One read per event-loop turn, with no sleep between them: a sleep is a guess about
+  // how long a write takes, and this way the loop costs exactly as many turns as the
+  // write needs. A document that is not there yet is simply not the one being waited
+  // for — the first write of a fresh home creates the file.
+  await eventually(async () => {
+    try {
+      stored = JSON.parse(await readFile(path, 'utf8'))
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+      return false
+    }
+    return reached(stored)
+  }, what)
+  return stored
 }
 
 test('a missing DSH_HOME becomes a throwaway home, a chosen one is left alone', () => {
@@ -330,9 +406,11 @@ test('the client hello route records the browser half on disk', async () => {
     await ctx.routes.get('/dsh-balance/hello')(request('POST', '/dsh-balance/hello', { version: '0.1.0', phase: 'read' }), hello)
     assert.equal(JSON.parse(hello.body).ok, true)
     await ctx.routes.get('/dsh-balance/hello')(request('POST', '/dsh-balance/hello', { version: '0.1.0', phase: 'mount' }), response())
-    // persist() is fire-and-forget from the route; give it a tick.
-    await new Promise((resolve) => setTimeout(resolve, 20))
-    const state = JSON.parse(await (await import('node:fs/promises')).readFile(join(home, 'dsh-balance', 'state.json'), 'utf8'))
+    // `persist()` is fire-and-forget from the heartbeat route, so the file is where the
+    // outcome shows up and the test reads it until it says what it is waiting for. The
+    // wait this replaces was a 20 ms sleep: a duration, so a machine under load read the
+    // document before the write landed.
+    const state = await readStateWhen(home, (stored) => stored.client?.count === 2)
     assert.equal(state.client.version, '0.1.0')
     assert.ok(state.client.at > 0)
     const read = response()
@@ -511,7 +589,11 @@ test('the log is thinned in the zone the reader stored, not in UTC', async () =>
     // log is compacted. A host whose own zone happens to be Kolkata would pass either
     // way, which is why the config, not the host clock, carries the difference.
     module.apply(ctx, module.Config({ apiKey: 'test-key', currency: 'CNY', dayZone: 'UTC' }))
-    await new Promise((resolve) => setTimeout(resolve, 60))
+    // The load is what thins the log, and every route waits for it, so asking one is
+    // the event that says the rewrite is done. A 60 ms sleep was the wait before, and
+    // on a loaded machine it expired first: the assertion then read the untouched log
+    // and reported `the log was thinned: 576 of 576` for a pass.
+    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), response())
 
     const kept = parseSamples(await readFile(join(home, 'dsh-balance', 'samples.ndjson'), 'utf8'))
     assert.ok(kept.length < samples.length / 5, `the log was thinned: ${kept.length} of ${samples.length}`)
@@ -562,7 +644,10 @@ test('an override from the previous release gets its balance anchor back', async
     }), 'utf8')
 
     module.apply(ctx, module.Config({ apiKey: 'test-key', currency: 'CNY' }))
-    await new Promise((resolve) => setTimeout(resolve, 60))
+    // The anchor is written by the load and every route waits for the load, so a route
+    // call is the event that says the write is on disk — the same reasoning as the
+    // thinning case above, and the same 60 ms sleep it replaces.
+    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), response())
 
     const state = JSON.parse(await readFile(join(home, 'dsh-balance', 'state.json'), 'utf8'))
     assert.equal(state.overrides[dayKey].balance, 9.5, 'the balance of the correction moment is restored')
@@ -1042,7 +1127,10 @@ test('a write that arrives while the state is still loading survives the load', 
     const res = response()
     await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { costMetric: 'cost' }), res)
     assert.equal(res.status, 200, res.body)
-    await new Promise((resolve) => setTimeout(resolve, 80))
+    // No wait for the file: the settings route waits for the load and then awaits its
+    // own write, and both go through the one persist chain, so a `200` is the event that
+    // says every write is on disk. The 80 ms sleep this replaces could only ever expire
+    // early on a loaded machine, and then the assertions below read the pre-load document.
     const state = JSON.parse(await readFile(join(home, 'dsh-balance', 'state.json'), 'utf8'))
     assert.equal(state.prefs.costTopK, 'turns', 'the choices the load restored are still on disk')
     assert.equal(state.prefs.costMetric, 'cost', 'with the one the request changed')
@@ -1057,7 +1145,7 @@ test('a write that arrives while the state is still loading survives the load', 
   }
 })
 
-test('the client heartbeat that lands during the load does not blank the stored state', async () => {
+test('the client heartbeat that lands during the load does not blank the stored state', { timeout: 60_000 }, async () => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
   const previousHome = process.env.DSH_HOME
   const previousFetch = globalThis.fetch
@@ -1085,13 +1173,14 @@ test('the client heartbeat that lands during the load does not blank the stored 
     const res = response()
     await ctx.routes.get('/dsh-balance/hello')(request('POST', '/dsh-balance/hello', { phase: 'mount', version: 'test' }), res)
     assert.equal(res.status, 200, res.body)
-    // The heartbeat's own write is fire-and-forget, so the file is read until it lands.
-    let state = {}
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      state = JSON.parse(await readFile(join(home, 'dsh-balance', 'state.json'), 'utf8'))
-      if (state.client?.mounts === 1) break
-      await new Promise((resolve) => setTimeout(resolve, 20))
-    }
+    // The heartbeat's own write is fire-and-forget, so the file is the only place the
+    // outcome is visible and the test reads it until it says what it is waiting for. The
+    // wait this replaces was a two-second budget of 20 ms naps — a duration, so a loaded
+    // machine ran out of it while a fast one did not. Here the loop costs one read of a
+    // 3 MB document per event-loop turn and gives up after twenty thousand of those, and
+    // the test carries a timeout for the case where the write never lands at all.
+    const state = await readStateWhen(home, (stored) => stored.client?.mounts === 1,
+      'the heartbeat to be written on top of the loaded state')
     assert.equal(state.client?.mounts, 1, 'the heartbeat landed on top of the loaded state')
     assert.equal(Object.keys(state.overrides ?? {}).length, Object.keys(overrides).length, 'every stored correction is still on disk')
     assert.equal(state.prefs.costMetric, 'output', 'and so is the stored panel choice')
@@ -1108,22 +1197,29 @@ test('the client heartbeat that lands during the load does not blank the stored 
 test('two corrections written at the same time both land on disk', async () => {
   await withPlugin(async ({ ctx, home }) => {
     const { readFile } = await import('node:fs/promises')
-    const read = response()
-    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), read)
-    const today = JSON.parse(read.body).ledger.todayKey
+    // Both days are named by the ledger the Host serves, not written down here. The
+    // second one used to be the literal `'2026-09-01'`, which is the same defect a date
+    // written into a test always is and one this suite already fixed elsewhere: on the
+    // day that literal names, the two writes below addressed the *same* day, the second
+    // overwrote the first, and the assertion on the first amount read the second. Two
+    // rows at the end of the window are inside it whatever day it is, and they are two
+    // different days, which is what "both land" needs.
+    const { ledger } = await readPayload(ctx)
+    const [today, other] = [ledger.rows.at(-1).key, ledger.rows.at(-3).key]
+    assert.notEqual(today, other, 'the two corrections name two different days')
     // The browser half heartbeats on every poll while a correction awaits its own
     // write, so two writes of the state document in flight is the normal case, not
     // an exotic one: one temp name per process lost one of every pair.
     const [first, second] = [response(), response()]
     await Promise.all([
       ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: today, amount: 1.5 }), first),
-      ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: '2026-09-01', amount: 2.5 }), second),
+      ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: other, amount: 2.5 }), second),
     ])
     assert.equal(first.status, 200, first.body)
     assert.equal(second.status, 200, second.body)
     const state = JSON.parse(await readFile(join(home, 'dsh-balance', 'state.json'), 'utf8'))
     assert.equal(state.overrides[today].amount, 1.5)
-    assert.equal(state.overrides['2026-09-01'].amount, 2.5)
+    assert.equal(state.overrides[other].amount, 2.5)
     assert.deepEqual(ctx.warns.filter((line) => line.includes('cannot write state')), [],
       'no write lost its temp file to a concurrent one')
   })
@@ -1213,15 +1309,28 @@ test('the sampling loop stops for good when the plugin is disposed with a fetch 
   try {
     const module = await import(`../src/index.js?dispose-race=${encodeURIComponent(home)}`)
     module.apply(ctx, module.Config({ apiKey: 'test-key', currency: 'CNY', refreshIntervalMs: 15000 }))
-    // Let the state load settle, then fire the first tick and wait for its fetch.
-    for (let index = 0; index < 500 && calls === 0; index += 1) {
-      t.mock.timers.tick(500)
-      await new Promise((resolve) => setImmediate(resolve))
-    }
+    // Let the state load settle, then fire the first tick and wait for its fetch. The
+    // wait is on the fetch, with the clock advanced to let the tick fire — the same
+    // shape as the settings-during-a-poll case, and for the same reason: a fixed number
+    // of turns is a guess about how long a load takes.
+    await ticking(t, () => calls > 0, 'the first tick to ask for the balance', 500)
     assert.equal(calls, 1, 'the first tick asked for the balance')
     ctx.dispose()
     release()
-    for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setImmediate(resolve))
+    // The poll in flight has to finish before the clock is trusted again: it is that
+    // tick which would have re-armed, and what is asserted is that it does not. Its last
+    // act is appending a sample, so the log growing is the event that says the tick is
+    // done — a fixed number of `setImmediate` hops was a guess about how long a poll and
+    // a file write take, and a loaded machine needed more hops than it allowed.
+    const { readFile: read } = await import('node:fs/promises')
+    await eventually(async () => {
+      try {
+        return (await read(join(home, 'dsh-balance', 'samples.ndjson'), 'utf8')).split('\n').filter(Boolean).length === 1
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error
+        return false
+      }
+    }, 'the released poll to finish appending its sample')
     t.mock.timers.tick(10 * 60_000)
     assert.equal(calls, 1, 'and the loop did not schedule another poll after the plugin went away')
   } finally {
@@ -1540,15 +1649,10 @@ test('the sampling loop asks again after a poll that rejected', async (t) => {
   try {
     const module = await import(`../src/index.js?rejected-tick=${encodeURIComponent(home)}`)
     module.apply(ctx, module.Config({ apiKey: '', apiKeyRef: 'DSH_BALANCE_ABSENT_KEY', refreshIntervalMs: 15000 }))
-    const settle = async (until) => {
-      for (let index = 0; index < 400 && !until(); index += 1) {
-        t.mock.timers.tick(1000)
-        await new Promise((resolve) => setImmediate(resolve))
-      }
-    }
-    await settle(() => polls > 0)
+    const settle = async (reached, what) => ticking(t, reached, what)
+    await settle(() => polls > 0, 'the first tick to resolve the key')
     assert.equal(polls, 1, 'the first tick resolved the key and failed')
-    await settle(() => polls > 1)
+    await settle(() => polls > 1, 'the loop to re-arm after the failed tick')
     assert.equal(polls, 2, 'the loop re-armed after the failed tick')
     assert.ok(
       ctx.warns.some((line) => line.includes('the credentials service is not readable')),
@@ -1645,26 +1749,40 @@ test('a settings write during a poll in flight does not arm a second loop', asyn
     return mockedClear(id)
   }
   const ctx = hostContext()
-  const drain = async (ms) => {
-    for (let index = 0; index < ms / 1000; index += 1) {
-      t.mock.timers.tick(1000)
-      await new Promise((resolve) => setImmediate(resolve))
+  // The mocked clock says *when* the loop is allowed to tick; the real event loop says
+  // how long a tick takes to get through its own poll. A poll ends in a real append to
+  // the sample log, so the number of event-loop turns it occupies is the machine's, not
+  // the test's. The waits below are therefore on the two events the loop produces — a
+  // poll, and the arming that follows it — and the turn count inside `eventually` is a
+  // backstop against hanging, not the thing being asserted. Ticking a fixed span of
+  // mocked time and counting what turned up is what made this case read `1 polls` on a
+  // loaded machine and pass on a fast one.
+  const ticked = async (count) => {
+    for (let index = 0; index < count; index += 1) {
+      const before = polls
+      await ticking(t, () => polls > before, `a poll after interval ${index + 1}`)
+      // The tick re-arms only once its own poll is finished, so the arming is the event
+      // that says this interval is over and the next one may be started. It is also the
+      // assertion the case is really about: a second loop would leave two live timers.
+      await eventually(() => live.size === 1, `the loop to re-arm after poll ${polls}, with ${live.size} timers live`)
+      assert.equal(polls, before + 1, 'one interval of a fifteen-second cadence is one poll')
     }
   }
   try {
     const module = await import(`../src/index.js?settings-in-flight=${encodeURIComponent(home)}`)
     module.apply(ctx, module.Config({ apiKey: 'test-key', currency: 'CNY', refreshIntervalMs: 15000 }))
-    await drain(4000)
+    // The first tick fires 500 ms in and its poll is held open, which is the window the
+    // write below has to land in.
+    await ticking(t, () => polls > 0, 'the first tick to reach its poll')
     assert.equal(polls, 1, 'the first tick is holding its poll open')
     const res = response()
     await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { refreshIntervalMs: 15000 }), res)
     assert.equal(res.status, 200, res.body)
     release()
-    // Sixty seconds of a fifteen-second cadence. Every tick re-arms, so the count of
+    // Four intervals of a fifteen-second cadence. Every tick re-arms, so the count of
     // live timers settles at one however many polls went by, and a second loop shows
     // up as a second pending timer the first arming never knew about.
-    await drain(60_000)
-    assert.ok(polls >= 4 && polls <= 5, `four intervals of a fifteen-second cadence: ${polls} polls`)
+    await ticked(4)
     assert.equal(live.size, 1, `exactly one loop timer is armed, not two: ${live.size}`)
   } finally {
     release()
@@ -1742,13 +1860,21 @@ test('a HEAD read costs no payload build', async () => {
 
 test('the subtree walk stops when the reader goes away, and only then', async () => {
   const signals = []
+  // The walk announces itself rather than being looked for: a stub that resolves this
+  // promise on its first call is the event the test waits on. Counting event-loop turns
+  // instead — the shape this used to have, twenty `setImmediate` hops — measures how
+  // busy the machine is, because the route ahead of the walk reads a session log and
+  // builds a ledger first, and twenty turns is generous on a fast box and too few on a
+  // loaded one. A wait that can expire is a timeout wearing a loop's clothes.
+  let announceWalk
+  const walkStarted = new Promise((resolve) => { announceWalk = resolve })
   const children = '/dsh-balance/session-cost/children?sessionId=session-1'
   await withPlugin(async ({ ctx }) => {
     const route = ctx.routes.get('/dsh-balance/session-cost/children')
     const res = response()
     const req = request('GET', children)
     const pending = route(req, res)
-    for (let index = 0; index < 20 && signals.length === 0; index += 1) await new Promise((resolve) => setImmediate(resolve))
+    await walkStarted
     assert.equal(signals.length, 1, 'the walk runs under a signal of its own')
     assert.equal(signals[0].aborted, false, 'which starts out live')
     // What a real `IncomingMessage` emits once its request body is consumed — about a
@@ -1773,6 +1899,7 @@ test('the subtree walk stops when the reader goes away, and only then', async ()
     subagents: {
       async listChildren(id, signal) {
         signals.push(signal)
+        announceWalk()
         for (let step = 0; step < 5; step += 1) await new Promise((resolve) => setImmediate(resolve))
         return [{ id: 'child-1', createdAt: Date.now(), mode: 'continuable', label: 'Survey the tree' }]
       },
