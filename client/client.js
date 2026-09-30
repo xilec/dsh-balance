@@ -1615,13 +1615,17 @@ window.__ModuleLoader__.load({
 
     function DaysTable({ t, ledger, currency }) {
       const [drafts, setDrafts] = react.useState({})
-      const [busy, setBusy] = react.useState('')
+      // The rows whose write has not settled: this is the half of the pair that reaches
+      // the DOM, `inFlight` below is the half the next render's handlers read.
+      const [busy, setBusy] = react.useState([])
       const [error, setError] = react.useState('')
-      // The key of the row whose write has not settled. This is a ref rather than the
-      // `busy` state because `busy` only reaches the DOM on the next render, while a
-      // handler captured in this render still closes over the previous value: two Enters
-      // inside one frame would both see an idle row and post two corrections.
-      const inFlight = react.useRef('')
+      // The same rows as a ref and as a set. A ref, because `busy` only reaches the DOM
+      // on the next render, while a handler captured in this render still closes over the
+      // previous value: two Enters inside one frame would both see an idle row and post
+      // two corrections. A set, because a row stays busy until the Host has answered and
+      // the re-read behind the write has settled — long enough to reach the next row, and
+      // a single key would hand that row the first one's claim and let it be written twice.
+      const inFlight = react.useRef(new Set())
       if (ledger === null) return h('div', { className: 'dshb_footer' }, '…')
 
       const valueOf = (row) => Object.prototype.hasOwnProperty.call(drafts, row.key)
@@ -1630,15 +1634,15 @@ window.__ModuleLoader__.load({
 
       /** Claim the row, or report that this reader's press is the second one. */
       const begin = (row) => {
-        if (inFlight.current === row.key) return false
-        inFlight.current = row.key
-        setBusy(row.key)
+        if (inFlight.current.has(row.key)) return false
+        inFlight.current.add(row.key)
+        setBusy((current) => (current.includes(row.key) ? current : [...current, row.key]))
         return true
       }
 
-      const end = () => {
-        inFlight.current = ''
-        setBusy('')
+      const end = (row) => {
+        inFlight.current.delete(row.key)
+        setBusy((current) => current.filter((key) => key !== row.key))
       }
 
       const commit = async (row) => {
@@ -1654,7 +1658,7 @@ window.__ModuleLoader__.load({
         } catch (cause) {
           setError(cause instanceof Error ? cause.message : String(cause))
         } finally {
-          end()
+          end(row)
         }
       }
 
@@ -1681,7 +1685,7 @@ window.__ModuleLoader__.load({
               inputMode: 'decimal',
               // A row whose correction is on its way to the Host is not edited again,
               // not even by a keystroke that beat the render.
-              disabled: busy === row.key,
+              disabled: busy.includes(row.key),
               onChange: (event) => setDrafts((current) => ({ ...current, [row.key]: event.target.value })),
               onKeyDown: (event) => {
                 if (event.key === 'Enter') void commit(row)
@@ -1704,7 +1708,7 @@ window.__ModuleLoader__.load({
               row.override !== null ? h('button', {
                 key: 'r',
                 className: 'dshb_btn',
-                disabled: busy === row.key,
+                disabled: busy.includes(row.key),
                 onClick: () => {
                   // The same guard as a commit: two clicks on a stale handler, or a
                   // reset while a correction on this row is in flight, post one request.
@@ -1713,7 +1717,7 @@ window.__ModuleLoader__.load({
                     const { [row.key]: _dropped, ...rest } = current
                     return rest
                   })
-                  void store.setOverride(row.key, null).catch((cause) => setError(String(cause))).finally(end)
+                  void store.setOverride(row.key, null).catch((cause) => setError(String(cause))).finally(() => end(row))
                 },
               }, t('days.reset')) : null,
             ])),
@@ -1776,7 +1780,10 @@ window.__ModuleLoader__.load({
           type: key === 'currency' || key === 'dayZone' ? 'text' : 'number',
           step,
           onChange: (event) => {
-            setTouched((current) => ({ ...current, [key]: true }))
+            // The same object back when the field was already touched: the seeding
+            // effect is keyed on `touched` as well as on the payload, and a keystroke
+            // that does not change what the field is should not re-run it.
+            setTouched((current) => (current[key] === true ? current : { ...current, [key]: true }))
             setDraft((current) => ({ ...current, [key]: event.target.value }))
           },
         }),

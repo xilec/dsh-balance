@@ -868,13 +868,14 @@ test('a poll does not replace what the reader is typing in the settings tab', as
     assert.deepEqual(fields(payload), ['USD', 'Europe/Moscow', 300000, 15000, 10, 5, 2],
       'every field is prefilled from the payload')
 
-    // The reader types a currency. Two polls land while they are still typing: the Host
-    // answers each with the same settings it was asked for, but the browser builds a new
-    // payload object for every read, so the tab is re-rendered with a fresh `state`.
-    find(mount(payload), (element) => element.type === 'input')[0].props.onChange({ target: { value: 'EUR' } })
+    // The reader types a currency, in the case a reader types one. Two polls land while
+    // they are still typing: the Host answers each with the same settings it was asked
+    // for, but the browser builds a new payload object for every read, so the tab is
+    // re-rendered with a fresh `state`.
+    find(mount(payload), (element) => element.type === 'input')[0].props.onChange({ target: { value: 'eur' } })
     const polled = { ...payload, sampling: { ...payload.sampling, clientPollIntervalMs: 30000 } }
-    assert.equal(fields(polled)[0], 'EUR', 'the first poll leaves the typed currency alone')
-    assert.equal(fields({ ...polled, sampling: { ...polled.sampling, clientPollIntervalMs: 45000 } })[0], 'EUR',
+    assert.equal(fields(polled)[0], 'eur', 'the first poll leaves the typed currency alone')
+    assert.equal(fields({ ...polled, sampling: { ...polled.sampling, clientPollIntervalMs: 45000 } })[0], 'eur',
       'and so does the second')
 
     // A field nobody has touched still follows the Host, which is what "prefilled from
@@ -887,7 +888,8 @@ test('a poll does not replace what the reader is typing in the settings tab', as
     assert.equal(fields(reZoned)[1], 'Asia/Kolkata', 'an untouched field follows the payload')
 
     // A save is the Host's answer, so what the payload says afterwards is what the tab
-    // shows — the Host upper-cases the currency, and the tab follows it.
+    // shows — and the Host stores a currency upper-cased, so the tab follows the Host's
+    // spelling rather than keeping the reader's.
     const apply = find(mount(reZoned), (element) => element.props?.className === 'dshb_btn dshb_btn_primary')[0]
     await apply.props.onClick()
     const written = posts.filter((post) => post.url === '/dsh-balance/settings').at(-1)
@@ -898,7 +900,7 @@ test('a poll does not replace what the reader is typing in the settings tab', as
       sampling: { ...reZoned.sampling, clientPollIntervalMs: 30000 },
     }
     assert.deepEqual(fields(stored), ['EUR', 'Asia/Kolkata', 300000, 30000, 10, 5, 2],
-      'the saved draft is re-seeded from the payload the write produced')
+      'the saved draft is re-seeded from the payload the write produced, touched fields included')
   } finally {
     react.stop()
     restore()
@@ -928,7 +930,12 @@ test('a written cadence and a session switch re-arm the poller, and only once', 
   }
   const previousFetch = globalThis.fetch
   let cadence = 15000
+  // A read the test parks, so a re-arm can be asked for while one is in flight — the
+  // shape that once left the Host's sampler with two live timers.
+  let parked = null
+  let held = false
   globalThis.fetch = async (url, options) => {
+    if (held) await new Promise((resolve) => { parked = resolve })
     if (options?.method === 'POST') {
       const body = JSON.parse(options.body)
       if (typeof body.clientPollIntervalMs === 'number') cadence = body.clientPollIntervalMs
@@ -960,6 +967,21 @@ test('a written cadence and a session switch re-arm the poller, and only once', 
     await turn()
     assert.deepEqual(armed, [15000, 45000, 45000], 'a session switch reschedules too, and arms one timer')
     assert.deepEqual(cleared.length, 2)
+
+    // The same call while a read is out: it settles into the timer that was armed for
+    // it, and the chain carries on at the interval that is current.
+    const before = armed.length
+    held = true
+    const pending = store.refresh()
+    await turn()
+    store.setSessionId('session-10')
+    parked()
+    held = false
+    await pending
+    await turn()
+    assert.equal(live.size, 1, 'a re-arm during a read in flight leaves one timer, not two')
+    assert.equal(armed.length, before + 1, 'and arms it exactly once')
+    assert.equal(armed.at(-1), 45000, 'on the cadence the Host last reported')
 
     stop()
     assert.equal(live.size, 0, 'the last subscriber leaving leaves no timer behind')
@@ -1022,8 +1044,12 @@ test('a day row whose write is in flight is not written a second time', async ()
       'two Enters on one row post one correction')
 
     assert.equal(input().props.disabled, true, 'the row cannot be edited while its write is in flight')
+    // Focus leaves while the request is out, which is the other way a commit is asked
+    // for twice: the draft is still there, and blur commits it.
+    row.props.onBlur()
+    assert.equal(overrides().length, 1, 'losing focus while the write is in flight posts nothing more')
     await turn()
-    assert.equal(overrides().length, 1, 'losing focus afterwards writes nothing more')
+    assert.equal(overrides().length, 1, 'and nothing more once the Host has answered either')
     assert.equal(input().props.disabled, false, 'and the row is editable again once the Host has answered')
 
     // The reset control writes through the same pair, so a double click is one request.
@@ -1038,6 +1064,60 @@ test('a day row whose write is in flight is not written a second time', async ()
     reset.props.onClick()
     assert.deepEqual(overrides().map((post) => post.body.amount), [1.25, null],
       'two clicks on the reset post one removal')
+  } finally {
+    react.stop()
+    restore()
+  }
+})
+
+test('a day row in flight claims only itself, and a refusal gives it back', async () => {
+  const { exported, react } = await loadClient()
+  const posts = []
+  const restore = stubFetch({ posts })
+  try {
+    const mount = () => {
+      react.beginRender()
+      return react.createElement(exported.__internals.DaysTable, { t: (key) => key, ledger: payload.ledger, currency: 'USD' })
+    }
+    // The rows are newest first, so the first input is today and the second yesterday.
+    const inputs = () => find(mount(), (element) => element.type === 'input')
+    const overrides = () => posts.filter((post) => post.url === '/dsh-balance/overrides').map((post) => post.body)
+    const enter = (index) => inputs()[index].props.onKeyDown({ key: 'Enter' })
+
+    // A write is in flight from the POST to the re-read behind it, which is long enough
+    // for the reader to reach the next row and press Enter there too.
+    enter(0)
+    enter(1)
+    // And back to the first row, whose own request has still not been answered.
+    enter(0)
+    assert.deepEqual(overrides(), [
+      { date: '2026-09-18', amount: 0.39 },
+      { date: '2026-09-17', amount: 1.5 },
+    ], 'the second day is not blocked by the first, and the first keeps its own claim')
+    assert.deepEqual(inputs().map((input) => input.props.disabled), [true, true], 'both rows are locked while both writes are out')
+    await turn()
+    assert.deepEqual(inputs().map((input) => input.props.disabled), [false, false], 'and both are editable again')
+
+    // A refusal is the one thing that has to give the row back, or the reader cannot
+    // correct the amount the Host would not take.
+    restore()
+    const refused = stubFetch({ posts, refuse: ['/dsh-balance/overrides'] })
+    try {
+      inputs()[0].props.onChange({ target: { value: '2' } })
+      enter(0)
+      await turn()
+      assert.equal(inputs()[0].props.disabled, false, 'a refused write unlocks its row')
+      assert.match(textOf(mount()), /host is unreachable/, 'and the tab says what the Host refused')
+    } finally {
+      refused()
+    }
+    const answer = stubFetch({ posts })
+    try {
+      enter(0)
+      assert.deepEqual(overrides().at(-1), { date: '2026-09-18', amount: 2 }, 'so the retry reaches the Host')
+    } finally {
+      answer()
+    }
   } finally {
     react.stop()
     restore()
