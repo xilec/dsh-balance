@@ -452,21 +452,53 @@ test('text keeps every character it was given: quotes, backslashes, newlines and
   assert.equal(record.truncated, false)
 })
 
-test('the stream stays linear: ten thousand Steps are written in one pass', () => {
-  const size = 10000
-  const nodes = Array.from({ length: size }, (_, index) => exportNode({
+test('the stream stays linear: forty thousand Steps are written in one pass', (t) => {
+  const series = (size) => Array.from({ length: size }, (_, index) => exportNode({
     turn: Math.floor(index / 50) + 1,
     step: (index % 50) + 1,
     tStart: 1000 + index * 10,
     reports: [{ seq: index + 1, time: 1000 + index * 10 }],
   }))
-  const started = Date.now()
-  const stream = streamOf({ nodes, findings: [] })
-  const elapsed = Date.now() - started
-  const records = lines(stream)
-  assert.equal(records.length, size + 1, 'a meta record plus one usage record per Step')
-  assert.equal(records.at(-1).i, size, 'the last record is stamped with the last position')
-  assert.ok(elapsed < 2000, `building the stream took ${elapsed} ms`)
+  const streamOnce = (size) => {
+    const started = process.hrtime.bigint()
+    const text = streamOf({ nodes: series(size), findings: [] })
+    return { text, elapsed: Number(process.hrtime.bigint() - started) / 1e6 }
+  }
+  // The two sizes are measured alternately rather than one after the other, and each is
+  // scored on its quickest run. Both halves of that matter under load: alternating means
+  // the machine the small series was timed on is the machine the large one was, and a
+  // minimum is the only summary of a noisy measurement that a slower neighbour cannot
+  // inflate. The sizes are large enough that one run is milliseconds long, because a
+  // series measured in a fraction of a millisecond is a measurement of the scheduler.
+  const SMALL = 10_000
+  const LARGE = 40_000
+  const RUNS = 12
+  let small = { text: '', elapsed: Number.POSITIVE_INFINITY }
+  let large = { text: '', elapsed: Number.POSITIVE_INFINITY }
+  for (let run = 0; run < RUNS; run += 1) {
+    const smallRun = streamOnce(SMALL)
+    small = smallRun.elapsed < small.elapsed ? smallRun : small
+    const largeRun = streamOnce(LARGE)
+    large = largeRun.elapsed < large.elapsed ? largeRun : large
+  }
+  const records = lines(large.text)
+  assert.equal(records.length, LARGE + 1, 'a meta record plus one usage record per Step')
+  assert.equal(records.at(-1).i, LARGE, 'the last record is stamped with the last position')
+  assert.equal(lines(small.text).length, SMALL + 1, 'and the tenth of it wrote one record per Step too')
+  const ratio = large.elapsed / small.elapsed
+  // The budget this case was written for is a *complexity* one, and that is what it now
+  // asserts: four times the Steps must not cost anything like sixteen times the work.
+  // Linear work measures a ratio near 4 and tops out around 6 under a dozen concurrent
+  // copies of the suite, and the deliberate O(n²) this was checked against measures 16,
+  // so the threshold sits between the two with room for each. A ratio is taken between
+  // two measurements interleaved into one loop, so load moves both ends of it together,
+  // which a fixed millisecond ceiling cannot do: this assertion read 2.7 s under six
+  // concurrent copies of the suite on a change that was not a regression. The absolute
+  // figures are still reported, so a change that made the export uniformly slower is
+  // visible without being able to turn a colleague's machine red.
+  t.diagnostic(`costHistory: ${SMALL} Steps ${small.elapsed.toFixed(1)} ms, ${LARGE} Steps ${large.elapsed.toFixed(1)} ms, ratio ${ratio.toFixed(1)}`)
+  assert.ok(ratio < 12,
+    `writing ${LARGE} Steps cost ${ratio.toFixed(1)}× what ${SMALL} Steps cost, so the export is no longer linear in the series length`)
 })
 
 test('the export name survives odd session ids and a bad clock', () => {
