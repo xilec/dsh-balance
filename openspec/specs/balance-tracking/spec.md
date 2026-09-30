@@ -17,7 +17,14 @@ shortly after the plugin starts, and a poll that finds no API key MUST fail with
 `api-key-missing` and retry on a short fixed delay instead of the configured one. Each
 request MUST carry a bearer token, an `Accept: application/json` header and the configured
 timeout; a non-2xx answer MUST be reported as an HTTP failure. Concurrent polls MUST share
-one in-flight request.
+one in-flight request. A poll MUST NOT end the sampling loop whatever its outcome: the next
+tick MUST be scheduled after a failure as well as after a success, and a poll that cannot
+start at all — a service it needs cannot be read, say — MUST be reported as a failed poll and
+MUST NOT leave the plugin without samples until it is restarted. Exactly one timer may be
+armed at a time: restarting the loop on a new cadence while a poll is still in flight MUST
+NOT leave the tick that was awaiting that poll to arm a second one, since a doubled loop
+polls twice per interval, writes twice per tick, and holds a timer the plugin can no longer
+clear.
 
 #### Scenario: The account is sampled without a browser
 
@@ -36,6 +43,20 @@ one in-flight request.
 - **WHEN** a poll times out or the endpoint answers with a non-2xx status
 - **THEN** the last good balances and their fetch time stay in the cache, the payload is
   marked stale, and the error message is reported without dropping any sample
+
+#### Scenario: A poll that cannot start
+
+- **WHEN** a poll fails before a request is built, because the service holding the API key
+  cannot be read
+- **THEN** the failure is reported like any other, and the next poll is still scheduled on the
+  configured cadence rather than sampling stopping for the rest of the session
+
+#### Scenario: The cadence is changed while a poll is in flight
+
+- **WHEN** a settings write changes the sampling cadence while a tick is still awaiting its
+  poll
+- **THEN** the tick that was awaiting the poll does not arm a second timer, and the plugin
+  keeps polling once per interval
 
 ### Requirement: Samples are recorded only when they carry news
 
@@ -177,15 +198,24 @@ answering with the cached Host state: host identity and sample count, the balanc
 its thresholds and currency, the full ledger, the tariff phase, the published rates, the
 fallback rates, the stored browser preferences, the sampling cadences, the last client
 heartbeat and the session summary. The route MUST answer `HEAD` with the same status and no
-body, MUST answer any other method with `405` and an `Allow: GET, HEAD` header, and MUST mark
-every answer `Cache-Control: no-store`. An unrecognized `zone` MUST fall back to the Host's
-own `local` zone rather than fail.
+body, and MUST NOT build the payload it would have answered with: a `HEAD` asks whether the
+endpoint is there, not what it says, so no ledger, tariff or session read is done for it. The
+route MUST answer any other method with `405` and an `Allow: GET, HEAD` header, and MUST mark
+every answer `Cache-Control: no-store`. A read that arrives before the stored state has been
+read MUST wait for that load. An unrecognized `zone` MUST fall back to the Host's own `local`
+zone rather than fail.
 
 #### Scenario: The panel reads the state
 
 - **WHEN** the browser half requests `/dsh-balance`
 - **THEN** it receives the balance, ledger, peak, prices, preferences and sampling cadences in
   one payload
+
+#### Scenario: A probe asks whether the endpoint is there
+
+- **WHEN** `/dsh-balance` is called with `HEAD`
+- **THEN** the answer is `200` with no body, and no part of the payload is built to be
+  discarded
 
 #### Scenario: Method not allowed
 
@@ -200,8 +230,10 @@ reject a missing or malformed `date` and a negative or non-numeric `amount` with
 message naming the field, MUST treat a null, empty or absent amount as the removal of the
 override, MUST persist the accepted change, and MUST answer with the overrides and the
 refreshed ledger. The refresh route MUST tolerate an unreadable body, MUST await the shared
-in-flight fetch, and MUST answer with the same payload as the read route. Both routes MUST
-answer a non-POST method with `405`.
+in-flight fetch, MUST wait for the stored state to be read before it builds its answer — the
+same wait the read route does — and MUST answer with the same payload as the read route, so a
+refresh during the start-up load reports the history on disk rather than an empty one. Both
+routes MUST answer a non-POST method with `405`.
 
 #### Scenario: Correcting a day
 
@@ -217,6 +249,13 @@ answer a non-POST method with `405`.
 
 - **WHEN** the panel asks for a refresh
 - **THEN** the Host performs a balance fetch and returns the updated payload
+
+#### Scenario: A refresh during the start-up load
+
+- **WHEN** a refresh is asked for while the stored samples are still being read, and the poll
+  itself returns before that read finished
+- **THEN** the answer reports the samples and the ledger the log on disk holds, not an empty
+  history and an all-zero ledger
 
 ### Requirement: The account currency is a preference
 
