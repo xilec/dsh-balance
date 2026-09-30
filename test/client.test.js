@@ -410,6 +410,44 @@ test('times and dates are the browser’s, and a day key is never shifted a zone
   react.stop()
 })
 
+test('the peak panel names tomorrow by the calendar, not by twenty-four hours', async () => {
+  const { exported } = await loadClient()
+  const { peakLines } = exported.__internals
+  const payload = { peak: { zone: 'local', windows: { today: [], tomorrow: [] }, rule: {} } }
+  const route = { provider: 'deepseek-official', model: 'deepseek-flash' }
+  const t = (key, params) => (params === undefined ? key : `${key} ${JSON.stringify(params)}`)
+  const at = (nowMs, changeAtMs) => peakLines(t, payload, route, { peak: false, changeAtMs, changeToPeak: true, untilMs: 0 }, nowMs).join(' ')
+  // The day word is derived from the reader's own calendar, so tomorrow is whatever
+  // tomorrow is. Twenty-four hours is not that across a daylight-saving transition:
+  // in a zone that falls back, the evening before the change is still twenty-three
+  // hours short of the next midnight, so `now + 24h` names *today* where tomorrow is
+  // the day after. An hour twice a year is the whole width of the defect.
+  for (const [zone, now] of [['Europe/Berlin', Date.parse('2026-10-24T22:30:00Z')]]) {
+    const previous = process.env.TZ
+    process.env.TZ = zone
+    try {
+      const tomorrow = new Date(now)
+      tomorrow.setDate(tomorrow.getDate() + 1)
+      const dayAfter = new Date(now)
+      dayAfter.setDate(dayAfter.getDate() + 2)
+      const wordOf = (changeAtMs) => {
+        const line = at(now, changeAtMs)
+        if (line.includes('peak.dayToday')) return 'today'
+        if (line.includes('peak.dayTomorrow')) return 'tomorrow'
+        return 'weekday'
+      }
+      assert.equal(wordOf(now), 'today', `${zone}: a change now is today`)
+      assert.equal(wordOf(tomorrow.getTime()), 'tomorrow',
+        `${zone}: a change tomorrow is tomorrow, whatever the offset does to the arithmetic`)
+      assert.equal(wordOf(dayAfter.getTime()), 'weekday',
+        `${zone}: and a change the day after is named for its weekday`)
+    } finally {
+      if (previous === undefined) delete process.env.TZ
+      else process.env.TZ = previous
+    }
+  }
+})
+
 test('the session projection outranks the payload copy of the session cost', async () => {
   const { exported, react } = await loadClient()
   const ctx = clientContext()

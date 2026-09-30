@@ -5,8 +5,8 @@
  *
  *   samples.ndjson  one balance sample per line, appended on every successful
  *                   fetch; append-only so a crash costs at most a torn tail line
- *   state.json      manual per-day overrides and the account currency the ledger
- *                   is read in
+ *   state.json      the day overrides, the last client heartbeat, the panel's
+ *                   stored settings and the update time
  *
  * Writes to `state.json` go through a same-directory temp file plus rename, so a
  * reader never sees a half-written document; samples are appended, which is

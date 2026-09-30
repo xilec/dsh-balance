@@ -254,6 +254,9 @@ export function releaseRange({ warn = null } = {}) {
  * commit dated after its directory name — a rebase, an archive written after
  * midnight — and a change whose archived files were only touched afterwards are
  * both in range, and both are the release's business.
+ *
+ * The names come back sorted by name; {@link buildDraft} is what orders them by the
+ * commit that added each one.
  */
 export function archivesInRange(gitRange) {
   const names = new Set()
@@ -272,6 +275,9 @@ export function archivesInRange(gitRange) {
  * directory can, and that is the order they were built in (design D5). Read
  * from all of history rather than from the range, so a change archived in an
  * earlier release and touched in this one still lands in the right place.
+ *
+ * `git log` walks history backwards, so index 0 is the *newest* change; the caller
+ * sorts on this map descending to get the oldest-first order the notes use.
  */
 export function archiveOrder() {
   const order = new Map()
@@ -313,8 +319,13 @@ export function buildDraft({ version, date }) {
   const { gitRange, label } = releaseRange({ warn: (message) => process.stderr.write(`release-notes: ${message}\n`) })
   const root = repoRoot()
   const order = archiveOrder()
+  // `archiveOrder` indexes from `git log`, which walks history backwards, so index 0 is
+  // the *newest* change. Sorting on it descending is what puts the oldest first, which is
+  // the order the sections are documented in and the one a release covering the whole
+  // history reads as: the change the release is about comes first, not the last amendment
+  // to it.
   const changes = archivesInRange(gitRange)
-    .sort((a, b) => (order.get(a) ?? Number.MAX_SAFE_INTEGER) - (order.get(b) ?? Number.MAX_SAFE_INTEGER))
+    .sort((a, b) => (order.get(b) ?? -1) - (order.get(a) ?? -1))
   const sections = []
   for (const name of changes) {
     const proposal = join(root, ARCHIVE_DIR, name, 'proposal.md')
