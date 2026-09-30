@@ -147,7 +147,14 @@ test('local windows convert the Beijing windows into the display zone', () => {
     ['18:00–21:00', '23:00–03:00'],
     'a window may cross local midnight',
   )
-  assert.deepEqual(windowsOfLocalDay(friday, undefined, 'local', 0).length, 2, 'the host zone still yields both windows')
+  // `local` is the host's own zone, and the host's day is not the Beijing day: west of
+  // UTC-7 this instant is still Thursday there, so only one of the two windows is inside
+  // that local day. What the spelling promises is the host's zone by another name, so
+  // that is what it is compared against — the count belongs to the host, not to the test.
+  const hostZone = Intl.DateTimeFormat().resolvedOptions().timeZone
+  const localWindows = windowsOfLocalDay(friday, undefined, 'local', 0)
+  assert.deepEqual(localWindows, windowsOfLocalDay(friday, undefined, hostZone, 0), 'the host zone by name')
+  assert.ok(localWindows.length >= 1, 'and the day the host holds is a trading day, so it has a window')
 })
 
 test('local windows follow the zone across a daylight-saving change', () => {

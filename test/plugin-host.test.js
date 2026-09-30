@@ -6,6 +6,10 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { isAbsolute, join, relative } from 'node:path'
 import { dayKeyOf, parseSamples } from '../src/history.js'
+import { BJT_OFFSET_MS, OFF_PEAK_RATIO } from '../src/pricing.js'
+
+/** One instant, as a Beijing-time calendar field, in epoch milliseconds. */
+const bjt = (y, m, d, h = 0, min = 0) => Date.UTC(y, m - 1, d, h, min) - BJT_OFFSET_MS
 
 /**
  * The home the plugin writes under when a test does not name one itself.
@@ -172,6 +176,19 @@ async function withPlugin(run, options = {}) {
     globalThis.fetch = previousFetch
     await rm(home, { recursive: true, force: true })
   }
+}
+
+/**
+ * The payload the read route answers with.
+ *
+ * A test that needs a day of the ledger takes its key from here rather than writing a
+ * date down: the ledger is a rolling window measured from today, so a date written into a
+ * test leaves the window as the calendar moves on and the row under test stops existing.
+ */
+async function readPayload(ctx) {
+  const res = response()
+  await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), res)
+  return JSON.parse(res.body)
 }
 
 test('a missing DSH_HOME becomes a throwaway home, a chosen one is left alone', () => {
@@ -344,7 +361,15 @@ test('a matching preference is honoured', async () => {
   })
 })
 
-test('the account currency replaces a preference the account does not have', async () => {
+test('the account currency replaces a preference the account does not have', async (t) => {
+  // Both columns of the price table are priced at *now*, and the table behind them is
+  // effective-dated — the 2026-09-10 Flash cut is a second entry, not a second constant.
+  // The USD numbers this asserts are therefore the numbers of one tariff era, so the
+  // instant that reads them is pinned rather than inherited: the literals are the point
+  // of the case (they are how "the USD table, not the CNY one" is proved) and a pinned
+  // clock keeps them exact. An inherited clock made them exact by luck, until the next
+  // cut moved them.
+  t.mock.timers.enable({ apis: ['Date'], now: bjt(2026, 9, 24, 10, 0) })
   const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
   const previousHome = process.env.DSH_HOME
   const previousFetch = globalThis.fetch
@@ -364,15 +389,50 @@ test('the account currency replaces a preference the account does not have', asy
     assert.equal(payload.balance.currencyPreference, 'CNY')
     assert.equal(payload.ledger.currency, 'USD')
     assert.equal(payload.prices.currency, 'USD')
-    assert.equal(payload.prices.peak['deepseek-flash'].cacheMiss, 0.3, 'USD peak rate for Flash')
-    assert.equal(payload.prices.current['deepseek-flash'].cacheMiss, 0.15, 'off-peak is half of peak')
+    const peakFlash = payload.prices.peak['deepseek-flash']
+    assert.equal(peakFlash.cacheMiss, 0.3, 'USD peak rate for Flash')
+    // Read off the peak column rather than off the literal above: the two columns are
+    // built in one payload and are user-visible side by side, so the honest invariant is
+    // that `current` is that same rate, halved when the clock is outside a window. Stating
+    // it against a literal instead would only re-derive the ratio the payload was built by,
+    // and would hold for any rate table at all.
+    const current = payload.prices.current['deepseek-flash']
+    assert.equal(current.currency, 'USD')
+    assert.equal(current.cacheMiss, peakFlash.cacheMiss * (current.peak ? 1 : OFF_PEAK_RATIO),
+      'the current column is the peak column beside it, halved off-peak')
   } finally {
     ctx.dispose()
+    t.mock.timers.reset()
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
     globalThis.fetch = previousFetch
     await rm(home, { recursive: true, force: true })
   }
+})
+
+test('the price table is priced at the instant the payload was built', async (t) => {
+  // The panel shows `current` beside `peak`, so the pair is user-visible data and wants a
+  // case of its own. Both are read through `Date.now()`, so the clock is pinned instead of
+  // inherited: a Thursday morning inside the 09:00-12:00 Beijing window, then the hour
+  // after the window closes.
+  t.mock.timers.enable({ apis: ['Date'], now: bjt(2026, 9, 24, 10, 0) })
+  await withPlugin(async ({ ctx }) => {
+    const atPeak = response()
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), atPeak)
+    const peak = JSON.parse(atPeak.body).prices
+    assert.equal(peak.current['deepseek-flash'].peak, true, '10:00 Beijing time on a Thursday is peak')
+    assert.equal(peak.current['deepseek-flash'].cacheMiss, 2, 'so the current column is the peak rate')
+    assert.equal(peak.peak['deepseek-flash'].cacheMiss, 2, 'which is what the peak column shows too')
+
+    t.mock.timers.tick(3 * 3_600_000)
+    const offPeak = response()
+    await ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), offPeak)
+    const off = JSON.parse(offPeak.body).prices
+    assert.equal(off.current['deepseek-flash'].peak, false, '13:00 is not')
+    assert.equal(off.current['deepseek-flash'].cacheMiss, 2 * OFF_PEAK_RATIO, 'so the current column is half of it')
+    assert.equal(off.peak['deepseek-flash'].cacheMiss, 2, 'while the peak column still answers with the peak rate')
+  })
+  t.mock.timers.reset()
 })
 
 test('the composition row wins at startup, and a panel setting overrides it', async () => {
@@ -1072,12 +1132,19 @@ test('two corrections written at the same time both land on disk', async () => {
 test('a state write that cannot land is reported and does not wedge the next one', async () => {
   await withPlugin(async ({ ctx, home }) => {
     const { mkdir, readFile, rm } = await import('node:fs/promises')
+    // The corrected days are named by the ledger the Host serves, not written down here:
+    // that ledger is a rolling window of days, so a date from this file falls out of it as
+    // the calendar moves on and the row under test is not there any more. Yesterday and
+    // the day before it are inside the window whatever day it is.
+    const rows = (await readPayload(ctx)).ledger.rows
+    const yesterday = rows.at(-2).key
+    const beforeYesterday = rows.at(-3).key
     // A directory in place of the document: the rename cannot replace it, so every
     // write fails from here on.
     const statePath = join(home, 'dsh-balance', 'state.json')
     await mkdir(statePath, { recursive: true })
     const failed = response()
-    await ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: '2026-09-02', amount: 3 }), failed)
+    await ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: yesterday, amount: 3 }), failed)
     assert.equal(failed.status, 500, 'a change that is not on disk is not answered as saved')
     assert.equal(JSON.parse(failed.body).ok, false)
     const settings = response()
@@ -1086,15 +1153,15 @@ test('a state write that cannot land is reported and does not wedge the next one
     // The plugin keeps running: the change is still served, from memory.
     const read = response()
     await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), read)
-    assert.equal(JSON.parse(read.body).ledger.rows.find((row) => row.key === '2026-09-02').spend, 3)
+    assert.equal(JSON.parse(read.body).ledger.rows.find((row) => row.key === yesterday).spend, 3)
 
     await rm(statePath, { recursive: true, force: true })
     const next = response()
-    await ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: '2026-09-03', amount: 4 }), next)
+    await ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: beforeYesterday, amount: 4 }), next)
     assert.equal(next.status, 200, 'the write queued behind the failure still ran')
     const state = JSON.parse(await readFile(statePath, 'utf8'))
-    assert.equal(state.overrides['2026-09-03'].amount, 4)
-    assert.equal(state.overrides['2026-09-02'].amount, 3, 'and the correction that could not be written is on disk too')
+    assert.equal(state.overrides[beforeYesterday].amount, 4)
+    assert.equal(state.overrides[yesterday].amount, 3, 'and the correction that could not be written is on disk too')
   })
 })
 
@@ -1104,8 +1171,11 @@ test('the sample log is thinned while the Host runs, not only at startup', async
     const dir = join(home, 'dsh-balance')
     await mkdir(dir, { recursive: true })
     // History that crossed the retention window without the Host ever restarting:
-    // three samples of one hour, all older than keepDays.
-    const old = Date.now() - 30 * 86_400_000
+    // three samples of one hour, all older than keepDays. The thinning buckets by the
+    // clock hour of the ledger's zone, so the hour is anchored *inside* an hour — an
+    // offset from now alone puts the three samples across a boundary whenever the suite
+    // starts within two minutes of one, and the case then counts two survivors.
+    const old = Math.floor((Date.now() - 30 * 86_400_000) / 3_600_000) * 3_600_000 + 600_000
     const line = (offset, total) => `${JSON.stringify({ t: old + offset, currency: 'CNY', total, granted: 0, toppedUp: total })}\n`
     await appendFile(join(dir, 'samples.ndjson'), [line(0, 10), line(60_000, 9.5), line(120_000, 9)].join(''), 'utf8')
 

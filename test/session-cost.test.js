@@ -36,9 +36,30 @@ test('a peak-window session is priced at peak rates', () => {
 
 test('a weekend session is priced off-peak even inside peak hours', () => {
   const unit = projection()
+  // Saturday 10:00 Beijing time, which is inside the 09:00-12:00 window a weekday would
+  // be billed at peak for. The session's own money is what this asserts: `peakNow` is a
+  // fact about the instant the view is read at, not about the session, so reading it here
+  // would test the day the suite happens to run on.
   const state = fold(unit, message(bjt(2026, 9, 26, 10, 0), 1, 1, 1e6, 0, 1e6))
-  assert.equal(state.cost, 5)
-  assert.equal(unit.wire.view(state).peakNow, false)
+  assert.equal(state.cost, 5, 'half the peak price')
+  const [node] = seriesPayload(state, { currency: 'CNY' })
+  assert.equal(node.cost, 5, 'the Step itself was billed off-peak')
+  assert.equal(node.peak.cost, 10, 'and the peak projection is the double of it')
+})
+
+test('peakNow is the tariff of the instant the view is read at', (t) => {
+  const peak = bjt(2026, 9, 24, 10, 0)
+  const unit = projection()
+  const state = fold(unit, message(peak, 1, 1, 1e6, 0, 1e6))
+  // The clock is pinned rather than read: `peakNow` is the one field of the view that is
+  // priced at *now*, so a test that asserts it without pinning the clock is a test of the
+  // day the suite runs on — which is how this field went uncovered.
+  t.mock.timers.enable({ apis: ['Date'], now: peak })
+  assert.equal(unit.wire.view(state).peakNow, true, 'Thursday 10:00 Beijing time is a peak window')
+  t.mock.timers.tick(3 * 3_600_000)
+  assert.equal(unit.wire.view(state).peakNow, false, '13:00 is not, and the field follows the clock')
+  assert.equal(unit.wire.view(state).cost, 10, 'while the session keeps the price of its own instant')
+  t.mock.timers.reset()
 })
 
 test('a public-holiday session is priced off-peak', () => {
