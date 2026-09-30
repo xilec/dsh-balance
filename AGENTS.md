@@ -33,15 +33,15 @@ to asking.
 ## Releasing
 
 A release is a git tag plus a GitHub Release; there is no `CHANGELOG.md` and no npm
-publish (`package.json` stays `private`). The version of the plugin is written in three
-places — `package.json`, `src/index.js`, `client/client.js` — and the scripts below are the
-only supported way to move them. When the user asks to cut a release, work in this order and
+publish (`package.json` stays `private`). The version of the plugin is written in four
+places — `package.json`, `package-lock.json`, `src/index.js`, `client/client.js` —
+and the scripts below are the only supported way to move them. When the user asks to cut a release, work in this order and
 stop where a draft is required:
 
 1. `npm run release:check -- <version>` — refuses a mismatched version, a dirty tree, an
    existing `v<version>` or a version at or behind the last tag. Fix what it names rather
    than working around it. A non-zero exit means it found a problem, not that it broke.
-2. `npm run release:prepare -- <version>` — writes the version into the three places, runs
+2. `npm run release:prepare -- <version>` — writes the version into the four places, runs
    `npm run lint` and `npm test`, prints a draft commit message. It does not commit. In a
    kernel-linked development tree the lint tools are absent, so this fails with a message
    about `npm ci --ignore-scripts`; that is the rule, not an obstacle to bypass — do the
