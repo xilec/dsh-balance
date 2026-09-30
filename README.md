@@ -288,7 +288,7 @@ purpose and is not scanned.
 
 GitHub Actions runs the suite, both lint checks and the flake package build on every pull
 request, and on a push to `main` — a push to a feature branch runs nothing, which is what
-the two commands above and the `npx` pair below are for.
+the commands above are for.
 
 ## Releasing
 
