@@ -4,8 +4,8 @@
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
   # Только ради тестов: хост-половине нужны node_modules ядра dsh (zod,
-  # schemastery, dsh-home-paths), а не рантайм харнесса. Сам пакет —
-  # просто файлы, ему не нужен ни node, ни npm на этапе сборки.
+  # schemastery, dsh-home-paths, dsh-chunked-list), а не рантайм харнесса.
+  # Сам пакет — просто файлы, ему не нужен ни node, ни npm на этапе сборки.
   # Потребитель подключает этот инпут с `follows`, поэтому повторной копии
   # харнесса в замыкании не появляется.
   inputs.deepseek-harness.url = "github:xilec/deepseek-harness.nix";

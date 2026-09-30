@@ -254,10 +254,13 @@ src/session-cost.js   the sessionProjections unit (tokens priced per event time)
 src/indicators.js     the ten Indicators, their thresholds and the Findings (pure)
 src/store.js          samples.ndjson and state.json on disk
 src/index.js          the Host plugin: sampler loop, HTTP routes
-client/client.js      the browser half: the readout, the peak chip, the panel
+client/client.js      the whole browser half: the readout, the peak chip, the panel,
+                      the Cost view with its Indicators, and the export builder
 test/                 node --test suite (no build step)
 scripts/              release tooling: the notes draft, and check/prepare/publish
 ```
+
+Node 22 or newer (`engines.node` in `package.json`):
 
 ```sh
 npm test          # the whole suite
@@ -283,16 +286,17 @@ runtime) and `react` (supplied by the client module loader). `jscpd` fails above
 1% duplicated lines in `src/` and `client/`; the test suite repeats fixtures on
 purpose and is not scanned.
 
-GitHub Actions runs the suite, both lint checks and the flake package build on
-every push and pull request.
+GitHub Actions runs the suite, both lint checks and the flake package build on every pull
+request, and on a push to `main` — a push to a feature branch runs nothing, which is what
+the commands above are for.
 
 ## Releasing
 
 A release is a tag plus a GitHub Release, and the version is written in `package.json`,
-`src/index.js` and `client/client.js` together. There is no changelog in the tree: the
-notes live in the release, and `npm run release:notes` drafts them from the archived
-OpenSpec changes since the last tag. `CONTRIBUTING.md` has the commands, in order, and
-what each of them refuses to do.
+`package-lock.json`, `src/index.js` and `client/client.js` together. There is no changelog
+in the tree: the notes live in the release, and `npm run release:notes` drafts them from the
+archived OpenSpec changes since the last tag. `CONTRIBUTING.md` has the commands, in order,
+and what each of them refuses to do.
 
 ## Sources
 

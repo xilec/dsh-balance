@@ -1,8 +1,9 @@
 # dsh-balance bundle layer: one plugin row.
 #
 # Подключается из home-слоя $DSH_HOME/cordis.patch.yml (см. dsh-balance.nix в
-# nixos-config): строка `name` указывает на lib/index.js пакета, браузерная
-# половина находится по ближайшему package.json (exports["./client"]).
+# nixos-config): строка `name` указывает на src/index.js пакета ($out/src/index.js,
+# ровно то, что кладёт flake.nix), браузерная половина находится по ближайшему
+# package.json (exports["./client"]).
 - insert:
     - id: dsh-balance
       name: dsh-balance
