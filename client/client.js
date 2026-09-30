@@ -2913,11 +2913,54 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Remember a value per session, keeping only the `limit` most recently written.
+     *
+     * The client's per-session maps outlive every component that reads them, and a
+     * page outlives any one reader's sessions, so without a bound they grow for as
+     * long as the tab is open. Each caller below states what its limit is for.
+     *
+     * Recency is the order of writing, not of reading: the key is deleted before it
+     * is set again, so re-writing a key moves it to the newest position and a session
+     * a reader keeps marking stays held however many others pass.
+     *
+     * A read does not refresh the order, and for one of the two caches that is a real
+     * gap rather than a detail. `promptForNode` reads only on a miss and writes on the
+     * answer, so there the read and the write are the same event. The marked Step is
+     * read once per mount by the `useState` initializer, and a mount is not a write: a
+     * session the reader opens and marks nothing in ages out of the order like any
+     * other, so the bound counts the sessions worked in rather than the sessions
+     * opened. That is deliberate — what such a session loses is the mark on a *later*
+     * remount, and the view showing it now holds its own mark either way.
+     *
+     * @param cache - the `Map` to write into.
+     * @param key - the session to remember.
+     * @param value - what to remember for it.
+     * @param limit - how many sessions to hold.
+     */
+    function rememberRecent(cache, key, value, limit) {
+      cache.delete(key)
+      cache.set(key, value)
+      while (cache.size > limit) cache.delete(cache.keys().next().value)
+    }
+
+    /**
+     * How many sessions keep their read prompts in memory.
+     *
+     * This is the heaviest of the three caches — it holds the words of a session, not
+     * a couple of numbers — and the working set is one session at a time: the one
+     * being read, plus a subagent the reader just followed into. Four is several
+     * times that. Past it, a preview is the same `GET .../session-cost/text` the
+     * first one made, for a session the reader is only now returning to.
+     */
+    const MAX_PROMPT_SESSIONS = 4
+
+    /**
      * The prompts of one session, read once and kept for the inspector.
      *
      * The projection carries usage rather than messages, so the prompt of a Step is
      * read from the session's words the first time a reader asks for one; only the
-     * user messages are kept, not the whole log.
+     * user messages are kept, not the whole log, and only for the
+     * `MAX_PROMPT_SESSIONS` sessions whose prompts were asked for most recently.
      */
     const sessionPrompts = new Map()
 
@@ -2939,7 +2982,7 @@ window.__ModuleLoader__.load({
         prompts = (Array.isArray(records) ? records : [])
           .filter((record) => record.type === 'user_message' && typeof record.text === 'string' && record.text.trim() !== '')
           .map((record) => ({ t: typeof record.t === 'number' ? record.t : null, text: record.text }))
-        sessionPrompts.set(sessionId, prompts)
+        rememberRecent(sessionPrompts, sessionId, prompts, MAX_PROMPT_SESSIONS)
       }
       const start = typeof node.tStart === 'number' ? node.tStart : null
       if (start === null) return prompts.length === 0 ? null : prompts[prompts.length - 1].text
@@ -3077,12 +3120,29 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * How many sessions keep the Step the reader last opened.
+     *
+     * An entry is a `{ turn, step }` pair, so memory is not what the number is about —
+     * what is lost by dropping one is the mark. A session that comes back unmarked is
+     * in the state it is in for a session the reader never marked in, and every Step
+     * is still on screen, so a reader who has marked a Step in sixteen other sessions
+     * since is working in a way this view does not model.
+     */
+    const MAX_STEP_SESSIONS = 16
+
+    /**
      * The Step the reader last opened, per session.
      *
      * The conversation mounts only the selected view, so jumping to Trajectory and
      * coming back rebuilds the Cost view from scratch — and the Step the jump came
      * from must still be the one that is marked, or the reader has to find it again.
-     * This is page memory, not a setting: nothing here is written to the Host.
+     * This is page memory, not a setting: nothing here is written to the Host, and
+     * only the `MAX_STEP_SESSIONS` most recent sessions are kept.
+     *
+     * A mounted view cannot lose its mark to an eviction: the map is read once, by the
+     * `useState` initializer, and the mark on screen is that component's own state.
+     * Dropping an entry costs the mark on a *later* mount of that session and nothing
+     * else.
      */
     const lastStep = new Map()
 
@@ -3092,6 +3152,13 @@ window.__ModuleLoader__.load({
      * Two reads can overlap — "subagents only" and then "everything below" — and the
      * slower one must not land on top of the newer answer. Like the marked Step, this
      * is page memory: it is what the view is doing right now, never a setting.
+     *
+     * This one is bounded by concurrency, not by size. A counter is only ever compared
+     * against the read that is in flight, so `loadSubtree` releases it once that read
+     * has landed and the map holds nothing for an idle session. A size bound here would
+     * be the wrong rule in both directions: an eviction between a read starting and
+     * its answer arriving would make the comparison read as "superseded" and drop the
+     * answer the reader is waiting for, stranding the panel on "loading".
      */
     const subtreeReads = new Map()
 
@@ -3200,7 +3267,7 @@ window.__ModuleLoader__.load({
           return
         }
         const named = { turn: node.turn, step: node.step }
-        lastStep.set(sessionId, named)
+        rememberRecent(lastStep, sessionId, named, MAX_STEP_SESSIONS)
         setStep(named)
       }
 
@@ -3258,12 +3325,15 @@ window.__ModuleLoader__.load({
        *
        * The reader is told while it runs: this is the only read of foreign sessions
        * the view performs, and it can be slow on a wide tree.
+       *
+       * Everything after the counter is written is inside the `try`, so every counter
+       * this function writes is one the `finally` below is guaranteed to release.
        */
       const loadSubtree = async (full) => {
         const read = (subtreeReads.get(sessionId) ?? 0) + 1
         subtreeReads.set(sessionId, read)
-        setSubtree((current) => ({ ...current, status: 'loading', error: null }))
         try {
+          setSubtree((current) => ({ ...current, status: 'loading', error: null }))
           const answer = await readSubtree(sessionId, full)
           // Two reads can overlap ("subagents only" and "everything below"); the
           // newest one is the answer, and a slower older one is dropped.
@@ -3287,6 +3357,12 @@ window.__ModuleLoader__.load({
             status: 'error',
             error: error instanceof Error ? error.message : String(error),
           }))
+        } finally {
+          // The counter has done its work: the read it named has landed or has been
+          // dropped as the older of two, and nothing will compare against it again,
+          // so an idle session holds nothing. The guard repeats the test above, so a
+          // read that was superseded leaves the newer read's counter alone.
+          if (subtreeReads.get(sessionId) === read) subtreeReads.delete(sessionId)
         }
       }
 
@@ -4757,6 +4833,7 @@ window.__ModuleLoader__.load({
       TopK, topRows, visibleSlice, sumBuckets, zoomWindow, panWindow, clampWindow, isFullWindow, turnSpans,
       arrowDelta, nextSelection, subtreeOf, stepGroups, Subagents, SubagentOpen, openSessionCost, preferCostView,
       costHistory, exportFileName, truncateText, EXPORT_DETAILS, CostExport, saveTextFile, readSeries, readText, promptForNode,
+      sessionPrompts, lastStep, subtreeReads, MAX_PROMPT_SESSIONS, MAX_STEP_SESSIONS,
       valueAxis, compactNumber, tickLabel, tooltipLines,
       Findings, findingsOf, overlayOf, overlayMemo, findingsAt, findingText, findingExplain, thresholdLines,
       findingPlace, findingRank, MAX_BADGES, FINDING_GLYPH, compactionRows, percentText,
