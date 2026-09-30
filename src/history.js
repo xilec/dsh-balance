@@ -30,6 +30,9 @@
 
 const HOUR_MS = 60 * 60_000
 
+/** A day in milliseconds, the unit a range of day keys is measured in. */
+const DAY_MS = 24 * HOUR_MS
+
 /** Smallest credit worth recording; below this a rising balance is rounding noise. */
 const DEFAULT_CREDIT_MIN_DELTA = 0.01
 
@@ -37,13 +40,24 @@ const DEFAULT_CREDIT_MIN_DELTA = 0.01
 const DEFAULT_SPEND_MIN_DELTA = 0.001
 
 /**
- * The three windows the panel shows, each in its own fixed number of days.
+ * The first day each of the three windows starts at, given today's day key.
  *
- * These lengths are the definition of the windows and do not depend on `historyDays`, which
- * only says how many day rows the ledger keeps: the row count is a retention setting the
- * reader can lower to 3, and a window that inherited it would claim a month over three days.
+ * The windows are calendar ranges that end with today, so their lengths follow from these two
+ * anchors rather than being fixed: a week is one day long on a Monday and seven on a Sunday, a
+ * month is as long as the month has. None of them depends on `historyDays`, which only says how
+ * many day rows the ledger keeps: the row count is a retention setting the reader can lower to
+ * 3, and a window that inherited it would claim a month over three days.
+ *
+ * A day key is a fixed-width `YYYY-MM-DD` and the ledger's zone has already decided which
+ * calendar day every sample belongs to, so the anchors are a question about a string, not about
+ * an instant: no clock and no second timezone conversion, and therefore no DST edge to reason
+ * about here.
  */
-const WINDOW_DAYS = { d1: 1, w1: 7, m1: 30 }
+const WINDOW_STARTS = {
+  d1: (todayKey) => todayKey,
+  w1: weekStartKey,
+  m1: monthStartKey,
+}
 
 /**
  * Money is rounded to six decimals on the way out.
@@ -191,6 +205,53 @@ export function recentDayKeys(endKey, count) {
 }
 
 /**
+ * The Monday of the week a day key falls in: the Monday on or before it, which is the day
+ * itself when today is a Monday.
+ *
+ * ISO 8601 weeks start on Monday, and that is the rule the 1-week window and the panel's
+ * "week from Monday" label both rest on. A Sunday-start week is the obvious alternative and is
+ * not this one, so the next reader does not have to derive which was meant from the figures.
+ *
+ * Pure: the key is read as UTC midnight, which is only a fixed frame for the weekday — the
+ * ledger's zone has already decided which calendar day the key names.
+ *
+ * @param dayKey - `YYYY-MM-DD`.
+ * @returns the `YYYY-MM-DD` of that Monday.
+ */
+export function weekStartKey(dayKey) {
+  const [y, m, d] = dayKey.split('-').map(Number)
+  const date = new Date(Date.UTC(y, m - 1, d))
+  // `getUTCDay()` is 0 for Sunday and 1 for Monday, so this is the distance back to the Monday.
+  date.setUTCDate(date.getUTCDate() - (date.getUTCDay() + 6) % 7)
+  return date.toISOString().slice(0, 10)
+}
+
+/**
+ * The first day of the month a day key falls in.
+ *
+ * @param dayKey - `YYYY-MM-DD`.
+ * @returns the `YYYY-MM-DD` of that month's 1st, 28, 29, 30 or 31 days back from it.
+ */
+export function monthStartKey(dayKey) {
+  return `${dayKey.slice(0, 8)}01`
+}
+
+/**
+ * The number of calendar days from `fromKey` through `toKey`, both of them included.
+ *
+ * The windows are ranges of day keys rather than counts, and this is the one place that turns
+ * such a range into a length. Both keys parse as UTC midnight, so the difference is exact days
+ * whatever zone the ledger is in and whatever the offsets are — a DST day is still one day.
+ *
+ * @param fromKey - `YYYY-MM-DD`, the window's first day.
+ * @param toKey - `YYYY-MM-DD`, today.
+ * @returns at least 1.
+ */
+export function daySpan(fromKey, toKey) {
+  return Math.round((Date.parse(toKey) - Date.parse(fromKey)) / DAY_MS) + 1
+}
+
+/**
  * Read one entry of the override map.
  *
  * @param value - `{ amount, at }` as the panel writes it, or a bare number from an
@@ -289,6 +350,10 @@ export function movements(series, options = {}) {
 /**
  * Build the day ledger and the window totals the UI shows.
  *
+ * The three windows are calendar ranges that end with today: today alone, the week from its
+ * Monday, and the month from its 1st. `WINDOW_STARTS` says where each begins, and a window is
+ * as long as the days between that day and today.
+ *
  * @param options.samples - balance samples `{ t, total, currency, ... }`.
  * @param options.overrides - `{ [YYYY-MM-DD]: amount }`, the user's manual fix
  * for one day; a day present here ignores the sampled value.
@@ -296,10 +361,11 @@ export function movements(series, options = {}) {
  * @param options.zone - day-boundary zone; `local` (default) or an IANA name.
  * @param options.nowMs - the instant "today" is measured from.
  * @param options.days - how many day rows to produce (default 30). This is retention, not a
- * window length: the totals below range over their own fixed 1, 7 and 30 days.
+ * window length: the totals below range over their own calendar weeks and months.
  * @param options.creditMinDelta - credit noise floor.
- * @returns day rows, credit events, and the 1d/1w/1m totals, each with the number of days it
- * measured and whether that is the whole window.
+ * @returns day rows, credit events, and the 1d/1w/1m totals. Each window reports its own
+ * `days` (the calendar days it spans), how many of them the ledger and the samples `measured`,
+ * and whether that is the whole window.
  */
 export function buildLedger(options) {
   const zone = options.zone ?? 'local'
@@ -413,26 +479,32 @@ export function buildLedger(options) {
   const sampledDays = firstSampled <= 0 ? rows.length : rows.length - firstSampled
 
   /**
-   * One window of the ledger, in its own days.
+   * One window of the ledger, from its own first day through today.
    *
-   * A window ranges over the last `length` day keys and sums the rows among them. A ledger
-   * too short to fill one is summed anyway — a partial month the reader can compare with
-   * yesterday's is worth more than a hole, and `covered` is the flag that says which one it
-   * is. `days` counts the days of the window the samples really measured, capped by the rows
-   * that exist, so `covered` is exactly `days === length` and the flag cannot describe a
-   * different range than the figure next to it. Asking the two separately is what let a
-   * three-day sum be reported as a covered month.
+   * A window is a range of day keys, and the rows are contiguous and end with today, so the
+   * window's first row is `max(0, rows.length - length)`: a window longer than the ledger starts
+   * before the oldest row and takes all of them. A ledger too short to fill a window is summed
+   * anyway — a partial month the reader can compare with yesterday's is worth more than a hole.
    *
-   * @param length - the window's own length in days.
-   * @returns `{ amount, covered, days }` for that window.
+   * `days` is the window's own calendar length, which is what the panel renders next to a
+   * figure reading "so far this week". `measured` is what the ledger and the samples really
+   * fill, and `covered` is exactly `measured === days`: the samples have to reach back to the
+   * window's first day, so a ledger that starts on Tuesday has not covered a week that began on
+   * Monday. Deriving the flag from the count rather than asking the two questions separately is
+   * what keeps it from describing a different range than the figure beside it.
+   *
+   * @param startKey - the window's first day, `YYYY-MM-DD`.
+   * @returns `{ amount, covered, days, measured }` for that window.
    */
-  const windowTotal = (length) => {
-    const available = Math.min(length, rows.length)
-    const days = Math.min(available, sampledDays)
+  const windowTotal = (startKey) => {
+    const length = daySpan(startKey, todayKey)
+    const from = Math.max(0, rows.length - length)
+    const measured = Math.min(length, rows.length - from, sampledDays)
     return {
-      amount: sum(rows.length - available, rows.length),
-      covered: days === length,
-      days,
+      amount: sum(from, rows.length),
+      covered: measured === length,
+      days: length,
+      measured,
     }
   }
 
@@ -444,7 +516,7 @@ export function buildLedger(options) {
     credits: credits.slice(-50).reverse(),
     creditTotal: round6(credits.reduce((acc, c) => acc + c.amount, 0)),
     totals: Object.fromEntries(
-      Object.entries(WINDOW_DAYS).map(([key, length]) => [key, windowTotal(length)]),
+      Object.entries(WINDOW_STARTS).map(([key, startsAt]) => [key, windowTotal(startsAt(todayKey))]),
     ),
     firstSampleMs,
     lastSampleMs: series.length > 0 ? series[series.length - 1].t : null,

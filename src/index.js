@@ -80,7 +80,7 @@ export const Config = Schema.object({
   currency: Schema.string().default('USD'),
   /** Day boundary zone for the ledger: `local`, or an IANA zone name. */
   dayZone: Schema.string().default('local'),
-  /** Day rows kept and shown (1 day / 1 week / 1 month roll up from them). */
+  /** Day rows kept and shown; the week and month totals are calendar ranges, not lengths of rows. */
   historyDays: Schema.number().min(3).max(400).default(30),
   /** Full-resolution sample retention before hourly thinning. */
   keepDays: Schema.number().min(7).max(3650).default(120),

@@ -1,8 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  buildLedger, calibrationOf, compactSamples, dayKeyOf, medianGapMs, movements, parseSamples,
-  recentDayKeys, serializeSamples,
+  buildLedger, calibrationOf, compactSamples, dayKeyOf, daySpan, medianGapMs, monthStartKey,
+  movements, parseSamples, recentDayKeys, serializeSamples, weekStartKey,
 } from '../src/history.js'
 
 const at = (iso) => Date.parse(iso)
@@ -217,10 +217,9 @@ test('window totals follow the day rows, and coverage reports partial history', 
     days: 30,
   })
   assert.equal(ledger.totals.d1.amount, 2)
-  assert.equal(ledger.totals.w1.amount, 5)
-  assert.equal(ledger.totals.m1.amount, 5)
-  assert.equal(ledger.totals.m1.covered, false) // sampling starts after 2026-08-26
-  assert.equal(ledger.totals.m1.days, 5, 'the samples measured five days of the month')
+  // Thursday: the week runs from the Monday, the month from the 1st.
+  assert.deepEqual(ledger.totals.w1, { amount: 5, covered: true, days: 4, measured: 4 })
+  assert.deepEqual(ledger.totals.m1, { amount: 5, covered: false, days: 24, measured: 5 })
   assert.equal(ledger.rows.length, 30)
 })
 
@@ -231,84 +230,178 @@ const dailySamples = (nowMs, span) => Array.from({ length: span + 1 }, (_, i) =>
   currency: 'CNY',
 }))
 
-test('a window is its own length, whatever number of day rows the ledger keeps', () => {
-  const nowMs = at('2026-09-24T12:00:00Z')
-  const samples = [
-    sample('2026-09-20T00:00:00Z', 100),
-    sample('2026-09-21T00:00:00Z', 99),
-    sample('2026-09-22T00:00:00Z', 97),
-    sample('2026-09-24T00:00:00Z', 95),
-  ]
-  const totalsAt = (days) => buildLedger({ samples, zone: 'UTC', nowMs, days }).totals
-
-  // `historyDays` is writable down to 3, and the month window is 30 days whatever the
-  // setting says: three rows summed as a month is a three-day sum, not a covered one.
-  const short = totalsAt(3)
-  assert.deepEqual(short.m1, { amount: 4, covered: false, days: 3 })
-  assert.deepEqual(short.w1, { amount: 4, covered: false, days: 3 }, 'the week window is short too')
-  assert.deepEqual(short.d1, { amount: 2, covered: true, days: 1 })
-
-  // The same samples with a ledger long enough to hold the window, and a ledger that falls
-  // one day short of it: the amount is the same five days of spend either way.
-  for (const days of [29, 30]) {
-    const ledger = totalsAt(days)
-    assert.deepEqual(ledger.m1, { amount: 5, covered: false, days: 5 }, `historyDays: ${days}`)
+/**
+ * An instant whose calendar day in `zone` is `dayKey`, at noon local.
+ *
+ * Fixtures are built from a day rather than from an instant, so the same calendar day can be
+ * handed to a zone whose offset is a whole number of hours, a fractional one, or neither
+ * because its clocks just moved — without the test choosing a different weekday for each.
+ */
+const noonIn = (dayKey, zone) => {
+  const noonUtc = Date.parse(`${dayKey}T12:00:00Z`)
+  for (let hours = -14; hours <= 14; hours += 1) {
+    const candidate = noonUtc + hours * 3_600_000
+    if (dayKeyOf(candidate, zone) === dayKey) return candidate
   }
-  // A window the samples do not reach back into is partial on its own account, whatever the
-  // ledger length: here the samples cover five days, so neither the week nor the month.
-  assert.deepEqual(totalsAt(30).w1, { amount: 5, covered: false, days: 5 })
+  throw new Error(`no local noon for ${dayKey} in ${zone}`)
+}
 
-  // And a ledger longer than the window does not stretch it.
-  const long = buildLedger({ samples, zone: 'UTC', nowMs, days: 400 })
-  assert.deepEqual(long.totals.m1, { amount: 5, covered: false, days: 5 })
-  assert.equal(long.rows.length, 400, 'the rows are still kept: historyDays is retention')
+test('a window starts on the Monday of its week and on the 1st of its month', () => {
+  // [today, the Monday of its week, the days of that week, the 1st, the days of that month]
+  const anchors = [
+    ['2026-09-21', '2026-09-21', 1, '2026-09-01', 21], // a Monday is a one-day week
+    ['2026-09-22', '2026-09-21', 2, '2026-09-01', 22],
+    ['2026-09-23', '2026-09-21', 3, '2026-09-01', 23], // a Wednesday
+    ['2026-09-24', '2026-09-21', 4, '2026-09-01', 24],
+    ['2026-09-27', '2026-09-21', 7, '2026-09-01', 27], // a Sunday ends the ISO week
+    ['2026-09-28', '2026-09-28', 1, '2026-09-01', 28], // and the next Monday starts a new one
+    ['2026-10-01', '2026-09-28', 4, '2026-10-01', 1], // the 1st of a month
+    ['2026-10-31', '2026-10-26', 6, '2026-10-01', 31], // a 31-day month, whole
+    ['2026-11-01', '2026-10-26', 7, '2026-11-01', 1], // a Sunday that is also the 1st
+    ['2026-02-28', '2026-02-23', 6, '2026-02-01', 28], // February outside a leap year
+    ['2024-02-29', '2024-02-26', 4, '2024-02-01', 29], // February in one
+    ['2026-12-31', '2026-12-28', 4, '2026-12-01', 31], // the year boundary, before
+    ['2027-01-01', '2026-12-28', 5, '2027-01-01', 1], // and after: a January week started in December
+  ]
+  for (const [today, week, weekDays, month, monthDays] of anchors) {
+    assert.equal(weekStartKey(today), week, `${today}: the week starts on its Monday`)
+    assert.equal(daySpan(weekStartKey(today), today), weekDays, `${today}: the length of that week`)
+    assert.equal(monthStartKey(today), month, `${today}: the month starts on its 1st`)
+    assert.equal(daySpan(monthStartKey(today), today), monthDays, `${today}: the length of that month`)
+  }
 })
 
-test('a window reports the days it measured, and only a whole window is covered', () => {
-  const nowMs = at('2026-09-24T12:00:00Z')
-  // Ten days of samples behind a 30-row ledger: the week is inside what was measured, the
-  // month is not, and the count says which is which.
-  const { totals } = buildLedger({ samples: dailySamples(nowMs, 10), zone: 'UTC', nowMs, days: 30 })
-  assert.deepEqual(totals.d1, { amount: 0.5, covered: true, days: 1 })
-  assert.deepEqual(totals.w1, { amount: 3.5, covered: true, days: 7 })
-  assert.deepEqual(totals.m1, { amount: 5, covered: false, days: 11 }, 'eleven measured days, ten of them with spend')
-
-  // Samples that reach past the oldest row cover the whole window whatever that row holds.
-  const full = buildLedger({ samples: dailySamples(nowMs, 40), zone: 'UTC', nowMs, days: 30 })
-  assert.deepEqual(full.totals.m1, { amount: 15, covered: true, days: 30 })
-
-  // No samples at all: every window measures nothing and claims nothing.
-  const empty = buildLedger({ samples: [], zone: 'UTC', nowMs, days: 30 })
-  assert.deepEqual(empty.totals.m1, { amount: 0, covered: false, days: 0 })
-})
-
-test('a ledger of 30 days or more produces the figures it produced before', () => {
-  const nowMs = at('2026-09-24T12:00:00Z')
-  // 45 days of history and one day the reader corrected by hand, so the sums are over the
-  // rows' own values rather than over the raw deltas.
-  const samples = dailySamples(nowMs, 45)
-  const overrides = { '2026-09-10': 3.25 }
-  // What `main` answered for these inputs, recorded before the change. The day total does not
-  // depend on `historyDays` at all and the week total only below 7 rows; the month is the sum
-  // of every row `main` kept, so it matches for as long as the ledger is no longer than the
-  // window — including the corrected day, which is inside all of them.
-  const before = { 3: 1.5, 7: 3.5, 29: 17.25, 30: 17.75 }
-  for (const zone of ['UTC', 'Europe/Berlin', 'Asia/Kolkata']) {
-    for (const days of [3, 7, 29, 30]) {
-      const { totals } = buildLedger({ samples, overrides, zone, nowMs, days })
-      assert.equal(totals.d1.amount, 0.5, `${zone}, historyDays ${days}: the day total`)
-      assert.equal(totals.w1.amount, days <= 7 ? 0.5 * days : 3.5, `${zone}, historyDays ${days}: the week total`)
-      assert.equal(totals.m1.amount, before[days], `${zone}, historyDays ${days}: the month total`)
+test('the windows are the ledger zone calendar, whatever its offset and its clocks', () => {
+  for (const zone of ['UTC', 'America/Los_Angeles', 'Europe/Berlin', 'Asia/Kolkata', 'Pacific/Kiritimati']) {
+    for (const [day, weekDays, monthDays] of [
+      ['2026-09-21', 1, 21], ['2026-09-23', 3, 23], ['2026-10-01', 4, 1], ['2026-10-31', 6, 31],
+      ['2026-11-01', 7, 1], ['2024-02-29', 4, 29], ['2027-01-01', 5, 1],
+    ]) {
+      // No samples: the lengths are the calendar's, and nothing is measured or covered.
+      const { totals, todayKey } = buildLedger({ samples: [], zone, nowMs: noonIn(day, zone), days: 30 })
+      assert.equal(todayKey, day, `${zone} ${day}: the ledger's own today`)
+      assert.deepEqual(totals.d1, { amount: 0, covered: false, days: 1, measured: 0 }, `${zone} ${day}`)
+      assert.deepEqual(totals.w1, { amount: 0, covered: false, days: weekDays, measured: 0 }, `${zone} ${day}`)
+      assert.deepEqual(totals.m1, { amount: 0, covered: false, days: monthDays, measured: 0 }, `${zone} ${day}`)
     }
   }
-  // Above the window the month figure is the documented change and nothing else: 45 days of
-  // history is a 30-day month, not a 45-day one, and 400 rows do not make a covered month
-  // an uncovered one.
-  for (const days of [31, 45, 400]) {
-    const { totals } = buildLedger({ samples, overrides, zone: 'UTC', nowMs, days })
-    assert.deepEqual(totals.m1, { amount: 17.75, covered: true, days: 30 }, `historyDays ${days}`)
+})
+
+test('a week that spans a daylight-saving change still has one key per day', () => {
+  // America/Los_Angeles leaves DST on 2026-11-01, the last day of that ISO week, and
+  // Europe/Berlin leaves it a week earlier. A day is a day either way: the window is a range of
+  // day keys, so the shorter one is a fact about the clock and not about the spend.
+  for (const [zone, day, monthDays] of [
+    ['America/Los_Angeles', '2026-11-01', 1], // the clocks go back, and November is a day old
+    ['Europe/Berlin', '2026-10-25', 25],
+  ]) {
+    const keys = recentDayKeys(day, 12)
+    const samples = keys.map((key, i) => ({ t: noonIn(key, zone), total: 100 - i * 0.5, currency: 'CNY' }))
+    const { totals, rows } = buildLedger({ samples, zone, nowMs: noonIn(day, zone), days: 30 })
+    const week = rows.filter((row) => row.key >= weekStartKey(day))
+    assert.deepEqual(week.map((row) => row.key), recentDayKeys(day, 7), `${zone}: the week is seven day keys`)
+    assert.equal(totals.w1.days, 7, zone)
+    assert.equal(totals.w1.amount, 3.5, `${zone}: 0.5 a day over the seven days of that week`)
+    assert.equal(totals.w1.covered, true, zone)
+    // The month is its own length; the samples only reach as far back as this fixture goes, and
+    // the amount is the rows inside the month however few of them carry spend.
+    const month = rows.filter((row) => row.key >= monthStartKey(day))
+    const measured = Math.min(monthDays, keys.length)
+    assert.equal(totals.m1.days, monthDays, zone)
+    assert.equal(totals.m1.measured, measured, zone)
+    assert.equal(totals.m1.amount, month.reduce((acc, row) => acc + row.spend, 0), zone)
+    assert.equal(totals.m1.covered, measured === monthDays, zone)
   }
 })
+
+test('a ledger shorter than a window sums what it has and names the shortfall', () => {
+  const nowMs = at('2026-09-24T12:00:00Z')
+  const samples = dailySamples(nowMs, 45)
+  const totalsAt = (days, zone = 'UTC') => buildLedger({ samples, zone, nowMs, days }).totals
+
+  // Thursday: the week is four days and the month 24, and `historyDays: 3` reaches back to
+  // Tuesday — a week the ledger cannot have covered, and a month it barely holds.
+  for (const zone of ['UTC', 'Europe/Berlin', 'Asia/Kolkata']) {
+    const short = totalsAt(3, zone)
+    assert.deepEqual(short.d1, { amount: 0.5, covered: true, days: 1, measured: 1 }, zone)
+    assert.deepEqual(short.w1, { amount: 1.5, covered: false, days: 4, measured: 3 }, zone)
+    assert.deepEqual(short.m1, { amount: 1.5, covered: false, days: 24, measured: 3 }, zone)
+  }
+
+  // On a Wednesday the week is three days, so the same three rows do cover it: a short window
+  // that is short only by the calendar is not a shortfall and must not be flagged as one.
+  const wednesday = buildLedger({ samples, zone: 'UTC', nowMs: at('2026-09-23T12:00:00Z'), days: 3 }).totals
+  assert.deepEqual(wednesday.w1, { amount: 1.5, covered: true, days: 3, measured: 3 })
+  assert.deepEqual(wednesday.m1, { amount: 1.5, covered: false, days: 23, measured: 3 })
+
+  // Four rows reach back to Monday, and the month is then whole.
+  const four = totalsAt(4)
+  assert.deepEqual(four.w1, { amount: 2, covered: true, days: 4, measured: 4 })
+  assert.deepEqual(four.m1, { amount: 2, covered: false, days: 24, measured: 4 })
+})
+
+test('the day rows are the ones the rolling windows summed, and a window sums the rows inside it', () => {
+  const nowMs = at('2026-09-24T12:00:00Z')
+  // 45 days of history and one day the reader corrected by hand, so the sums are over the rows'
+  // own values rather than over the raw deltas.
+  const samples = dailySamples(nowMs, 45)
+  const overrides = { '2026-09-10': 3.25 }
+
+  // What `main` answered for these inputs before the windows moved: 0.5 a day with 3.25 on the
+  // corrected day, and 17.75 over 30 rows. The rows are a property of the samples, not of the
+  // windows, so this is the check that the money arithmetic did not move.
+  for (const zone of ['UTC', 'Europe/Berlin', 'Asia/Kolkata']) {
+    const { rows, todayKey } = buildLedger({ samples, overrides, zone, nowMs, days: 30 })
+    assert.equal(todayKey, '2026-09-24', zone)
+    assert.equal(rows[0].key, '2026-08-26', zone)
+    assert.deepEqual(
+      rows.filter((row) => row.spend !== 0.5).map((row) => [row.key, row.spend]),
+      [['2026-09-10', 3.25]],
+      `${zone}: the corrected day is the only row that is not half a unit`,
+    )
+    assert.equal(rows.reduce((acc, row) => acc + row.spend, 0), 17.75, `${zone}: the 30 rows of that ledger`)
+  }
+
+  // Each window is the sum of the rows whose key falls inside it, whichever way the range is
+  // worked out: the assertion below rebuilds the sum from the keys, the ledger from the length.
+  const inWindow = (ledger, startKey) => ledger.rows
+    .filter((row) => row.key >= startKey)
+    .reduce((acc, row) => acc + row.spend, 0)
+  for (const days of [3, 4, 24, 30, 400]) {
+    const ledger = buildLedger({ samples, overrides, zone: 'UTC', nowMs, days })
+    assert.equal(ledger.totals.w1.amount, inWindow(ledger, '2026-09-21'), `historyDays ${days}: the week`)
+    assert.equal(ledger.totals.m1.amount, inWindow(ledger, '2026-09-01'), `historyDays ${days}: the month`)
+  }
+
+  // The worked figures on Thursday 2026-09-24 with a ledger that reaches back 45 days: a
+  // four-day week and a 24-day month, against the rolling 7 and 30 the same rows used to give.
+  const { totals } = buildLedger({ samples, overrides, zone: 'UTC', nowMs, days: 400 })
+  assert.deepEqual(totals.d1, { amount: 0.5, covered: true, days: 1, measured: 1 })
+  assert.deepEqual(totals.w1, { amount: 2, covered: true, days: 4, measured: 4 })
+  assert.deepEqual(totals.m1, { amount: 14.75, covered: true, days: 24, measured: 24 })
+  // A rolling seven days would have added 2026-09-18..20 and a rolling thirty would have
+  // reached back into August, so the calendar week is 1.5 smaller than the rolling one and the
+  // calendar month 3.0.
+  const ledger = buildLedger({ samples, overrides, zone: 'UTC', nowMs, days: 400 })
+  assert.equal(inWindow(ledger, '2026-09-18'), 3.5, 'a rolling week: seven days of half a unit')
+  assert.equal(ledger.totals.w1.amount, 2, 'the calendar week is the four of them that are this week')
+  assert.equal(ledger.totals.m1.amount, 14.75)
+  assert.equal(inWindow(ledger, '2026-08-26'), 17.75, 'a rolling month: thirty rows, four of them in August')
+})
+
+test('a rolling month used to reach past the 1st of a 31-day month, and does not now', () => {
+  const nowMs = at('2026-10-31T12:00:00Z')
+  const samples = dailySamples(nowMs, 45)
+  const { totals } = buildLedger({ samples, zone: 'UTC', nowMs, days: 400 })
+  // The calendar month is the whole of October: 31 days, 15.5 spent over them.
+  assert.deepEqual(totals.m1, { amount: 15.5, covered: true, days: 31, measured: 31 })
+  // A rolling thirty days on that date started on the 2nd, so it dropped 2026-10-01 and, being
+  // one day shorter, could not have carried the whole month however many rows it held.
+  const first = buildLedger({ samples, zone: 'UTC', nowMs, days: 400 }).rows.find((row) => row.key === '2026-10-01')
+  assert.equal(first.spend, 0.5, 'the day a rolling 30-day window left out on the 31st')
+  assert.equal(totals.m1.amount, 15.5, 'and the calendar month keeps it')
+})
+
 
 test('credits are listed newest first with a total', () => {
   const ledger = buildLedger({
