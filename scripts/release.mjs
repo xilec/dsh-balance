@@ -19,11 +19,19 @@
  * after printing a draft commit message, and `publish` needs both a reviewed
  * notes file and an explicit `--yes`: the review happens between the two, in a
  * conversation, and a script cannot stand in for it.
+ *
+ * Every subcommand acts on one tree, and the subcommand has to be run in it: the
+ * root of the git repository, holding the plugin's `package.json`. `git rev-parse
+ * --show-toplevel` alone was not enough — `AGENTS.md` sends a maintainer to a
+ * scratch copy under `./tmp/`, which has no `.git` of its own, so it answered with
+ * the checkout above the copy and `prepare` rewrote *that* checkout's four version
+ * files. The rule now lives once, in `releaseTree` below, and every path and every
+ * `git` call in both release scripts takes the tree it returns.
  */
 import { execFileSync } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { compareVersions, lastTag, parseVersion, releaseRange } from './release-notes.mjs'
+import { compareVersions, lastTag, parseVersion, releaseRange, releaseTree } from './release-notes.mjs'
 
 /**
  * The files that carry the version, and the one line in each that holds it.
@@ -52,14 +60,14 @@ export const VERSION_PLACES = [
 ]
 
 /** Run a command, return its trimmed stdout, and throw with its stderr on failure. */
-function run(command, args) {
-  return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+function run(command, args, options = {}) {
+  return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...options }).trim()
 }
 
 /** The same, but a command that fails or is absent yields null instead of throwing. */
-function tryRun(command, args) {
+function tryRun(command, args, options = {}) {
   try {
-    return run(command, args)
+    return run(command, args, options)
   } catch {
     return null
   }
@@ -81,15 +89,24 @@ export function slugFromOrigin(url) {
  *
  * Passed to `gh` explicitly rather than left to the working directory, so a
  * release cannot land in a fork because the script ran in the wrong checkout.
+ * The remote is read from `root` for the same reason: the remote of a directory
+ * the script merely happened to be started in is not the remote it publishes to.
  */
-export function repoSlug() {
+export function repoSlug(root) {
   if (process.env.GH_REPO) return process.env.GH_REPO
-  return slugFromOrigin(tryRun('git', ['remote', 'get-url', 'origin']) ?? '')
+  return slugFromOrigin(tryRun('git', ['-C', root, 'remote', 'get-url', 'origin']) ?? '')
 }
 
-/** The repository root, so every path here is absolute regardless of the cwd. */
+/**
+ * The tree this run acts on, resolved by the same rule as the notes script and
+ * refused the same way: the root of the git repository the command was run in,
+ * and nothing else. See `releaseTree` for why the working directory is an input
+ * to that decision rather than the answer to it.
+ */
 function repoRoot() {
-  return run('git', ['rev-parse', '--show-toplevel'])
+  const tree = releaseTree()
+  if ('refusal' in tree) fail(tree.refusal)
+  return tree.root
 }
 
 /**
@@ -117,11 +134,13 @@ function dirtyPaths(root) {
  *
  * `tagExists` carries the version it was looked up for, so the message names
  * the version that is actually tagged rather than the one the tree happens to
- * carry.
+ * carry. `missing` is a list rather than a flag because a tree with three of the
+ * four version places has to be told which three.
  */
-export function checkRefusals({ current, lastTag: tag, tagExists, dirty }) {
+export function checkRefusals({ current, lastTag: tag, tagExists, dirty, missing = [] }) {
   const problems = []
   if (current === null) problems.push('the version files do not all carry the same x.y.z version')
+  if (missing.length > 0) problems.push(`the tree has no ${missing.join(', ')} — a release reads the version from all four places`)
   if (dirty.length > 0) problems.push(`uncommitted changes outside tmp/: ${dirty.join(', ')}`)
   if (tagExists !== null && tagExists !== false) problems.push(`the tag v${tagExists} already exists`)
   if (current !== null) {
@@ -132,29 +151,42 @@ export function checkRefusals({ current, lastTag: tag, tagExists, dirty }) {
 }
 
 /**
- * Everything a release step needs to know, read from the repository.
+ * Everything a release step needs to know, read from the tree.
  *
  * `versions` is the version each place carries, keyed by file, so a mismatch is
- * reported as such instead of being silently normalized. `tagExists` is the
- * version whose tag exists — the one being released when the caller names it,
- * otherwise the version in the tree, because that is the one a release would
- * otherwise duplicate.
+ * reported as such instead of being silently normalized. `missing` names the places
+ * the tree does not have at all — a scratch copy with a manifest and nothing else is
+ * refused by name, which is a sentence a maintainer can act on, where reading them
+ * anyway was an `ENOENT` with a stack trace on top. `tagExists` is the version whose
+ * tag exists — the one being released when the caller names it, otherwise the version
+ * in the tree, because that is the one a release would otherwise duplicate. `root`
+ * travels with them because the report below and the range it prints are about that
+ * tree, and a report that does not name the tree it read is how the wrong tree looks
+ * like the right one.
  */
 export function inspect(root, requested = null) {
   const versions = {}
+  const missing = []
   for (const place of VERSION_PLACES) {
-    versions[place.file] = oneVersion(placeVersions(readFileSync(join(root, place.file), 'utf8'), place))
+    const file = join(root, place.file)
+    if (!existsSync(file)) {
+      missing.push(place.file)
+      continue
+    }
+    versions[place.file] = oneVersion(placeVersions(readFileSync(file, 'utf8'), place))
   }
   const found = [...new Set(Object.values(versions))]
   const current = found.length === 1 && found[0] !== null ? found[0] : null
-  const tag = lastTag()
-  const tagged = requested ?? versions['package.json']
+  const tag = lastTag({ root })
+  const tagged = requested ?? versions['package.json'] ?? null
   return {
+    root,
     versions,
     current,
     tag,
     tagExists: tagged !== null && run('git', ['-C', root, 'tag', '--list', `v${tagged}`]) !== '' ? tagged : null,
     dirty: dirtyPaths(root),
+    missing,
   }
 }
 
@@ -224,8 +256,9 @@ export function ghReleaseArgs({ version, slug, title, notes, sha }) {
  * asks for itself.
  */
 function report(state) {
-  const { label, tag } = releaseRange({ warn: (message) => process.stderr.write(`release: ${message}\n`) })
+  const { label, tag } = releaseRange({ root: state.root, warn: (message) => process.stderr.write(`release: ${message}\n`) })
   const lines = [
+    `tree: ${state.root}`,
     `version: ${state.current ?? `mismatched (${JSON.stringify(state.versions)})`}`,
     `last tag: ${tag ?? 'none'}`,
     `next release would cover: ${label}`,
@@ -235,6 +268,7 @@ function report(state) {
     lastTag: tag,
     tagExists: state.tagExists,
     dirty: state.dirty,
+    missing: state.missing,
   })
   for (const problem of problems) lines.push(`refusing: ${problem}`)
   process.stdout.write(`${lines.join('\n')}\n`)
@@ -318,7 +352,7 @@ function prepare(version) {
   process.stdout.write(`wrote ${version} to ${VERSION_PLACES.map((place) => place.file).join(', ')}\n`)
   for (const script of ['lint', 'test']) {
     try {
-      process.stdout.write(`\n$ npm run ${script}\n${run('npm', ['run', script])}\n`)
+      process.stdout.write(`\n$ npm run ${script}\n${run('npm', ['run', script], { cwd: root })}\n`)
     } catch (error) {
       fail([
         `npm run ${script} failed, so the version is written but the tree is not releasable:`,
@@ -359,7 +393,7 @@ function publish(version, options) {
   if (body.includes('<!-- DRAFT')) {
     fail(`the notes file ${notes} still carries its DRAFT marker — it is a draft, not a release`)
   }
-  const slug = repoSlug()
+  const slug = repoSlug(root)
   if (slug === null) fail('no GitHub repository to publish to: set GH_REPO or add an origin remote')
   const title = `dsh-balance ${version}`
   const sha = run('git', ['-C', root, 'rev-parse', 'HEAD'])
