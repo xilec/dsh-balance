@@ -11,6 +11,11 @@
   cadence, and that a disposed plugin is still not polled
 - [x] 1.3 Guard `resetLoop()` with `loopStopped` so a settings write that lands after the
   disposal cannot arm a timer; verify the setting itself is still stored and answered
+- [x] 1.4 Number each arming of the loop and let a tick re-arm only while its own number is
+  current, so a cadence change landing while a poll is in flight does not leave a second loop
+  nothing owns; verify exactly one timer is armed after such a write, counting the live
+  `setTimeout` handles rather than the polls, since two loops at one cadence poll the same
+  number of times
 
 ## 2. Stop paying for what nobody reads
 
@@ -41,7 +46,7 @@
 - [x] 5.1 Run `npm test`, `npm run lint` (knip + jscpd, from a scratch copy with its own
   `node_modules` because the worktree links the dsh kernel) and `nix flake check` in the
   worktree; verify all are green, that no test was removed or weakened, and that each of the
-  six new cases fails against the code as it stood
+  seven new cases fails against the code as it stood
 - [x] 5.2 Run `openspec validate --all`, tick every item above, then archive the change with
   `openspec archive fix-sampler-lifecycle-and-routes --yes`; verify the archived folder and the
   updated specs are part of the branch

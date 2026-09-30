@@ -1533,6 +1533,82 @@ test('a settings write that lands after the plugin was disposed arms no timer', 
   }
 })
 
+test('a settings write during a poll in flight does not arm a second loop', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
+  const previousHome = process.env.DSH_HOME
+  const previousFetch = globalThis.fetch
+  const previousTimeout = globalThis.setTimeout
+  const previousClear = globalThis.clearTimeout
+  process.env.DSH_HOME = home
+  let polls = 0
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  globalThis.fetch = async () => {
+    polls += 1
+    // Only the first poll is held, which is what leaves a tick awaiting its refresh
+    // while the write below goes through. A tick whose timer has already fired cannot
+    // be cancelled by `resetLoop()`, and the timer it came back to arm used to land on
+    // top of the one the reset had just armed — a second loop nothing owned.
+    if (polls === 1) await gate
+    return { ok: true, json: async () => balanceBody(1) }
+  }
+  // The live timers are the thing under test, so they are counted rather than timed:
+  // a second arming is a pending timer the first one does not know about, and once both
+  // loops run at the same cadence a poll count cannot tell them apart. The wrapper goes
+  // on after the mock is installed, so it counts the timers the loop actually arms: a
+  // timer is live from the moment it is armed until it fires or is cleared.
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const live = new Set()
+  const mockedTimeout = globalThis.setTimeout
+  const mockedClear = globalThis.clearTimeout
+  globalThis.setTimeout = (fn, ms, ...rest) => {
+    let id
+    id = mockedTimeout((...args) => {
+      live.delete(id)
+      return fn(...args)
+    }, ms, ...rest)
+    live.add(id)
+    return id
+  }
+  globalThis.clearTimeout = (id) => {
+    live.delete(id)
+    return mockedClear(id)
+  }
+  const ctx = hostContext()
+  const drain = async (ms) => {
+    for (let index = 0; index < ms / 1000; index += 1) {
+      t.mock.timers.tick(1000)
+      await new Promise((resolve) => setImmediate(resolve))
+    }
+  }
+  try {
+    const module = await import(`../src/index.js?settings-in-flight=${encodeURIComponent(home)}`)
+    module.apply(ctx, module.Config({ apiKey: 'test-key', currency: 'CNY', refreshIntervalMs: 15000 }))
+    await drain(4000)
+    assert.equal(polls, 1, 'the first tick is holding its poll open')
+    const res = response()
+    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { refreshIntervalMs: 15000 }), res)
+    assert.equal(res.status, 200, res.body)
+    release()
+    // Sixty seconds of a fifteen-second cadence. Every tick re-arms, so the count of
+    // live timers settles at one however many polls went by, and a second loop shows
+    // up as a second pending timer the first arming never knew about.
+    await drain(60_000)
+    assert.ok(polls >= 4 && polls <= 5, `four intervals of a fifteen-second cadence: ${polls} polls`)
+    assert.equal(live.size, 1, `exactly one loop timer is armed, not two: ${live.size}`)
+  } finally {
+    release()
+    ctx.dispose()
+    t.mock.timers.reset()
+    globalThis.setTimeout = previousTimeout
+    globalThis.clearTimeout = previousClear
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    globalThis.fetch = previousFetch
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
 test('a refresh answered during the load reports the history on disk', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
   const previousHome = process.env.DSH_HOME

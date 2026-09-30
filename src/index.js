@@ -518,11 +518,27 @@ export function apply(ctx, config) {
   /** Set once the plugin is disposed: a tick in flight must not schedule another. */
   let loopStopped = false
 
+  /**
+   * Which arming of the loop a tick belongs to.
+   *
+   * `resetLoop()` cannot cancel a tick that is already awaiting its poll, and a
+   * settings write landing in that window is ordinary: the old tick used to come
+   * back from the poll, clear nothing (its own timer had already fired) and arm a
+   * second timer on top of the one the reset had just armed. Nothing owned the
+   * second handle, so from then on every tick ran twice — two polls per interval,
+   * two lines per tick in the log, and a timer the disposer could no longer reach.
+   * Each arming therefore takes a number, and a tick only re-arms while its own is
+   * still the current one.
+   */
+  let loopArmed = 0
+
   const resetLoop = () => {
     // A settings write can land after the plugin was disposed, and re-arming the loop
     // there leaves a timer that nothing will ever clear.
     if (loopStopped) return
     if (loopTimer !== null) clearTimeout(loopTimer)
+    loopArmed += 1
+    const armed = loopArmed
     const tick = async () => {
       try {
         await refresh()
@@ -531,7 +547,7 @@ export function apply(ctx, config) {
         // that keeps the history alive, so a failed tick must not be the last one.
         warn(`the balance poll rejected: ${message(error)}`)
       }
-      if (loopStopped) return
+      if (loopStopped || armed !== loopArmed) return
       const delay = cache.error === 'api-key-missing' ? 30000 : runtime.refreshIntervalMs
       loopTimer = setTimeout(tick, delay)
     }

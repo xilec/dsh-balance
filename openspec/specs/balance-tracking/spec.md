@@ -20,7 +20,11 @@ timeout; a non-2xx answer MUST be reported as an HTTP failure. Concurrent polls 
 one in-flight request. A poll MUST NOT end the sampling loop whatever its outcome: the next
 tick MUST be scheduled after a failure as well as after a success, and a poll that cannot
 start at all — a service it needs cannot be read, say — MUST be reported as a failed poll and
-MUST NOT leave the plugin without samples until it is restarted.
+MUST NOT leave the plugin without samples until it is restarted. Exactly one timer may be
+armed at a time: restarting the loop on a new cadence while a poll is still in flight MUST
+NOT leave the tick that was awaiting that poll to arm a second one, since a doubled loop
+polls twice per interval, writes twice per tick, and holds a timer the plugin can no longer
+clear.
 
 #### Scenario: The account is sampled without a browser
 
@@ -46,6 +50,13 @@ MUST NOT leave the plugin without samples until it is restarted.
   cannot be read
 - **THEN** the failure is reported like any other, and the next poll is still scheduled on the
   configured cadence rather than sampling stopping for the rest of the session
+
+#### Scenario: The cadence is changed while a poll is in flight
+
+- **WHEN** a settings write changes the sampling cadence while a tick is still awaiting its
+  poll
+- **THEN** the tick that was awaiting the poll does not arm a second timer, and the plugin
+  keeps polling once per interval
 
 ### Requirement: Samples are recorded only when they carry news
 

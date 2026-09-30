@@ -85,6 +85,21 @@ event — which is why the handler has to look at both.
   the disposer has already run past. Storing the setting is right — the user asked for it and
   it is on disk for the next start — so the guard is only on the timer.
 
+- **D5b — Each arming of the loop takes a number, and a stale tick does not re-arm.** The
+  `loopStopped` guard above is about a loop that is finished for good; this is about one that
+  is still wanted but has just been restarted. `resetLoop()` can cancel a *pending* tick, not
+  one already `await`ing its poll, and a settings write that changes the cadence in that
+  window is ordinary rather than exotic. The tick that was awaiting the poll then came back,
+  cleared nothing — its own timer had already fired — and armed a second timer on top of the
+  one the restart had just armed. `loopTimer` holds one handle, so from that point on the
+  second loop was unreachable: the plugin polled twice per interval and wrote twice per tick,
+  and the disposer could only ever clear one of the two. A counter fixes it in the place the
+  arming happens rather than by trying to cancel a poll already in flight: `resetLoop()`
+  increments it, the tick captures its own value, and the reschedule is conditional on the two
+  still agreeing. Cancelling the in-flight poll instead was rejected — it would abandon a poll
+  that is about to record a real sample, and `refresh()` shares one promise between the loop
+  and the refresh route, so the reader waiting on that route would be left with nothing.
+
 - **D6 — The refresh route waits for the load, like every other route that reads state.** With
   no API key `refresh()` returns before its own `if (!loaded) await ready`, so the route used
   to build its payload while the read of the log was still in flight: `host.loaded: false`,
