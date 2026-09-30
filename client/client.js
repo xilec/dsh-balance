@@ -279,8 +279,8 @@ window.__ModuleLoader__.load({
         'tip.toppedUp': 'Topped up',
         'tip.granted': 'Granted',
         'tip.spend1d': 'Last day',
-        'tip.spend1w': 'Last 7 days',
-        'tip.spend1m': 'Last 30 days',
+        'tip.spend1w': 'Last {days} days',
+        'tip.spend1m': 'Last {days} days',
         'tip.session': 'This session (estimate)',
         'tip.tariff': 'Tariff now',
         'tip.next': 'Next change',
@@ -288,7 +288,7 @@ window.__ModuleLoader__.load({
         'tip.cadence': 'Median gap',
         'tip.fetched': 'Balance read',
         'tip.credits': 'Credits in history',
-        'tip.partial': 'partial: sampling started later',
+        'tip.partial': 'partial: {days} of 30 days measured',
         'tip.coarse': 'some days are coarse — the app was closed across a day boundary',
         'tip.unpriced': 'not priced: {models}',
         'reason.peak': 'peak rates',
@@ -307,8 +307,8 @@ window.__ModuleLoader__.load({
         'card.balance': 'Balance',
         'card.today': 'Today',
         'card.session': 'This session',
-        'card.week': '7 days',
-        'card.month': '30 days',
+        'card.week': '{days} days',
+        'card.month': '{days} days',
         'card.unavailable': 'balance unavailable',
         'days.date': 'Day',
         'days.sampled': 'From samples',
@@ -539,8 +539,8 @@ window.__ModuleLoader__.load({
         'tip.toppedUp': 'Пополнено',
         'tip.granted': 'Подарочные',
         'tip.spend1d': 'За сутки',
-        'tip.spend1w': 'За 7 дней',
-        'tip.spend1m': 'За 30 дней',
+        'tip.spend1w': 'За {days} дней',
+        'tip.spend1m': 'За {days} дней',
         'tip.session': 'Эта сессия (оценка)',
         'tip.tariff': 'Тариф сейчас',
         'tip.next': 'Следующая смена',
@@ -548,7 +548,7 @@ window.__ModuleLoader__.load({
         'tip.cadence': 'Медианный интервал',
         'tip.fetched': 'Баланс прочитан',
         'tip.credits': 'Пополнения в истории',
-        'tip.partial': 'частично: сэмплирование началось позже',
+        'tip.partial': 'частично: измерено {days} из 30 дн.',
         'tip.coarse': 'часть дней помечена как грубые — приложение было закрыто через границу суток',
         'tip.unpriced': 'без цены: {models}',
         'reason.peak': 'пиковый тариф',
@@ -567,8 +567,8 @@ window.__ModuleLoader__.load({
         'card.balance': 'Баланс',
         'card.today': 'Сегодня',
         'card.session': 'Эта сессия',
-        'card.week': '7 дней',
-        'card.month': '30 дней',
+        'card.week': '{days} дней',
+        'card.month': '{days} дней',
         'card.unavailable': 'баланс недоступен',
         'days.date': 'День',
         'days.sampled': 'Из сэмплов',
@@ -805,6 +805,26 @@ window.__ModuleLoader__.load({
       if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
       const fixed = Math.abs(value) >= 1000 ? value.toFixed(0) : value.toFixed(digits)
       return `${symbol(currency)}${fixed}`
+    }
+
+    /** The windows as the Host defines them, for a payload that reports no day count. */
+    const WINDOW_DAYS = { w1: 7, m1: 30 }
+
+    /**
+     * The days a window really measured, for the label that goes with its figure.
+     *
+     * The Host reports each window's own count of measured days, because a ledger the reader
+     * shortened cannot fill a 30-day window: `historyDays` goes down to 3, and a panel that
+     * says "30 days" over three days of samples makes a claim the data does not support. The
+     * window's own length is the fallback for a Host too old to report the count.
+     *
+     * @param totals - one entry of `ledger.totals`, or nothing at all.
+     * @param length - that window's length in days.
+     * @returns the number of days the label should name.
+     */
+    function windowDays(totals, length) {
+      const days = totals?.days
+      return Number.isInteger(days) && days > 0 ? days : length
     }
 
     /**
@@ -1205,7 +1225,11 @@ window.__ModuleLoader__.load({
        */
       const legend = [
         t('tip.balance'),
-        `${t('tip.spend1d')}/${t('tip.spend1w')}/${t('tip.spend1m')}`,
+        [
+          t('tip.spend1d'),
+          t('tip.spend1w', { days: windowDays(ledger?.totals?.w1, WINDOW_DAYS.w1) }),
+          t('tip.spend1m', { days: windowDays(ledger?.totals?.m1, WINDOW_DAYS.m1) }),
+        ].join('/'),
         t('tip.session'),
       ].join(' · ')
 
@@ -1461,8 +1485,10 @@ window.__ModuleLoader__.load({
         card('d1', t('card.today'), ledger === null ? '—' : money(ledger.totals.d1.amount, currency)),
         card('ses', t('card.session'), sessionCost === null ? '—' : money(sessionCost, sessionCurrency),
           peak === null ? undefined : t(`reason.${peak.phase ?? 'off-peak'}`)),
-        card('w1', t('card.week'), ledger === null ? '—' : money(ledger.totals.w1.amount, currency)),
-        card('m1', t('card.month'), ledger === null ? '—' : money(ledger.totals.m1.amount, currency)),
+        card('w1', t('card.week', { days: windowDays(ledger?.totals?.w1, WINDOW_DAYS.w1) }),
+          ledger === null ? '—' : money(ledger.totals.w1.amount, currency)),
+        card('m1', t('card.month', { days: windowDays(ledger?.totals?.m1, WINDOW_DAYS.m1) }),
+          ledger === null ? '—' : money(ledger.totals.m1.amount, currency)),
       ])
 
       const rows = []
@@ -1477,8 +1503,10 @@ window.__ModuleLoader__.load({
       }
       if (ledger !== null) {
         row(t('tip.spend1d'), money(ledger.totals.d1.amount, currency))
-        row(t('tip.spend1w'), money(ledger.totals.w1.amount, currency))
-        row(t('tip.spend1m'), money(ledger.totals.m1.amount, currency))
+        row(t('tip.spend1w', { days: windowDays(ledger.totals.w1, WINDOW_DAYS.w1) }),
+          money(ledger.totals.w1.amount, currency))
+        row(t('tip.spend1m', { days: windowDays(ledger.totals.m1, WINDOW_DAYS.m1) }),
+          money(ledger.totals.m1.amount, currency))
       }
       row(t('tip.session'), sessionCost === null ? '—' : money(sessionCost, sessionCurrency))
       if (peak !== null) {
@@ -1498,7 +1526,9 @@ window.__ModuleLoader__.load({
 
       const flags = []
       if (payload?.session?.unpriced?.length > 0) flags.push(t('tip.unpriced', { models: payload.session.unpriced.join(', ') }))
-      if (ledger !== null && !ledger.totals.m1.covered) flags.push(t('tip.partial'))
+      if (ledger !== null && !ledger.totals.m1.covered) {
+        flags.push(t('tip.partial', { days: windowDays(ledger.totals.m1, WINDOW_DAYS.m1) }))
+      }
       if (ledger !== null && ledger.rows.some((entry) => entry.coarse)) flags.push(t('tip.coarse'))
 
       return h('div', { className: 'dshb_summary' }, [

@@ -185,7 +185,93 @@ test('window totals follow the day rows, and coverage reports partial history', 
   assert.equal(ledger.totals.w1.amount, 5)
   assert.equal(ledger.totals.m1.amount, 5)
   assert.equal(ledger.totals.m1.covered, false) // sampling starts after 2026-08-26
+  assert.equal(ledger.totals.m1.days, 5, 'the samples measured five days of the month')
   assert.equal(ledger.rows.length, 30)
+})
+
+/** The samples of the window tests: 0.5 spent a day, `span` days back from `nowMs`. */
+const dailySamples = (nowMs, span) => Array.from({ length: span + 1 }, (_, i) => ({
+  t: nowMs - (span - i) * 86_400_000,
+  total: 100 - i * 0.5,
+  currency: 'CNY',
+}))
+
+test('a window is its own length, whatever number of day rows the ledger keeps', () => {
+  const nowMs = at('2026-09-24T12:00:00Z')
+  const samples = [
+    sample('2026-09-20T00:00:00Z', 100),
+    sample('2026-09-21T00:00:00Z', 99),
+    sample('2026-09-22T00:00:00Z', 97),
+    sample('2026-09-24T00:00:00Z', 95),
+  ]
+  const totalsAt = (days) => buildLedger({ samples, zone: 'UTC', nowMs, days }).totals
+
+  // `historyDays` is writable down to 3, and the month window is 30 days whatever the
+  // setting says: three rows summed as a month is a three-day sum, not a covered one.
+  const short = totalsAt(3)
+  assert.deepEqual(short.m1, { amount: 4, covered: false, days: 3 })
+  assert.deepEqual(short.w1, { amount: 4, covered: false, days: 3 }, 'the week window is short too')
+  assert.deepEqual(short.d1, { amount: 2, covered: true, days: 1 })
+
+  // The same samples with a ledger long enough to hold the window, and a ledger that falls
+  // one day short of it: the amount is the same five days of spend either way.
+  for (const days of [29, 30]) {
+    const ledger = totalsAt(days)
+    assert.deepEqual(ledger.m1, { amount: 5, covered: false, days: 5 }, `historyDays: ${days}`)
+  }
+  // A window the samples do not reach back into is partial on its own account, whatever the
+  // ledger length: here the samples cover five days, so neither the week nor the month.
+  assert.deepEqual(totalsAt(30).w1, { amount: 5, covered: false, days: 5 })
+
+  // And a ledger longer than the window does not stretch it.
+  const long = buildLedger({ samples, zone: 'UTC', nowMs, days: 400 })
+  assert.deepEqual(long.totals.m1, { amount: 5, covered: false, days: 5 })
+  assert.equal(long.rows.length, 400, 'the rows are still kept: historyDays is retention')
+})
+
+test('a window reports the days it measured, and only a whole window is covered', () => {
+  const nowMs = at('2026-09-24T12:00:00Z')
+  // Ten days of samples behind a 30-row ledger: the week is inside what was measured, the
+  // month is not, and the count says which is which.
+  const { totals } = buildLedger({ samples: dailySamples(nowMs, 10), zone: 'UTC', nowMs, days: 30 })
+  assert.deepEqual(totals.d1, { amount: 0.5, covered: true, days: 1 })
+  assert.deepEqual(totals.w1, { amount: 3.5, covered: true, days: 7 })
+  assert.deepEqual(totals.m1, { amount: 5, covered: false, days: 11 }, 'eleven measured days, ten of them with spend')
+
+  // Samples that reach past the oldest row cover the whole window whatever that row holds.
+  const full = buildLedger({ samples: dailySamples(nowMs, 40), zone: 'UTC', nowMs, days: 30 })
+  assert.deepEqual(full.totals.m1, { amount: 15, covered: true, days: 30 })
+
+  // No samples at all: every window measures nothing and claims nothing.
+  const empty = buildLedger({ samples: [], zone: 'UTC', nowMs, days: 30 })
+  assert.deepEqual(empty.totals.m1, { amount: 0, covered: false, days: 0 })
+})
+
+test('a ledger of 30 days or more produces the figures it produced before', () => {
+  const nowMs = at('2026-09-24T12:00:00Z')
+  // 45 days of history and one day the reader corrected by hand, so the sums are over the
+  // rows' own values rather than over the raw deltas.
+  const samples = dailySamples(nowMs, 45)
+  const overrides = { '2026-09-10': 3.25 }
+  // What `main` answered for these inputs, recorded before the change. The 1d and 1w figures
+  // are the same for every `historyDays`, and so is the month as long as the ledger is no
+  // longer than the window — including the corrected day, which is inside all of them.
+  const before = { 3: 1.5, 7: 3.5, 29: 17.25, 30: 17.75 }
+  for (const zone of ['UTC', 'Europe/Berlin', 'Asia/Kolkata']) {
+    for (const days of [3, 7, 29, 30]) {
+      const { totals } = buildLedger({ samples, overrides, zone, nowMs, days })
+      assert.equal(totals.d1.amount, 0.5, `${zone}, historyDays ${days}: the day total`)
+      assert.equal(totals.w1.amount, days <= 7 ? 0.5 * days : 3.5, `${zone}, historyDays ${days}: the week total`)
+      assert.equal(totals.m1.amount, before[days], `${zone}, historyDays ${days}: the month total`)
+    }
+  }
+  // Above the window the month figure is the documented change and nothing else: 45 days of
+  // history is a 30-day month, not a 45-day one, and 400 rows do not make a covered month
+  // an uncovered one.
+  for (const days of [31, 45, 400]) {
+    const { totals } = buildLedger({ samples, overrides, zone: 'UTC', nowMs, days })
+    assert.deepEqual(totals.m1, { amount: 17.75, covered: true, days: 30 }, `historyDays ${days}`)
+  }
 })
 
 test('credits are listed newest first with a total', () => {
