@@ -186,6 +186,15 @@ function clientContext() {
 /** Readout labels as the dictionary renders them, so the line reads as it does in the shell. */
 const fakeT = (key) => ({ 'readout.balance': 'b', 'readout.session': 's' }[key] ?? key)
 
+/**
+ * One turn of the task queue, for a chain that has already been started but has not
+ * settled. Nothing here waits on a duration: every promise the store chains resolves in a
+ * microtask, and a macrotask boundary runs all of them, so the assertion after this sees
+ * the end of the chain rather than a guess about how long it takes. `setImmediate` rather
+ * than `setTimeout` because a test may be watching the timers the code under test arms.
+ */
+const turn = () => new Promise((resolve) => { setImmediate(resolve) })
+
 const HOUR = 3600_000
 const MINUTE = 60_000
 /** A fixed instant so the payload below stays meaningful: Friday, off-peak. */
@@ -258,16 +267,30 @@ const payload = {
   session: { cost: 0.33, currency: 'USD', models: ['deepseek-flash'], costByModel: { 'deepseek-flash': 0.33 }, tokens: { uncachedInput: 1, cacheRead: 0, cacheWrite: 0, output: 1 }, unpriced: [], peakNow: false },
 }
 
-/** A fetch stub that answers the read route and records the writes. */
-function stubFetch({ posts = [], calls = [], answer = payload } = {}) {
+/**
+ * A fetch stub that answers the read route and records the writes.
+ *
+ * `sampling` and `balance` stand in for what the Host would remember: a settings write is
+ * reflected in the payload the next read answers with, which is how a test can watch the
+ * browser act on a cadence or a currency the reader just wrote. `refuse` lists the paths
+ * that answer with a rejection instead, so a failing write is a call sequence too.
+ */
+function stubFetch({ posts = [], calls = [], sampling = null, balance = null, refuse = [], answer = null } = {}) {
   const previous = globalThis.fetch
+  const live = { ...payload.sampling, ...(sampling ?? {}) }
+  const held = { ...payload.balance, ...(balance ?? {}) }
   globalThis.fetch = async (url, options) => {
-    calls.push({ url: String(url), method: options?.method ?? 'GET', body: options?.body })
-    if (options?.method === 'POST') {
-      posts.push({ url: String(url), body: options.body === undefined ? undefined : JSON.parse(options.body) })
-      return { ok: true, status: 200, json: async () => ({ ok: true, sampling: answer.sampling }) }
+    const target = String(url)
+    calls.push({ url: target, method: options?.method ?? 'GET', body: options?.body })
+    if (refuse.includes(target)) {
+      return { ok: false, status: 503, json: async () => ({ error: 'host is unreachable' }) }
     }
-    return { ok: true, status: 200, json: async () => answer }
+    if (options?.method === 'POST') {
+      posts.push({ url: target, body: options.body === undefined ? undefined : JSON.parse(options.body) })
+      if (target === '/dsh-balance/settings') Object.assign(live, JSON.parse(options.body))
+      return { ok: true, status: 200, json: async () => ({ ok: true, sampling: live }) }
+    }
+    return { ok: true, status: 200, json: async () => answer ?? { ...payload, sampling: live, balance: held } }
   }
   return () => {
     globalThis.fetch = previous
@@ -708,6 +731,92 @@ test('the pill opens the anchored panel, and the catch layer closes it', async (
   }
 })
 
+test('Escape in a day row discards the edit without closing the panel', async () => {
+  const { exported, react } = await loadClient()
+  const ctx = clientContext()
+  exported.apply(ctx)
+  const Readout = ctx.registered.find((entry) => entry.options.id === 'dsh-balance').component
+  // The panel's Escape handler is on the document, so the test needs one. Only `Escape`
+  // and the day rows' inputs matter here, so the handlers it collects are enough.
+  const keys = []
+  const previousDocument = globalThis.document
+  globalThis.document = {
+    hidden: false,
+    addEventListener: (type, fn) => { if (type === 'keydown') keys.push(fn) },
+    removeEventListener: (type, fn) => {
+      if (type === 'keydown') keys.splice(keys.indexOf(fn), 1)
+    },
+  }
+  const restore = stubFetch()
+  try {
+    const props = { t: fakeT, sessionId: 'session-7', useProjection: () => undefined }
+    react.beginRender()
+    textOf(react.createElement(Readout, props))
+    await turn()
+    react.beginRender()
+    find(react.createElement(Readout, props), (element) => element.type === 'button' && element.props?.className === 'dshb_pill')[0].props.onClick()
+    react.beginRender()
+    const open = () => find(react.createElement(Readout, props), (element) => element.props?.role === 'dialog').length
+    assert.equal(open(), 1, 'the panel is open')
+
+    const press = (target) => {
+      for (const handler of [...keys]) handler({ key: 'Escape', target })
+      react.beginRender()
+    }
+    // Both handlers see the same event: the input answers it by putting the stored value
+    // back, the panel's own listener is the one that would close.
+    press({ tagName: 'INPUT' })
+    assert.equal(open(), 1, 'a day row discarding its edit does not take the panel with it')
+    press({ tagName: 'div' })
+    assert.equal(open(), 0, 'Escape from the panel itself closes it')
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document
+    else globalThis.document = previousDocument
+    react.stop()
+    restore()
+  }
+})
+
+test('a refused manual refresh says so in the footer, and the next attempt clears it', async () => {
+  const { exported, react } = await loadClient()
+  const calls = []
+  const restore = stubFetch({ calls, refuse: ['/dsh-balance/refresh'] })
+  try {
+    const mount = () => {
+      react.beginRender()
+      return react.createElement(exported.__internals.Popover, {
+        t: (key, args) => (args === undefined ? key : `${key}: ${args.error}`),
+        state: { status: 'ok', payload, error: null, at: Date.now() },
+        projection: { cost: 0.33, currency: 'USD' },
+        onClose: () => {},
+      })
+    }
+    const refresh = () => find(mount(), (element) => element.type === 'button' && element.props?.className === 'dshb_btn')[0]
+    const footer = () => textOf(find(mount(), (element) => element.props?.className === 'dshb_popover_foot')[0])
+
+    assert.doesNotMatch(footer(), /refreshFailed/, 'nothing is reported before the reader asks')
+    refresh().props.onClick()
+    await turn()
+    assert.equal(calls.some((call) => call.url === '/dsh-balance/refresh'), true, 'the Host was asked to sample')
+    assert.match(footer(), /common\.refreshFailed: host is unreachable/,
+      'a refused refresh is reported where it was pressed, not swallowed')
+
+    // The Host answers the next attempt, so the failure must not stay on screen.
+    restore()
+    const quiet = stubFetch({ calls })
+    try {
+      refresh().props.onClick()
+      await turn()
+      assert.doesNotMatch(footer(), /refreshFailed/, 'a refresh that works leaves no error behind')
+    } finally {
+      quiet()
+    }
+  } finally {
+    react.stop()
+    restore()
+  }
+})
+
 test('the settings tab posts the fields it edits', async () => {
   const { exported, react } = await loadClient()
   const posts = []
@@ -732,6 +841,158 @@ test('the settings tab posts the fields it edits', async () => {
   }
 })
 
+test('a poll does not replace what the reader is typing in the settings tab', async () => {
+  const { exported, react } = await loadClient()
+  const posts = []
+  const restore = stubFetch({ posts })
+  try {
+    /** Mount the tab on the payload the Host last sent, as a render pass would. */
+    const mount = (current) => {
+      react.beginRender()
+      return react.createElement(exported.__internals.Settings, {
+        t: (key) => key,
+        state: { status: 'ok', payload: current, error: null, at: Date.now() },
+      })
+    }
+    /**
+     * The seven inputs of the tab, in the order the grid renders them.
+     *
+     * Two passes, as the panel's height test does: the first one runs the effect that
+     * seeds the draft from the payload, the second reads what it stored.
+     */
+    const fields = (current) => {
+      textOf(mount(current))
+      return find(mount(current), (element) => element.type === 'input').map((input) => input.props.value)
+    }
+
+    assert.deepEqual(fields(payload), ['USD', 'Europe/Moscow', 300000, 15000, 10, 5, 2],
+      'every field is prefilled from the payload')
+
+    // The reader types a currency, in the case a reader types one. Two polls land while
+    // they are still typing: the Host answers each with the same settings it was asked
+    // for, but the browser builds a new payload object for every read, so the tab is
+    // re-rendered with a fresh `state`.
+    find(mount(payload), (element) => element.type === 'input')[0].props.onChange({ target: { value: 'eur' } })
+    const polled = { ...payload, sampling: { ...payload.sampling, clientPollIntervalMs: 30000 } }
+    assert.equal(fields(polled)[0], 'eur', 'the first poll leaves the typed currency alone')
+    assert.equal(fields({ ...polled, sampling: { ...polled.sampling, clientPollIntervalMs: 45000 } })[0], 'eur',
+      'and so does the second')
+
+    // A field nobody has touched still follows the Host, which is what "prefilled from
+    // the payload" asks for: the day zone here is the one the reader never opened.
+    const reZoned = {
+      ...payload,
+      ledger: { ...payload.ledger, zone: 'Asia/Kolkata' },
+      sampling: { ...payload.sampling, clientPollIntervalMs: 30000 },
+    }
+    assert.equal(fields(reZoned)[1], 'Asia/Kolkata', 'an untouched field follows the payload')
+
+    // A save is the Host's answer, so what the payload says afterwards is what the tab
+    // shows — and the Host stores a currency upper-cased, so the tab follows the Host's
+    // spelling rather than keeping the reader's.
+    const apply = find(mount(reZoned), (element) => element.props?.className === 'dshb_btn dshb_btn_primary')[0]
+    await apply.props.onClick()
+    const written = posts.filter((post) => post.url === '/dsh-balance/settings').at(-1)
+    assert.equal(written.body.currency, 'EUR', 'the typed value is what reaches the Host')
+    const stored = {
+      ...reZoned,
+      balance: { ...reZoned.balance, currency: 'EUR', currencyPreference: 'EUR' },
+      sampling: { ...reZoned.sampling, clientPollIntervalMs: 30000 },
+    }
+    assert.deepEqual(fields(stored), ['EUR', 'Asia/Kolkata', 300000, 30000, 10, 5, 2],
+      'the saved draft is re-seeded from the payload the write produced, touched fields included')
+  } finally {
+    react.stop()
+    restore()
+  }
+})
+
+test('a written cadence and a session switch re-arm the poller, and only once', async () => {
+  const { exported } = await loadClient()
+  const armed = []
+  const cleared = []
+  const previousTimeout = globalThis.setTimeout
+  const previousClear = globalThis.clearTimeout
+  const live = new Set()
+  // The store owns its timer, so a test watches what it armed rather than waiting for a
+  // wall-clock cadence to expire. Each handle is a real timer pushed far enough out that
+  // it cannot fire during the test, and `live` is what has to be cleaned up afterwards.
+  globalThis.setTimeout = (fn, ms) => {
+    armed.push(ms)
+    const handle = previousTimeout(fn, 3600_000)
+    live.add(handle)
+    return handle
+  }
+  globalThis.clearTimeout = (handle) => {
+    cleared.push(handle)
+    live.delete(handle)
+    previousClear(handle)
+  }
+  const previousFetch = globalThis.fetch
+  let cadence = 15000
+  // A read the test parks, so a re-arm can be asked for while one is in flight — the
+  // shape that once left the Host's sampler with two live timers.
+  let parked = null
+  let held = false
+  globalThis.fetch = async (url, options) => {
+    if (held) await new Promise((resolve) => { parked = resolve })
+    if (options?.method === 'POST') {
+      const body = JSON.parse(options.body)
+      if (typeof body.clientPollIntervalMs === 'number') cadence = body.clientPollIntervalMs
+      return { ok: true, status: 200, json: async () => ({ ok: true, sampling: { clientPollIntervalMs: cadence } }) }
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ ...payload, sampling: { ...payload.sampling, clientPollIntervalMs: cadence } }),
+    }
+  }
+  try {
+    const store = exported.__internals.createStore()
+    const stop = store.subscribe(() => {})
+    // The read the first subscriber starts is the one that answers with a cadence, so the
+    // timer it arms carries the interval the Host reported.
+    await store.refresh()
+    await turn()
+    assert.deepEqual(armed, [15000], 'the first read arms the poll on the cadence the Host sent')
+
+    // Writing a different cadence must not wait for the timer that was already armed:
+    // the spec puts it at once, and an old cadence of an hour would ignore the new one
+    // for an hour.
+    await store.saveSettings({ clientPollIntervalMs: 45000 })
+    assert.deepEqual(armed, [15000, 45000], 'a written cadence re-arms the poller with the new interval')
+    assert.deepEqual(cleared.length, 1, 'the timer armed on the old interval is dropped, not left to fire')
+
+    store.setSessionId('session-9')
+    await turn()
+    assert.deepEqual(armed, [15000, 45000, 45000], 'a session switch reschedules too, and arms one timer')
+    assert.deepEqual(cleared.length, 2)
+
+    // The same call while a read is out: it settles into the timer that was armed for
+    // it, and the chain carries on at the interval that is current.
+    const before = armed.length
+    held = true
+    const pending = store.refresh()
+    await turn()
+    store.setSessionId('session-10')
+    parked()
+    held = false
+    await pending
+    await turn()
+    assert.equal(live.size, 1, 'a re-arm during a read in flight leaves one timer, not two')
+    assert.equal(armed.length, before + 1, 'and arms it exactly once')
+    assert.equal(armed.at(-1), 45000, 'on the cadence the Host last reported')
+
+    stop()
+    assert.equal(live.size, 0, 'the last subscriber leaving leaves no timer behind')
+  } finally {
+    for (const handle of live) previousClear(handle)
+    globalThis.setTimeout = previousTimeout
+    globalThis.clearTimeout = previousClear
+    globalThis.fetch = previousFetch
+  }
+})
+
 test('a day row saves and clears a manual correction through the Host', async () => {  const { exported, react } = await loadClient()
   const posts = []
   const restore = stubFetch({ posts })
@@ -753,6 +1014,110 @@ test('a day row saves and clears a manual correction through the Host', async ()
     await reset.props.onClick()
     const overrides = posts.filter((post) => post.url === '/dsh-balance/overrides')
     assert.deepEqual(overrides.at(-1).body, { date: '2026-09-16', amount: null })
+  } finally {
+    react.stop()
+    restore()
+  }
+})
+
+test('a day row whose write is in flight is not written a second time', async () => {
+  const { exported, react } = await loadClient()
+  const posts = []
+  const restore = stubFetch({ posts })
+  try {
+    const ledger = { ...payload.ledger, rows: [payload.ledger.rows[1]] }
+    const mount = () => {
+      react.beginRender()
+      return react.createElement(exported.__internals.DaysTable, { t: (key) => key, ledger, currency: 'USD' })
+    }
+    const input = () => find(mount(), (element) => element.type === 'input')[0]
+    const overrides = () => posts.filter((post) => post.url === '/dsh-balance/overrides')
+
+    // The reader types an amount and presses Enter twice. The second press is the one a
+    // real reader can land inside a single frame, so both presses carry the handlers of
+    // the same render — the only thing that can tell them apart is the row's own state.
+    input().props.onChange({ target: { value: '1.25' } })
+    const row = input()
+    row.props.onKeyDown({ key: 'Enter' })
+    row.props.onKeyDown({ key: 'Enter' })
+    assert.deepEqual(overrides().map((post) => post.body), [{ date: '2026-09-18', amount: 1.25 }],
+      'two Enters on one row post one correction')
+
+    assert.equal(input().props.disabled, true, 'the row cannot be edited while its write is in flight')
+    // Focus leaves while the request is out, which is the other way a commit is asked
+    // for twice: the draft is still there, and blur commits it.
+    row.props.onBlur()
+    assert.equal(overrides().length, 1, 'losing focus while the write is in flight posts nothing more')
+    await turn()
+    assert.equal(overrides().length, 1, 'and nothing more once the Host has answered either')
+    assert.equal(input().props.disabled, false, 'and the row is editable again once the Host has answered')
+
+    // The reset control writes through the same pair, so a double click is one request.
+    const corrected = { ...ledger, rows: [{ ...ledger.rows[0], override: 3, overrideAt: NOW - HOUR, measuredAfter: 0 }] }
+    const resetRow = () => {
+      react.beginRender()
+      return find(react.createElement(exported.__internals.DaysTable, { t: (key) => key, ledger: corrected, currency: 'USD' }),
+        (element) => element.type === 'button' && element.props?.className === 'dshb_btn')[0]
+    }
+    const reset = resetRow()
+    reset.props.onClick()
+    reset.props.onClick()
+    assert.deepEqual(overrides().map((post) => post.body.amount), [1.25, null],
+      'two clicks on the reset post one removal')
+  } finally {
+    react.stop()
+    restore()
+  }
+})
+
+test('a day row in flight claims only itself, and a refusal gives it back', async () => {
+  const { exported, react } = await loadClient()
+  const posts = []
+  const restore = stubFetch({ posts })
+  try {
+    const mount = () => {
+      react.beginRender()
+      return react.createElement(exported.__internals.DaysTable, { t: (key) => key, ledger: payload.ledger, currency: 'USD' })
+    }
+    // The rows are newest first, so the first input is today and the second yesterday.
+    const inputs = () => find(mount(), (element) => element.type === 'input')
+    const overrides = () => posts.filter((post) => post.url === '/dsh-balance/overrides').map((post) => post.body)
+    const enter = (index) => inputs()[index].props.onKeyDown({ key: 'Enter' })
+
+    // A write is in flight from the POST to the re-read behind it, which is long enough
+    // for the reader to reach the next row and press Enter there too.
+    enter(0)
+    enter(1)
+    // And back to the first row, whose own request has still not been answered.
+    enter(0)
+    assert.deepEqual(overrides(), [
+      { date: '2026-09-18', amount: 0.39 },
+      { date: '2026-09-17', amount: 1.5 },
+    ], 'the second day is not blocked by the first, and the first keeps its own claim')
+    assert.deepEqual(inputs().map((input) => input.props.disabled), [true, true], 'both rows are locked while both writes are out')
+    await turn()
+    assert.deepEqual(inputs().map((input) => input.props.disabled), [false, false], 'and both are editable again')
+
+    // A refusal is the one thing that has to give the row back, or the reader cannot
+    // correct the amount the Host would not take.
+    restore()
+    const refused = stubFetch({ posts, refuse: ['/dsh-balance/overrides'] })
+    try {
+      inputs()[0].props.onChange({ target: { value: '2' } })
+      enter(0)
+      await turn()
+      assert.equal(inputs()[0].props.disabled, false, 'a refused write unlocks its row')
+      assert.match(textOf(mount()), /host is unreachable/, 'and the tab says what the Host refused')
+    } finally {
+      refused()
+    }
+    const answer = stubFetch({ posts })
+    try {
+      enter(0)
+      assert.deepEqual(overrides().at(-1), { date: '2026-09-18', amount: 2 }, 'so the retry reaches the Host')
+    } finally {
+      answer()
+    }
   } finally {
     react.stop()
     restore()
@@ -1621,6 +1986,17 @@ test('the arrow keys walk the Steps of the visible slice', async () => {
   assert.equal(arrowDelta({ key: 'ArrowLeft', target: { tagName: 'textarea' } }), 0)
   assert.equal(arrowDelta({ key: 'ArrowLeft', target: { isContentEditable: true } }), 0)
   assert.equal(arrowDelta(null), 0)
+
+  // The panel's `Escape` handler asks the same question and nothing else: a field the
+  // reader is typing in owns the key, whatever else is mounted behind it.
+  const { editingTarget } = exported.__internals
+  assert.equal(editingTarget({ target: { tagName: 'INPUT' } }), true)
+  assert.equal(editingTarget({ target: { tagName: 'textarea' } }), true)
+  assert.equal(editingTarget({ target: { tagName: 'SELECT' } }), true, 'the tag name is read case-insensitively')
+  assert.equal(editingTarget({ target: { isContentEditable: true } }), true)
+  assert.equal(editingTarget({ target: { tagName: 'BUTTON' } }), false, 'a button is the panel speaking, not the reader')
+  assert.equal(editingTarget({ target: null }), false)
+  assert.equal(editingTarget(undefined), false)
 
   assert.equal(nextSelection(-1, 1, 5), 0, 'the right arrow enters at the first Step')
   assert.equal(nextSelection(-1, -1, 5), 4, 'the left arrow enters at the last')
