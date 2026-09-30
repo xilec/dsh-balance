@@ -45,8 +45,10 @@ stop where a draft is required:
    `npm run lint` and `npm test`, prints a draft commit message. It does not commit. In a
    kernel-linked development tree the lint tools are absent, so this fails with a message
    about `npm ci --ignore-scripts`; that is the rule, not an obstacle to bypass — do the
-   work in a scratch copy under `./tmp/` with its own `node_modules` when the tools are
-   needed, never by replacing the kernel symlink in the working tree.
+   work in a scratch tree under `./tmp/` when the tools are needed, never by replacing the
+   kernel symlink in the working tree. A scratch tree has to be a release tree of its own
+   (see below), and the version it writes lands there, not in the checkout you release
+   from.
 3. Commit the bump with the drafted message, **show it first**, then push. The bump has to
    be on `origin/main` before anything is published; `publish` refuses a commit that is not.
 4. `npm run release:notes` — writes the notes draft to `tmp/release-notes-<version>.md` from
@@ -59,6 +61,31 @@ stop where a draft is required:
    one step (`gh` creates the tag on the remote and pushes it), so there is no tag to push
    afterwards; `git fetch --tags` afterwards to see it locally.
 6. Report the release URL and stop.
+
+### Scratch trees for `release:prepare`
+
+Every release command acts on one tree: the root of the git repository it is run in, and
+it has to be run in that root. A directory inside a repository, a copy with no repository
+of its own, a bare clone and a repository that is not the plugin are each refused with a
+sentence naming the tree that was found and the one that was wanted, and nothing is
+written. `release:check` prints `tree: <path>` as its first line, so a run always says
+which checkout the rest of its output is about.
+
+A scratch tree under `./tmp/` is inside this repository, so it has to be a git root of its
+own:
+
+```sh
+git worktree add --detach tmp/prepare   # one command: own root, own history, clean tree
+cd tmp/prepare && npm ci --ignore-scripts
+npm run release:prepare -- 0.3.0
+cd ../.. && git -C tmp/prepare diff | git apply   # the bump, back in the checkout
+```
+
+A `tar` or `cp` copy of a worktree has no `.git` at all and is refused until `git init`
+makes it a root — and then its clean-tree check wants a first commit, so `git add -A &&
+git commit` as well. Because the scratch tree is now the tree the script writes, the four
+rewritten files are yours to bring back; the script no longer edits the checkout above it,
+which is the point.
 
 Nothing in a release skips the draft steps: step 4 is a GitHub-bound text and step 3 is a
 commit, so both wait for the user, even when the feature that precedes them was confirmed

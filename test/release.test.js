@@ -1,11 +1,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   checkRefusals, dirtyFromStatus, ghReleaseArgs, notAheadReason, notCurrentReason, placeVersions, rewriteVersionIn,
   slugFromOrigin, VERSION_PLACES,
 } from '../scripts/release.mjs'
 import {
-  compareVersions, extractWhatChanges, extractWhy, humanizeChangeName, parseVersion, renderNotes,
+  compareVersions, extractWhatChanges, extractWhy, humanizeChangeName, parseVersion, releaseTree, renderNotes,
   subjectOf, wrap,
 } from '../scripts/release-notes.mjs'
 
@@ -257,10 +262,24 @@ test('the check refuses a mismatched version, a dirty tree and an old version', 
     ['0.1.0 is not ahead of the last tag v0.1.0'],
   )
   assert.deepEqual(
-    checkRefusals({ ...ready, lastTag: null, current: '0.0.1' }),
+    checkRefusals({ ...ready, current: '0.0.1', lastTag: null }),
     [],
     'the first release has no tag to be ahead of',
   )
+  assert.deepEqual(
+    checkRefusals({ ...ready, current: null, missing: ['package-lock.json', 'src/index.js'] }),
+    [
+      'the version files do not all carry the same x.y.z version',
+      'the tree has no package-lock.json, src/index.js — a release reads the version from all four places',
+    ],
+    'a tree missing a version place says which one, instead of failing on the read',
+  )
+  assert.deepEqual(
+    checkRefusals({ ...ready, missing: ['client/client.js'] }),
+    ['the tree has no client/client.js — a release reads the version from all four places'],
+    'and the missing place is named even when the others agree',
+  )
+  assert.deepEqual(checkRefusals({ ...ready, missing: [] }), [], 'a tree with all four places is not missing any')
 })
 
 test('the status dump is parsed into paths, and tmp/ is the one exemption', () => {
@@ -306,4 +325,125 @@ test('gh is called with the release, the repository and the reviewed notes', () 
     '--target', 'abc123',
   ])
   assert.ok(!args.includes('gh'), 'gh is the program, never one of its arguments')
+})
+
+// --- which tree a release acts on --------------------------------------------------
+//
+// The four version files, the notes draft and every `git` call hang off one directory,
+// and `AGENTS.md` sends the maintainer to a scratch copy under `tmp/` — a directory
+// inside the checkout, with no repository of its own. `git rev-parse --show-toplevel`
+// answered with the checkout above the copy, and `release:prepare` in the copy rewrote
+// *that* checkout's version files. These cases are filesystem-shaped, so they get
+// filesystem-shaped fixtures: a real directory, a real `git init`, no mocked git.
+
+const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts')
+
+/**
+ * The tests below need a `git` to make a repository with. `nix flake check` runs this
+ * suite in a sandbox whose build inputs are `nodejs` alone, so they are skipped there
+ * with the reason stated; `npm test` runs them (design D7).
+ */
+const needsGit = { skip: spawnSync('git', ['--version']).status === 0 ? false : 'git is not installed here' }
+
+/**
+ * A throwaway git repository under the system temp directory: one commit, and the
+ * plugin's manifest unless `manifest` is null. Removed when the test ends, so a
+ * failing assertion cannot leave a repository behind.
+ *
+ * `realpathSync` because the resolver compares the directory it was given with what
+ * git reports, and on a system where the temp directory is a symlink the two would
+ * differ for a reason that has nothing to do with the tree. The commit identity is
+ * passed on the command line so the developer's own git configuration cannot decide
+ * whether a fixture is created.
+ */
+function tempRepo(t, { manifest = MANIFEST } = {}) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-release-tree-')))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' })
+  git('init', '-q', '-b', 'main')
+  if (manifest !== null) {
+    writeFileSync(join(root, 'package.json'), manifest)
+    // Tracked, not just present: a worktree checks the commit out, so a manifest
+    // left untracked would leave the worktree without the file under test.
+    git('add', '-A')
+  }
+  git('-c', 'user.email=release@example.com', '-c', 'user.name=release', 'commit', '-q', '--allow-empty', '-m', 'scratch')
+  return { root, git }
+}
+
+test('the tree is the repository root, and a copy inside one is refused by name', needsGit, (t) => {
+  const { root } = tempRepo(t)
+  assert.deepEqual(releaseTree(root), { root }, 'the root is the one tree the rule accepts')
+
+  const scratch = join(root, 'tmp', 'scratch')
+  mkdirSync(scratch, { recursive: true })
+  const found = releaseTree(scratch)
+  assert.ok('refusal' in found, 'a directory inside a checkout is not that checkout')
+  assert.match(found.refusal, /is not the root of a repository/)
+  assert.ok(found.refusal.includes(scratch), 'the refusal names the directory it was run in')
+  assert.ok(found.refusal.includes(`rooted at ${root}`), 'and the tree it would have written to')
+  assert.match(found.refusal, /git init/, 'and what makes the copy a tree of its own')
+})
+
+test('a worktree root is a tree of its own, even inside another repository', needsGit, (t) => {
+  const { root, git } = tempRepo(t)
+  const worktree = join(root, 'wt')
+  git('worktree', 'add', '-q', '--detach', worktree)
+  assert.deepEqual(releaseTree(worktree), { root: worktree }, 'the worktree root, not the repository it sits in')
+
+  const inside = join(worktree, 'scripts')
+  mkdirSync(inside)
+  const found = releaseTree(inside)
+  assert.match(found.refusal, /is not the root of a repository/)
+  assert.ok(found.refusal.includes(`rooted at ${worktree}`), 'a directory inside a worktree names the worktree')
+})
+
+test('a copy with no repository is refused until it has one of its own', needsGit, (t) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-release-tree-')))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  writeFileSync(join(root, 'package.json'), MANIFEST)
+
+  const loose = releaseTree(root)
+  assert.ok('refusal' in loose, 'a manifest with no repository around it is not a tree to release')
+  assert.match(loose.refusal, /is not inside a git repository/)
+
+  execFileSync('git', ['init', '-q'], { cwd: root })
+  assert.deepEqual(releaseTree(root), { root }, 'after `git init` the copy is a tree of its own')
+})
+
+test('a bare clone has no working tree to write a version into', needsGit, (t) => {
+  const { root, git } = tempRepo(t)
+  const bare = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-release-bare-')))
+  t.after(() => rmSync(bare, { recursive: true, force: true }))
+  git('clone', '-q', '--bare', root, bare)
+
+  const found = releaseTree(bare)
+  assert.ok('refusal' in found, 'a bare repository is a repository without a tree')
+  assert.match(found.refusal, /is a bare repository/)
+  assert.match(found.refusal, /without --bare/, 'and the command that gives it one')
+})
+
+test('a repository that is not the plugin is refused by its missing manifest', needsGit, (t) => {
+  const { root } = tempRepo(t, { manifest: null })
+  const found = releaseTree(root)
+  assert.ok('refusal' in found, 'a git root is not by itself the plugin checkout')
+  assert.match(found.refusal, /holds no package\.json/)
+  assert.ok(found.refusal.includes(root), 'the refusal names the tree it found')
+})
+
+test('both scripts refuse, by name, a tree they were not run in', needsGit, (t) => {
+  const { root } = tempRepo(t)
+  const scratch = join(root, 'tmp', 'scratch')
+  mkdirSync(scratch, { recursive: true })
+
+  const check = spawnSync(process.execPath, [join(SCRIPTS, 'release.mjs'), 'check', '0.3.0'], { cwd: scratch, encoding: 'utf8' })
+  assert.equal(check.status, 1, 'a check that cannot name its tree refuses')
+  assert.match(check.stderr, /is not the root of a repository/)
+  assert.ok(check.stderr.includes(scratch) && check.stderr.includes(`rooted at ${root}`), 'both trees are named')
+  assert.doesNotMatch(check.stdout, /version:/, `no version is read from the tree above: ${check.stdout}`)
+
+  const notes = spawnSync(process.execPath, [join(SCRIPTS, 'release-notes.mjs'), '--stdout'], { cwd: scratch, encoding: 'utf8' })
+  assert.equal(notes.status, 1, 'a draft cannot be assembled about a tree that was not named')
+  assert.match(notes.stderr, /is not the root of a repository/)
+  assert.equal(notes.stdout, '', 'no notes are drafted about the tree above')
 })

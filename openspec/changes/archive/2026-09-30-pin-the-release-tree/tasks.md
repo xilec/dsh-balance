@@ -1,0 +1,8 @@
+# Tasks
+
+- [x] 1.1 `scripts/release-notes.mjs`: add `releaseTree`, which resolves the git root from the working directory and refuses unless the working directory is it and it holds the plugin's `package.json` (D1–D4).
+- [x] 1.2 `scripts/release-notes.mjs`: thread the tree through every path and every `git` call — `lastTag`, `releaseRange`, `archivesInRange`, `archiveOrder`, `commitsInRange`, `currentVersion`, `buildDraft`, the notes draft under `tmp/`, and `-C <tree>` on each `git` invocation (D5).
+- [x] 1.3 `scripts/release.mjs`: use the shared resolver, give `repoSlug` and `lastTag` the tree, run `npm run lint` / `npm test` with `cwd` set to it, open the report with `tree: <path>`, and refuse a tree that is missing a version place by naming it instead of reading it (D5, D6, D2).
+- [x] 1.4 `test/release.test.js`: cover the resolver with real directories and a real `git init` — a directory inside a repository, the root itself, a worktree root and its subdirectory, a copy with no git, a bare clone, a repository without the manifest — and run both scripts as processes from inside another repository, asserting the refusal names both trees and no version is reported (D7).
+- [x] 1.5 `AGENTS.md` §Releasing and `CONTRIBUTING.md`: a scratch tree has to be a repository root of its own (`git worktree add --detach tmp/prepare`, or `git init` in a `tar` copy), and the version it writes is brought back to the real checkout explicitly.
+- [x] 1.6 Gates: `npm test`, the manual reproduction of the defect and the fix, `nix flake check`, knip + jscpd in a scratch copy, `openspec validate --all`.
