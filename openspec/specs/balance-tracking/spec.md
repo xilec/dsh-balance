@@ -268,9 +268,15 @@ nearby one — and MUST NOT record an instant for a balance it has not read. The
 MUST then be that base plus everything measured since: the drop from the anchor balance to the
 newest sample of the same day, plus the credits recorded after the anchor. The added part MUST
 be measured only when the anchor lies inside that day's own span of samples — at or after the
-day's first sample and at or before its last — because a window that starts before the day
-began carries the previous day's spend, and one that ends after the last sample has nothing
-left to measure. An override written without an anchor (the older file format) MUST stay frozen
+day's first sample and at or before its last. What that guarantees is that a base is only
+ever added to by a drop between two instants of the same ledger day: the base is a measurement
+of the day taken from its first sample onward, so an anchor before that first sample has no
+measurement of the day to start from, and an anchor after the last has nothing left to
+measure. An anchor before the day's first sample therefore adds nothing even when it lies on
+that same day, minutes earlier, before any sample of the day exists. Nothing is lost by that:
+the row keeps reporting the day's own sampled spend as its sampled value beside the
+correction, and re-entering the correction once the anchor falls inside the day restores the
+sampled part. An override written without an anchor (the older file format) MUST stay frozen
 at its amount. A day with an override MUST ignore its sampled value.
 
 #### Scenario: A corrected day keeps filling
@@ -291,9 +297,21 @@ at its amount. A day with an override MUST ignore its sampled value.
 
 #### Scenario: A base anchored before the day began
 
-- **WHEN** the anchor is earlier than the first sample of the day it corrects, so the drop it
+- **WHEN** the anchor is earlier than the first sample of the day it corrects, so the window it
   would be measured over starts on the previous day
 - **THEN** nothing is added to the base, because that window carries another day's spend
+
+#### Scenario: A base anchored before the day's first sample, on that same day
+
+- **WHEN** the reader corrects a day that has no sample yet, and the anchor is a reading taken
+  on that same day before its first sample — a poll succeeded in the first minutes of the day
+  with the balance unchanged, and too little time had passed since the previous day's last
+  sample for the heartbeat to fire, so the reader saw that reading and anchored to it; later
+  polls then append the day's first and second samples
+- **THEN** nothing is added to the base, even though the window would lie inside the day,
+  because the base is a measurement taken from the day's first sample onward; the day's
+  sampled spend is still reported as the row's sampled value, and re-entering the correction
+  once the anchor falls inside the day adds the sampled part
 
 #### Scenario: A correction made while the newest reading is a failed poll's
 
