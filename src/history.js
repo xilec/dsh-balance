@@ -13,15 +13,16 @@
  * which for the usual sampling cadence (minutes) is exact; an interval spanning
  * days is marked `coarse`, and per-day overrides exist for exactly that case.
  *
- * A manual override carries the amount the user typed, the instant they typed it and
- * the balance at that instant (`{ amount, at, balance }`). It is a *base*, not a
+ * A manual override carries the amount the user typed, the instant their anchor balance was
+ * read and that balance (`{ amount, at, balance }`). It is a *base*, not a
  * frozen value: the day is `base + (balanceAt − newestBalance) + creditsSince`, which
  * is the same window formula as everywhere else, so the figure keeps filling while
  * the day runs and settles on the last sample once it ends. Anchoring on a balance
  * rather than summing the deltas that happen to arrive afterwards keeps the
  * rounding error of a day to one subtraction instead of hundreds of them. An entry
  * with no balance (or a bare number, the oldest shape) has nothing to measure
- * against and stays frozen.
+ * against and stays frozen, and so does an anchor the day's own samples cannot
+ * measure from — see `addedSince`.
  *
  * Pure module: no imports, no clock, no IO. The caller supplies samples,
  * overrides and "now".
@@ -102,6 +103,10 @@ function formatterFor(zone) {
 /**
  * Calendar fields of an instant in the host's own zone.
  *
+ * Assembled for the two lookups below and never handed to a caller whole: the ledger wants the
+ * day and the thinning pass wants the hour, and one function returning a pair meant the
+ * `formatToParts` slow path walked the parts array for a field the day-only caller never wanted.
+ *
  * @param tsMs - epoch milliseconds.
  * @returns `{ dateKey, hour }`, the key being `YYYY-MM-DD`.
  */
@@ -113,20 +118,48 @@ function hostFields(tsMs) {
 }
 
 /**
- * Calendar fields of an instant in a zone.
+ * The zone's own answer for an instant: its formatter when the runtime knows the zone, the
+ * host's fields when it does not, which is the fallback the read route requires.
  *
- * The hour travels with the day because the retention thinning buckets on the pair: one sample
- * per clock hour of this zone, which is the only hour whose last sample is a sample of the day
- * the ledger attributes it to.
+ * @param tsMs - epoch milliseconds.
+ * @param zone - IANA zone name, or `local`/undefined for the host's own zone.
+ * @returns the formatter entry (or null) and the host's fields, whichever answers.
+ */
+function zoneSource(tsMs, zone) {
+  if (!zone || zone === 'local') return { entry: null, host: hostFields(tsMs) }
+  const entry = formatterFor(zone)
+  return entry === null ? { entry: null, host: hostFields(tsMs) } : { entry, host: null }
+}
+
+/** The `YYYY-MM-DD` day key of an instant in a zone. */
+export function dayKeyOf(tsMs, zone) {
+  const { entry, host } = zoneSource(tsMs, zone)
+  if (entry === null) return host.dateKey
+  if (entry.hourAt < 0) {
+    const parts = entry.format.formatToParts(tsMs)
+    const get = (type) => parts.find((p) => p.type === type)?.value ?? ''
+    return `${get('year')}-${get('month')}-${get('day')}`
+  }
+  return entry.format.format(tsMs).slice(0, 10)
+}
+
+/**
+ * The retention thinning's bucket for an instant: its clock hour *of the ledger's zone*, with
+ * the day the ledger attributes it to.
+ *
+ * A UTC hour straddles local midnight wherever the offset is not a whole number of hours
+ * (+05:30, +05:45, +09:30), and then the last sample kept before the boundary is not a sample of
+ * the day it belongs to — the thinned history loses that day's own last hour. The pair is
+ * assembled here, in the one caller that reads both halves, so the day-only callers never pay
+ * for the hour (and the hour-only one would be meaningless without the day).
  *
  * @param tsMs - epoch milliseconds.
  * @param zone - IANA zone name, or `local`/undefined for the host's own zone.
  * @returns `{ dateKey, hour }`, the key being `YYYY-MM-DD`.
  */
-function zoneFields(tsMs, zone) {
-  if (!zone || zone === 'local') return hostFields(tsMs)
-  const entry = formatterFor(zone)
-  if (entry === null) return hostFields(tsMs)
+function hourBucketOf(tsMs, zone) {
+  const { entry, host } = zoneSource(tsMs, zone)
+  if (entry === null) return host
   if (entry.hourAt < 0) {
     const parts = entry.format.formatToParts(tsMs)
     const get = (type) => parts.find((p) => p.type === type)?.value ?? ''
@@ -134,11 +167,6 @@ function zoneFields(tsMs, zone) {
   }
   const text = entry.format.format(tsMs)
   return { dateKey: text.slice(0, 10), hour: Number(text.slice(entry.hourAt, entry.hourAt + 2)) }
-}
-
-/** The `YYYY-MM-DD` day key of an instant in a zone. */
-export function dayKeyOf(tsMs, zone) {
-  return zoneFields(tsMs, zone).dateKey
 }
 
 /** The day keys of the `count` days ending at (and including) `endKey`, oldest first. */
@@ -275,7 +303,7 @@ export function buildLedger(options) {
   // One calendar lookup per sample, reused by everything below. The fold used to ask for the
   // day of both ends of every interval, which is two lookups per interval, and the manual
   // bases asked again for every sample of their own day.
-  const dayKeys = series.map((one) => zoneFields(one.t, zone).dateKey)
+  const dayKeys = series.map((one) => dayKeyOf(one.t, zone))
 
   const sampled = new Map()
   const coarseKeys = new Set()
@@ -314,13 +342,18 @@ export function buildLedger(options) {
   }
 
   /**
-   * What the day spent since a manual base was entered.
+   * What the day spent since a manual base was anchored.
    *
-   * The base stores the account balance of the moment it was entered, so the added
-   * part is the drop from that balance to the newest sample of the same day, plus
-   * the credits that arrived in between (a top-up raises the balance back and must
-   * not look like negative spend). One subtraction, one credit sum — no per-interval
-   * rounding to accumulate.
+   * The base stores the account balance of one named instant, so the added part is the drop
+   * from that balance to the newest sample of the same day, plus the credits that arrived in
+   * between (a top-up raises the balance back and must not look like negative spend). One
+   * subtraction, one credit sum — no per-interval rounding to accumulate.
+   *
+   * The window is `[anchor, newest sample of the day]`, and it only measures one day when both
+   * of its ends are inside that day. A correction made after the day's last sample has nothing
+   * left to measure, and one anchored before the day's first sample would measure a window
+   * reaching back over midnight — the previous day's spend, which the reader's own figure for
+   * this day cannot absorb. Both leave the base as the reader's final word.
    *
    * @param key - the day being valued.
    * @param entry - the parsed override `{ base, at, balance }`.
@@ -330,10 +363,9 @@ export function buildLedger(options) {
     if (entry === null || entry.at === null || entry.balance === null) return 0
     const day = dayIndex().get(key)
     if (day === undefined) return 0
+    const oldest = day.samples[0]
     const newest = day.samples[day.samples.length - 1]
-    // A correction made after that day's last sample has nothing left to measure:
-    // the base is the user's final word for the day.
-    if (newest === undefined || entry.at > newest.t) return 0
+    if (newest === undefined || entry.at > newest.t || entry.at < oldest.t) return 0
     const creditsSince = day.credits.reduce((total, credit) => (
       credit.t > entry.at ? total + credit.amount : total
     ), 0)
@@ -421,11 +453,8 @@ export function compactSamples(samples, options = {}) {
       kept.push(sample)
       continue
     }
-    // The bucket has to be a clock hour of the ledger's zone. A UTC hour straddles local
-    // midnight wherever the offset is not a whole number of hours (+05:30, +05:45, +09:30),
-    // and then the last sample kept before the boundary is not a sample of the day it
-    // belongs to — the thinned history loses that day's own last hour.
-    const { dateKey, hour } = zoneFields(sample.t, zone)
+    // The bucket has to be a clock hour of the ledger's zone — see `hourBucketOf`.
+    const { dateKey, hour } = hourBucketOf(sample.t, zone)
     const previous = hourly.get(`${dateKey}T${hour}`)
     // One sample per hour: keep the last of the hour, which carries the end state.
     if (previous === undefined) hourly.set(`${dateKey}T${hour}`, sample)

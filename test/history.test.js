@@ -126,6 +126,34 @@ test('a correction made after the day closed leaves the base alone', () => {
   assert.equal(ledger.rows.find((row) => row.key === '2026-09-24').measuredAfter, 0)
 })
 
+test('an anchor is measured only from inside the day it corrects', () => {
+  // The three positions of an anchor against the day's newest sample, which is the rule the
+  // arithmetic turns on: the added part is the drop from the anchor to that sample, so it is a
+  // measurement of one day only while both of its ends are on that day.
+  const samples = [sample('2026-09-24T08:00:00Z', 10), sample('2026-09-24T09:00:00Z', 9)]
+  const measured = (anchor, balance) => buildLedger({
+    samples,
+    overrides: { '2026-09-24': { amount: 3, at: anchor, balance } },
+    zone: 'UTC',
+    nowMs: at('2026-09-24T12:00:00Z'),
+    days: 1,
+  }).rows[0]
+  const inside = measured(at('2026-09-24T08:30:00Z'), 9.5)
+  assert.equal(inside.measuredAfter, 0.5, 'an anchor between two samples of the day measures the drop from there')
+  assert.equal(inside.spend, 3.5)
+  // The anchor *is* that sample's own reading, so the drop is zero and no credit can be later:
+  // the base is the reader's final word for the day.
+  const exact = measured(at('2026-09-24T09:00:00Z'), 9)
+  assert.equal(exact.measuredAfter, 0)
+  assert.equal(exact.spend, 3)
+  // Before the day's first sample the window reaches over midnight, so the 9.5 it is anchored to
+  // is a balance of the *previous* day and the drop it would add (0.5) is that day's spend.
+  const before = measured(at('2026-09-23T23:50:00Z'), 9.5)
+  assert.equal(before.measuredAfter, 0, 'the window would start on another day, so nothing is added')
+  assert.equal(before.spend, 3, "and the base is the reader's own figure")
+  assert.equal(before.computed, 1, 'while the sampled value is still reported as it stands')
+})
+
 test('a bare override from an older state file stays frozen', () => {
   const ledger = buildLedger({
     samples: [sample('2026-09-24T08:00:00Z', 10), sample('2026-09-24T10:00:00Z', 9)],
@@ -230,6 +258,21 @@ test('day boundaries can follow a named zone', () => {
   // 2026-09-23T22:30Z is already 2026-09-24 in Beijing.
   assert.equal(dayKeyOf(at('2026-09-23T22:30:00Z'), 'Asia/Shanghai'), '2026-09-24')
   assert.equal(dayKeyOf(at('2026-09-23T22:30:00Z'), 'UTC'), '2026-09-23')
+})
+
+test('a calendar lookup hands back the one field its caller reads', () => {
+  // The ledger asks a million times for a day and the retention pass for a day and an hour, so
+  // the lookup is split per caller rather than answering with a pair each of them has to take
+  // apart: what a caller gets is a bare `YYYY-MM-DD`, with no hour or minute field hanging off
+  // it for a caller that never wanted one.
+  const instant = at('2026-09-23T22:30:00Z')
+  for (const zone of ['UTC', 'Asia/Kolkata', 'local', undefined]) {
+    const key = dayKeyOf(instant, zone)
+    assert.equal(typeof key, 'string', `${zone} answers with a string`)
+    assert.match(key, /^\d{4}-\d{2}-\d{2}$/, `${zone} answers with a bare day key`)
+  }
+  assert.equal(dayKeyOf(instant, 'local'), dayKeyOf(instant, undefined), 'no zone is the host\'s own')
+  assert.equal(dayKeyOf(instant, 'local'), dayKeyOf(instant, 'Nowhere/Special'), 'and so is a zone the runtime cannot use')
 })
 
 test('the median sampling gap reports the cadence actually achieved', () => {
