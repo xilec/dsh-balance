@@ -1484,7 +1484,13 @@ window.__ModuleLoader__.load({
       const zone = peak.zone ?? 'local'
       const changeAt = local.changeAtMs === null ? null : new Date(local.changeAtMs)
       const todayKey = new Date(nowMs).toDateString()
-      const tomorrowKey = new Date(nowMs + 24 * 3600 * 1000).toDateString()
+      // Tomorrow as a calendar day, not as `now + 24h`: across a daylight-saving
+      // transition those are two different days, and the one hour twice a year the
+      // transition sits in, the offset names the day after tomorrow's. Same shape as
+      // `dayLabel` — build the date from its own parts so no zone shift can move it.
+      const tomorrow = new Date(nowMs)
+      tomorrow.setDate(tomorrow.getDate() + 1)
+      const tomorrowKey = tomorrow.toDateString()
       const dayWord = changeAt === null
         ? ''
         : changeAt.toDateString() === todayKey

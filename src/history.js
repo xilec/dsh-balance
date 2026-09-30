@@ -426,11 +426,13 @@ export function buildLedger(options) {
    * between (a top-up raises the balance back and must not look like negative spend). One
    * subtraction, one credit sum — no per-interval rounding to accumulate.
    *
-   * The window is `[anchor, newest sample of the day]`, and it only measures one day when both
-   * of its ends are inside that day. A correction made after the day's last sample has nothing
-   * left to measure, and one anchored before the day's first sample would measure a window
-   * reaching back over midnight — the previous day's spend, which the reader's own figure for
-   * this day cannot absorb. Both leave the base as the reader's final word.
+   * The window is `[anchor, newest sample of the day]`, and what it guarantees is that the
+   * base is only ever added to by a drop between two instants of the same ledger day. A
+   * correction made after the day's last sample has nothing left to measure, and one anchored
+   * before the day's first sample is a measurement taken from that first sample onward, so
+   * there is nothing of the day to measure yet — even where the anchor lies on that same day,
+   * minutes earlier. Both leave the base as the reader's final word, and the day's own sampled
+   * spend is still reported beside it as the row's `computed` value.
    *
    * @param key - the day being valued.
    * @param entry - the parsed override `{ base, at, balance }`.
