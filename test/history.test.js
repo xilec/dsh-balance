@@ -127,9 +127,10 @@ test('a correction made after the day closed leaves the base alone', () => {
 })
 
 test('an anchor is measured only from inside the day it corrects', () => {
-  // The three positions of an anchor against the day's newest sample, which is the rule the
-  // arithmetic turns on: the added part is the drop from the anchor to that sample, so it is a
-  // measurement of one day only while both of its ends are on that day.
+  // All four positions of an anchor against the day's own span of samples, which is the rule the
+  // arithmetic turns on: the added part is the drop from the anchor to that day's newest sample,
+  // so it measures one day only while both of its ends are on that day. The day's samples run
+  // 08:00 at a balance of 10 and 09:00 at 9, so the sampled value of the day is 1.
   const samples = [sample('2026-09-24T08:00:00Z', 10), sample('2026-09-24T09:00:00Z', 9)]
   const measured = (anchor, balance) => buildLedger({
     samples,
@@ -146,6 +147,12 @@ test('an anchor is measured only from inside the day it corrects', () => {
   const exact = measured(at('2026-09-24T09:00:00Z'), 9)
   assert.equal(exact.measuredAfter, 0)
   assert.equal(exact.spend, 3)
+  // Past the last sample there is nothing left to measure — and subtracting a balance read *after*
+  // the day's end from the day's own last reading would add money to a figure that is final, so
+  // refusing to add is the only answer that cannot move the number the wrong way.
+  const after = measured(at('2026-09-24T23:50:00Z'), 1)
+  assert.equal(after.measuredAfter, 0, 'a correction made after the day closed adds nothing')
+  assert.equal(after.spend, 3)
   // Before the day's first sample the window reaches over midnight, so the 9.5 it is anchored to
   // is a balance of the *previous* day and the drop it would add (0.5) is that day's spend.
   const before = measured(at('2026-09-23T23:50:00Z'), 9.5)

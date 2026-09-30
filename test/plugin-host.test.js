@@ -5,7 +5,7 @@ import { mkdtempSync } from 'node:fs'
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { isAbsolute, join, relative } from 'node:path'
-import { dayKeyOf, parseSamples } from '../src/history.js'
+import { dayKeyOf, parseSamples, recentDayKeys } from '../src/history.js'
 import { BJT_OFFSET_MS, OFF_PEAK_RATIO } from '../src/pricing.js'
 
 /** One instant, as a Beijing-time calendar field, in epoch milliseconds. */
@@ -513,6 +513,58 @@ test('a day zone from the composition row the runtime cannot use falls back hone
     // payload has to report that zone rather than the one that failed.
     assert.equal(payload.ledger.zone, 'local')
   }, { config: { dayZone: 'Mars/Olympus' } })
+})
+
+test('a stored day zone the runtime cannot use leaves the row in charge', async () => {
+  // The third door the same check has to guard, and the one a hand-edited or
+  // forward-migrated `state.json` comes through: a stored name no formatter accepts.
+  const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const ctx = hostContext()
+  try {
+    const module = await import(`../src/index.js?storedZone=${encodeURIComponent(home)}`)
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    await mkdir(join(home, 'dsh-balance'), { recursive: true })
+    await writeFile(
+      join(home, 'dsh-balance', 'state.json'),
+      JSON.stringify({ version: 1, prefs: { dayZone: 'Mars/Olympus' } }),
+      'utf8',
+    )
+    // The row names a zone the runtime can use, so that is the one the ledger must read in:
+    // the stored value is ignored rather than stored-on and fallen back from inside the ledger.
+    module.apply(ctx, module.Config({ apiKey: 'test-key', currency: 'CNY', dayZone: 'UTC' }))
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    const res = response()
+    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), res)
+    assert.equal(JSON.parse(res.body).ledger.zone, 'UTC', 'the payload reports the zone the ledger reads in')
+  } finally {
+    ctx.dispose()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('the oldest day the window names is the oldest calendar day, whatever the zone clock does', async () => {
+  // The bound counts calendar days rather than subtracting twenty-four hours at a time, so a
+  // zone that keeps daylight saving cannot name one day and refuse another: `Pacific/Norfolk`
+  // is +11:30 in winter and +12:45 in summer, and a Host clock an hour ahead of the zone makes
+  // `now - N * 24h` land a whole day late for half of every year.
+  await withPlugin(async ({ ctx }) => {
+    const post = async (date) => {
+      const res = response()
+      await ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date, amount: 1 }), res)
+      return res
+    }
+    const keys = recentDayKeys(dayKeyOf(Date.now(), 'Pacific/Norfolk'), 3650)
+    // `recentDayKeys` counts oldest first, so `keys[0]` is the oldest day the window names and
+    // `keys[1]` is a day inside it; the day *before* the bound is what has to be refused.
+    assert.equal((await post(keys[0])).status, 200, 'the oldest calendar day of the window is inside it')
+    assert.equal((await post(keys[1])).status, 200, 'and the next one in is too')
+    const before = recentDayKeys(keys[0], 2)[0]
+    assert.equal((await post(before)).status, 400, 'while the day before it is not')
+  }, { config: { dayZone: 'Pacific/Norfolk', keepDays: 3650 } })
 })
 
 test('a correction is anchored to the instant its balance was read', async () => {

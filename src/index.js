@@ -19,7 +19,7 @@
  */
 import Schema from '@deepseek-ai/schemastery'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
-import { buildLedger, calibrationOf, dayKeyOf } from './history.js'
+import { buildLedger, calibrationOf, dayKeyOf, recentDayKeys } from './history.js'
 import { textRecordsOf } from './export-text.js'
 import {
   OFF_PEAK_RATIO, PUBLIC_HOLIDAYS_2026, RULE_SOURCE_URL, RULE_VERIFIED_ON,
@@ -444,15 +444,23 @@ export function apply(ctx, config) {
    * *tomorrow*, one day of slack, because the day boundary is the configured zone and it can be
    * a whole day ahead of the Host's own clock — the panel sends the ledger's day keys.
    *
-   * Both bounds come from `dayKeyOf`, the very function the ledger dates its samples with, and
-   * they are compared as strings: `YYYY-MM-DD` is fixed width and zero padded, so its order is
-   * the order of the days, and no window has to be built to test one key.
+   * Both bounds come from the ledger's own calendar, and they are compared as strings:
+   * `YYYY-MM-DD` is fixed width and zero padded, so its order is the order of the days, and no
+   * window has to be built to test one key.
+   *
+   * The lower bound counts *calendar* days rather than subtracting twenty-four hours at a time,
+   * which is the same number everywhere except in a zone that keeps daylight saving: a host
+   * clock set an hour ahead of a zone that spends part of the year an hour behind it (`Pacific/
+   * Norfolk`, `+11:30` in winter and `+12:45` in summer) lands a whole day late by midsummer,
+   * and the oldest day the window names would then be refused by the very bound that names it.
+   * `recentDayKeys` counts days on the calendar, so the bound is the same in every zone and
+   * every season.
    *
    * @param nowMs - the instant the window is measured from.
    * @returns `{ oldest, newest }` day keys in the ledger's zone.
    */
   const overrideWindow = (nowMs) => ({
-    oldest: dayKeyOf(nowMs - (Math.max(runtime.historyDays, runtime.keepDays) - 1) * DAY_MS, runtime.dayZone),
+    oldest: recentDayKeys(dayKeyOf(nowMs, runtime.dayZone), Math.max(runtime.historyDays, runtime.keepDays))[0],
     newest: dayKeyOf(nowMs + DAY_MS, runtime.dayZone),
   })
 
