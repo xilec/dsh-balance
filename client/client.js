@@ -2886,11 +2886,17 @@ window.__ModuleLoader__.load({
      * long as the tab is open. Each caller below states what its limit is for.
      *
      * Recency is the order of writing, not of reading: the key is deleted before it
-     * is set again, which moves a key a reader keeps coming back to to the newest
-     * position. A read deliberately does not touch the order — the reads that exist
-     * happen on mount, right before the write that follows them, so refreshing there
-     * would only mean that a component which renders repeatedly pushes other
-     * sessions out.
+     * is set again, so re-writing a key moves it to the newest position and a session
+     * a reader keeps marking stays held however many others pass.
+     *
+     * A read does not refresh the order, and for one of the two caches that is a real
+     * gap rather than a detail. `promptForNode` reads only on a miss and writes on the
+     * answer, so there the read and the write are the same event. The marked Step is
+     * read once per mount by the `useState` initializer, and a mount is not a write: a
+     * session the reader opens and marks nothing in ages out of the order like any
+     * other, so the bound counts the sessions worked in rather than the sessions
+     * opened. That is deliberate — what such a session loses is the mark on a *later*
+     * remount, and the view showing it now holds its own mark either way.
      *
      * @param cache - the `Map` to write into.
      * @param key - the session to remember.
@@ -3285,12 +3291,15 @@ window.__ModuleLoader__.load({
        *
        * The reader is told while it runs: this is the only read of foreign sessions
        * the view performs, and it can be slow on a wide tree.
+       *
+       * Everything after the counter is written is inside the `try`, so every counter
+       * this function writes is one the `finally` below is guaranteed to release.
        */
       const loadSubtree = async (full) => {
         const read = (subtreeReads.get(sessionId) ?? 0) + 1
         subtreeReads.set(sessionId, read)
-        setSubtree((current) => ({ ...current, status: 'loading', error: null }))
         try {
+          setSubtree((current) => ({ ...current, status: 'loading', error: null }))
           const answer = await readSubtree(sessionId, full)
           // Two reads can overlap ("subagents only" and "everything below"); the
           // newest one is the answer, and a slower older one is dropped.
@@ -4790,7 +4799,7 @@ window.__ModuleLoader__.load({
       TopK, topRows, visibleSlice, sumBuckets, zoomWindow, panWindow, clampWindow, isFullWindow, turnSpans,
       arrowDelta, nextSelection, subtreeOf, stepGroups, Subagents, SubagentOpen, openSessionCost, preferCostView,
       costHistory, exportFileName, truncateText, EXPORT_DETAILS, CostExport, saveTextFile, readSeries, readText, promptForNode,
-      rememberRecent, sessionPrompts, lastStep, subtreeReads, MAX_PROMPT_SESSIONS, MAX_STEP_SESSIONS,
+      sessionPrompts, lastStep, subtreeReads, MAX_PROMPT_SESSIONS, MAX_STEP_SESSIONS,
       valueAxis, compactNumber, tickLabel, tooltipLines,
       Findings, findingsOf, overlayOf, overlayMemo, findingsAt, findingText, findingExplain, thresholdLines,
       findingPlace, findingRank, MAX_BADGES, FINDING_GLYPH, compactionRows, percentText,

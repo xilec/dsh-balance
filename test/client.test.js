@@ -2638,7 +2638,9 @@ test('the prompt cache holds the last few sessions and reads an evicted one agai
     assert.equal(sessionPrompts.has(sessions[1]), false, 'and that read is what pushed the previous oldest out')
     assert.equal(sessionPrompts.size, MAX_PROMPT_SESSIONS, 'still at the bound')
     assert.equal(sessionPrompts.has(newest), true, 'the sessions read after the oldest are untouched')
-    // A session the reader keeps coming back to stays held, however many others pass.
+    // Asking again about a session that is still held is a hit: it costs no request,
+    // and it does not move the session in the order either, because a hit is not a
+    // write. The recovered session is the newest write, so it is the last to go.
     for (const sessionId of sessions.slice(2).concat(newest)) {
       assert.equal(await promptForNode(sessionId, { turn: 1, step: 1, tStart: 250 }), `question of ${sessionId}`)
       assert.equal(timesRead(sessionId), 1, 'a held session is not read again by asking twice')
@@ -2699,6 +2701,22 @@ test('the marked Step survives a round trip for a recent session and is dropped 
     // What the eviction costs is exactly this: the session comes back as a session the
     // reader never marked in, with every Step still on screen and no error.
     assert.equal(await stillMarked(held[0]), false, 'an evicted session comes back unmarked, which is a state the view already has')
+
+    // Marking a Step in a session that is already held is a write to a key the map
+    // holds, and it moves that key to the newest position — so the session the reader
+    // is working in survives the marks of the sessions they pass on the way. Only the
+    // oldest held key can show this, so the session is aged to that position first,
+    // where a plain `set` would leave it where it is and the next mark would take it.
+    const worked = 'session-worked-in'
+    await markFirstStepOf(worked)
+    for (let index = 0; index < MAX_STEP_SESSIONS - 1; index++) await markFirstStepOf(`session-passed-${index}`)
+    assert.equal(lastStep.size, MAX_STEP_SESSIONS, 'the map is still at its bound')
+    assert.equal([...lastStep.keys()][0], worked, 'the session worked in is the oldest of the ones held')
+    await markFirstStepOf(worked)
+    await markFirstStepOf('session-passed-last')
+    assert.equal(lastStep.size, MAX_STEP_SESSIONS, 'and marking it again did not grow the map')
+    assert.equal(lastStep.has(worked), true, 'a session marked again stays held as the others pass')
+    assert.equal(await stillMarked(worked), true, 'and still comes back with its Step marked')
   } finally {
     react.stop()
     restore()
@@ -2723,15 +2741,19 @@ test('an overlapping subtree read still resolves to the newest answer, and its c
     total: { cost: 12.5, steps: 4 },
   })
   const previousFetch = globalThis.fetch
-  let asked = 0
+  /** How long the next read of the subtree waits before it answers, oldest read first. */
+  const delays = []
+  /** How many subtree reads the stub has served, so it can tell the two answers apart. */
+  let children = 0
   globalThis.fetch = async (url) => {
-    // The first read of the two is the slow one and answers with what the reader has
-    // moved on from, the second is fast and answers with the newest reading — so a
-    // counter released too early would land the stale answer on top of the fresh one.
+    // The two overlapping reads are the same read asked twice, so the stub answers the
+    // older of the pair with what the reader has moved on from and the newer with the
+    // newest reading, each after the delay the test hands it. Which of the two lands
+    // first is the case under test, and both orders are real.
     if (String(url).startsWith('/dsh-balance/session-cost/children')) {
-      const stale = asked++ === 0
-      await new Promise((resolve) => setTimeout(resolve, stale ? 40 : 1))
-      return { ok: true, status: 200, json: async () => answer(stale ? 'the direct children' : 'everything below') }
+      const older = children++ % 2 === 0
+      await new Promise((resolve) => setTimeout(resolve, delays.shift() ?? 1))
+      return { ok: true, status: 200, json: async () => answer(older ? 'the direct children' : 'everything below') }
     }
     if (String(url).startsWith('/dsh-balance/session-cost')) {
       return { ok: true, status: 200, json: async () => costPayload([costNode({ turn: 1, step: 1, children: [{ id: 'child-1', mode: 'continuable', label: 'Survey the tree', createdAt: NOW, turn: 1, step: 1 }] })]) }
@@ -2740,33 +2762,43 @@ test('an overlapping subtree read still resolves to the newest answer, and its c
   }
   try {
     const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => ({ seq: 5, currency: 'CNY' }) }
-    react.beginRender()
-    textOf(react.createElement(exported.__internals.CostView, props))
-    await new Promise((resolve) => setTimeout(resolve, 10))
-    // Two reads in flight at once, the slow one started first: the reader asked twice
-    // before the first answer came back. The panel replaces its button with "reading"
-    // only on the next render, so both clicks leave from the same tree.
-    react.beginRender()
-    const tree = react.createElement(exported.__internals.CostView, props)
-    const tab = find(tree, (element) => element.props?.className === 'dshb_cost_tab' && textOf(element) === 'cost.tab.subagents')[0]
-    tab.props.onClick()
-    react.beginRender()
-    const open = react.createElement(exported.__internals.CostView, props)
-    const include = find(open, (element) => element.type === 'button' && textOf(element) === 'cost.subagents.include')[0]
-    assert.ok(include !== undefined, 'the subtree is an explicit action')
-    include.props.onClick()
-    include.props.onClick()
-    assert.equal(subtreeReads.size, 1, 'both reads belong to the one session being read')
-    await new Promise((resolve) => setTimeout(resolve, 80))
-    react.beginRender()
-    const settled = react.createElement(exported.__internals.CostView, props)
-    const text = textOf(settled)
-    assert.match(text, /everything below/, 'the newer read is the answer on screen')
-    assert.doesNotMatch(text, /the direct children/, 'and the slower older one did not land on top of it')
-    // The counter only ever ordered the reads that were in flight; an idle session
-    // holds nothing, which is what keeps this map from growing with the page.
-    assert.equal(subtreeReads.size, 0, 'the counter is released once its read has landed')
-    assert.equal(subtreeReads.has('session-7'), false)
+    /** Mount the Cost view, open the subagents tab and ask for the subtree twice. */
+    const readTwice = async () => {
+      react.beginRender()
+      textOf(react.createElement(exported.__internals.CostView, props))
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      // The reader asked twice before the first answer came back. The panel replaces
+      // its button with "reading" only on the next render, so both clicks leave from
+      // the same tree.
+      react.beginRender()
+      const tree = react.createElement(exported.__internals.CostView, props)
+      const tab = find(tree, (element) => element.props?.className === 'dshb_cost_tab' && textOf(element) === 'cost.tab.subagents')[0]
+      tab.props.onClick()
+      react.beginRender()
+      const open = react.createElement(exported.__internals.CostView, props)
+      const include = find(open, (element) => element.type === 'button' && textOf(element) === 'cost.subagents.include')[0]
+      assert.ok(include !== undefined, 'the subtree is an explicit action')
+      include.props.onClick()
+      include.props.onClick()
+      return subtreeReads.size
+    }
+    for (const [older, newer] of [[40, 1], [1, 40]]) {
+      delays.push(older, newer)
+      assert.equal(await readTwice(), 1, 'both reads belong to the one session being read')
+      await new Promise((resolve) => setTimeout(resolve, 80))
+      react.beginRender()
+      const settled = react.createElement(exported.__internals.CostView, props)
+      const text = textOf(settled)
+      assert.match(text, /everything below/, 'the newer read is the answer on screen')
+      assert.doesNotMatch(text, /the direct children/, 'and the older one did not land on top of it')
+      // The counter only ever ordered the reads that were in flight; an idle session
+      // holds nothing, which is what keeps this map from growing with the page. With
+      // the older read landing first, the release has to be the guarded one: it runs
+      // while the newer read is still in flight and holds its counter.
+      assert.equal(subtreeReads.size, 0, `the counter is released once its read has landed (${older}ms, ${newer}ms)`)
+      assert.equal(subtreeReads.has('session-7'), false)
+      react.unmount()
+    }
 
     // A later read of the same session still works after the release: the counter is
     // taken again from where the map no longer holds it, so nothing needs it to have
