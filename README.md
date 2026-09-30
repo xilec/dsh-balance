@@ -143,7 +143,7 @@ and a value written there outranks the row for that key only.
 | `clientPollIntervalMs` | `15000` | How often the readout re-reads the Host cache |
 | `currency` | `USD` | Ledger currency preference |
 | `dayZone` | `local` | Day-boundary zone: `local` or an IANA name |
-| `historyDays` | `30` | Day rows kept and rolled up |
+| `historyDays` | `30` | Day rows kept; the 1d/1w/1m windows are always 1, 7 and 30 days of them |
 | `keepDays` | `120` | Full-resolution sample retention |
 | `warningThreshold` / `dangerThreshold` | `10` / `5` | Balance thresholds; stored and relayed, but no surface colours the balance by them — the peak chip's colour shows the tariff phase |
 | `holidays` | 2026 list | Chinese public holidays (Beijing dates) |

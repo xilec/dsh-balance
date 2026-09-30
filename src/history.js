@@ -36,6 +36,15 @@ const DEFAULT_CREDIT_MIN_DELTA = 0.01
 const DEFAULT_SPEND_MIN_DELTA = 0.001
 
 /**
+ * The three windows the panel shows, each in its own fixed number of days.
+ *
+ * These lengths are the definition of the windows and do not depend on `historyDays`, which
+ * only says how many day rows the ledger keeps: the row count is a retention setting the
+ * reader can lower to 3, and a window that inherited it would claim a month over three days.
+ */
+const WINDOW_DAYS = { d1: 1, w1: 7, m1: 30 }
+
+/**
  * Money is rounded to six decimals on the way out.
  *
  * Differences of binary floats otherwise leak artefacts such as
@@ -258,9 +267,11 @@ export function movements(series, options = {}) {
  * @param options.currency - account currency to read.
  * @param options.zone - day-boundary zone; `local` (default) or an IANA name.
  * @param options.nowMs - the instant "today" is measured from.
- * @param options.days - how many day rows to produce (default 30).
+ * @param options.days - how many day rows to produce (default 30). This is retention, not a
+ * window length: the totals below range over their own fixed 1, 7 and 30 days.
  * @param options.creditMinDelta - credit noise floor.
- * @returns day rows, credit events, and the 1d/1w/1m totals with their coverage.
+ * @returns day rows, credit events, and the 1d/1w/1m totals, each with the number of days it
+ * measured and whether that is the whole window.
  */
 export function buildLedger(options) {
   const zone = options.zone ?? 'local'
@@ -360,12 +371,37 @@ export function buildLedger(options) {
 
   const sum = (from, to) => round6(rows.slice(from, to).reduce((acc, row) => acc + row.spend, 0))
   const firstSampleMs = series.length > 0 ? series[0].t : null
-  // A window is "covered" only when sampling already started before its first day,
-  // otherwise its total is a partial sum the UI must label as such.
-  const windowCovered = (dayCount) => {
-    if (firstSampleMs === null) return false
-    const startKey = recentDayKeys(todayKey, dayCount)[0]
-    return dayKeyOf(firstSampleMs, zone) <= startKey
+  // Where the first sample's day sits in the row array, counted from its end: the number of
+  // days the samples actually span. An index at or before the oldest row means the samples
+  // reach past the ledger, so every row is measured.
+  const firstSampleKey = firstSampleMs === null ? null : dayKeyOf(firstSampleMs, zone)
+  const firstSampled = firstSampleKey === null
+    ? rows.length
+    : rows.findIndex((row) => row.key === firstSampleKey)
+  const sampledDays = firstSampled <= 0 ? rows.length : rows.length - firstSampled
+
+  /**
+   * One window of the ledger, in its own days.
+   *
+   * A window ranges over the last `length` day keys and sums the rows among them. A ledger
+   * too short to fill one is summed anyway — a partial month the reader can compare with
+   * yesterday's is worth more than a hole, and `covered` is the flag that says which one it
+   * is. `days` counts the days of the window the samples really measured, capped by the rows
+   * that exist, so `covered` is exactly `days === length` and the flag cannot describe a
+   * different range than the figure next to it. Asking the two separately is what let a
+   * three-day sum be reported as a covered month.
+   *
+   * @param length - the window's own length in days.
+   * @returns `{ amount, covered, days }` for that window.
+   */
+  const windowTotal = (length) => {
+    const available = Math.min(length, rows.length)
+    const days = Math.min(available, sampledDays)
+    return {
+      amount: sum(rows.length - available, rows.length),
+      covered: days === length,
+      days,
+    }
   }
 
   return {
@@ -375,11 +411,9 @@ export function buildLedger(options) {
     rows,
     credits: credits.slice(-50).reverse(),
     creditTotal: round6(credits.reduce((acc, c) => acc + c.amount, 0)),
-    totals: {
-      d1: { amount: sum(rows.length - 1, rows.length), covered: windowCovered(1) },
-      w1: { amount: sum(Math.max(0, rows.length - 7), rows.length), covered: windowCovered(7) },
-      m1: { amount: sum(0, rows.length), covered: windowCovered(days) },
-    },
+    totals: Object.fromEntries(
+      Object.entries(WINDOW_DAYS).map(([key, length]) => [key, windowTotal(length)]),
+    ),
     firstSampleMs,
     lastSampleMs: series.length > 0 ? series[series.length - 1].t : null,
     sampleCount: series.length,

@@ -550,6 +550,68 @@ test('the summary tab spells out every figure the plugin holds', async () => {
   assert.match(text, /5m/, 'the median sampling gap is listed')
 })
 
+test('a window is labelled with the days it measured, not with a length of its own', async () => {
+  const { exported, react } = await loadClient()
+  const ctx = clientContext()
+  exported.apply(ctx)
+  // A `t` that shows the arguments, so the label can be read as the view sends it.
+  const t = (key, args) => (args === undefined ? key : `${key}:${JSON.stringify(args)}`)
+  const summary = (state) => {
+    react.beginRender()
+    return textOf(react.createElement(exported.__internals.Summary, { t, state, projection: null }))
+  }
+  const truncated = {
+    ...payload,
+    ledger: {
+      ...payload.ledger,
+      // What the Host sends for a ledger it could not fill: three measured days, a month
+      // window and `covered: false` rather than a 30-day claim over them.
+      totals: {
+        d1: { amount: 0.39, covered: true, days: 1 },
+        w1: { amount: 2.29, covered: true, days: 7 },
+        m1: { amount: 1.5, covered: false, days: 3 },
+      },
+    },
+  }
+  const state = (over) => ({ status: 'ok', payload: over, error: null, at: Date.now() })
+  const text = summary(state(truncated))
+  assert.match(text, /card\.month:{"days":3\}/, text)
+  assert.match(text, /tip\.spend1m:{"days":3\}/, 'the detail row says it as well')
+  assert.match(text, /tip\.partial:{"days":3\}/, 'and the flag names the shortfall')
+  assert.match(text, /card\.week:{"days":7\}/, 'a covered window keeps its own length')
+
+  // The shipped fixture reports no day count, as a Host from before the change does: the
+  // window lengths are the fallback, so the labels stay 7 and 30 rather than going blank.
+  const older = summary(state(payload))
+  assert.match(older, /card\.month:{"days":30\}/, older)
+  assert.match(older, /card\.week:{"days":7\}/)
+
+  // Zero days is a count and not a missing one, which is what a ledger no sample has reached
+  // reports: falling back to the length there would read "30 of 30 days measured".
+  const unreached = summary(state({
+    ...payload,
+    ledger: {
+      ...payload.ledger,
+      totals: {
+        d1: { amount: 0, covered: false, days: 0 },
+        w1: { amount: 0, covered: false, days: 0 },
+        m1: { amount: 0, covered: false, days: 0 },
+      },
+    },
+  }))
+  assert.match(unreached, /card\.month:{"days":0\}/, unreached)
+  assert.match(unreached, /tip\.partial:{"days":0\}/)
+
+  // The copy carries no length of its own to drift from the payload.
+  const copy = ctx.dictionary()
+  for (const locale of ['en', 'ru']) {
+    for (const key of ['card.week', 'card.month', 'tip.spend1w', 'tip.spend1m']) {
+      assert.ok(copy[locale][key].includes('{days}'), `${locale}.${key} reads the window's own count`)
+    }
+    assert.ok(copy[locale]['tip.partial'].includes('{days}'), `${locale}.tip.partial names the shortfall`)
+  }
+})
+
 test('the pill opens the anchored panel, and the catch layer closes it', async () => {
   const { exported, react } = await loadClient()
   const ctx = clientContext()
