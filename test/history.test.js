@@ -161,6 +161,36 @@ test('an anchor is measured only from inside the day it corrects', () => {
   assert.equal(before.computed, 1, 'while the sampled value is still reported as it stands')
 })
 
+test('a base anchored before the day\'s first sample, on that same day, adds nothing', () => {
+  // A specification test, not a regression test: it pins the same case as the "A base anchored
+  // before the day's first sample, on that same day" scenario of "A manual override is an
+  // anchored base", which states that a base is only ever added to by a drop between two
+  // instants of the same ledger day. A poll succeeded at 00:05 with the balance unchanged, 17
+  // minutes after the previous day's last sample, so the 30-minute heartbeat had not fired and
+  // today had no sample; the reader corrected today, and the 00:07 and 00:20 polls then appended
+  // today's first and second samples. The window from 00:05 lies inside the day, but it starts
+  // before any sample of that day, so nothing is measured from it.
+  const ledger = buildLedger({
+    samples: [
+      sample('2026-09-23T23:50:00Z', 10),
+      sample('2026-09-24T00:07:00Z', 8),
+      sample('2026-09-24T00:20:00Z', 5),
+    ],
+    overrides: { '2026-09-24': { amount: 1, at: at('2026-09-24T00:05:00Z'), balance: 10 } },
+    zone: 'UTC',
+    nowMs: at('2026-09-24T00:20:00Z'),
+    days: 2,
+  })
+  const row = ledger.rows.find((r) => r.key === '2026-09-24')
+  assert.equal(row.measuredAfter, 0, 'the anchor is on the day, but before that day\'s first sample')
+  assert.equal(row.spend, 1, 'so the base is the reader\'s own figure')
+  // The day's own spend is not lost by that: it is still reported as the row's sampled value,
+  // which is what the panel shows next to the input, and re-entering the correction once the
+  // anchor falls inside the day would add it to the base.
+  assert.equal(row.computed, 5)
+  assert.equal(ledger.totals.d1.amount, 1)
+})
+
 test('a bare override from an older state file stays frozen', () => {
   const ledger = buildLedger({
     samples: [sample('2026-09-24T08:00:00Z', 10), sample('2026-09-24T10:00:00Z', 9)],
