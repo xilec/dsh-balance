@@ -9,7 +9,7 @@ pricing rule.
 $19.52 · $0.39/$2.29/$10.43 · $0.33        5 turns · 12 steps
 ```
 
-Balance, then the last day / week / month, then this session — one pill in the
+Balance, then today / the week so far / the month so far, then this session — one pill in the
 composer dock, immediately left of the shipped turn counters, with the same size,
 colour and hover wash as the token-usage pills beside it. It carries no labels
 (the legend is the native tooltip), and clicking it opens the panel anchored above
@@ -46,7 +46,10 @@ So the plugin polls the balance on the Host (every 5 minutes by default, whether
 or not a browser tab is open), keeps every sample on disk, and turns the
 differences into:
 
-* **1d / 1w / 1m totals** — calendar days in the zone you choose;
+* **today / this week / this month totals** — calendar days in the zone you choose:
+  today alone, the week from its **Monday**, the month from its **1st**. Each one names
+  how many days it spans (a Monday carries one day of week, the 31st thirty-one days of
+  month) and is flagged when the history does not reach back to that first day;
 * **a per-day ledger** — each row showing the value derived from samples and an
   input to correct it by hand. A correction is a *base* that remembers the balance
   of the moment it was made, so the day keeps filling as `base + (balanceThen −
@@ -143,7 +146,7 @@ and a value written there outranks the row for that key only.
 | `clientPollIntervalMs` | `15000` | How often the readout re-reads the Host cache |
 | `currency` | `USD` | Ledger currency preference |
 | `dayZone` | `local` | Day-boundary zone: `local` or an IANA name |
-| `historyDays` | `30` | Day rows kept; the 1d/1w/1m windows are always 1, 7 and 30 days of them |
+| `historyDays` | `30` | Day rows kept and shown in the Days tab. The three totals are calendar ranges, not lengths of rows: a value below the day the week or the month started leaves that window unmeasured, and the panel says so instead of reporting the few days it has as the whole window |
 | `keepDays` | `120` | Full-resolution sample retention |
 | `warningThreshold` / `dangerThreshold` | `10` / `5` | Balance thresholds; stored and relayed, but no surface colours the balance by them — the peak chip's colour shows the tariff phase |
 | `holidays` | 2026 list | Chinese public holidays (Beijing dates) |
@@ -206,15 +209,21 @@ dropped with one warning in the Host log and the plugin keeps running on the def
 
 ## Limits worth knowing
 
+* **The week starts on Monday, the month on the 1st.** The three totals are
+  calendar ranges, not rolling ones: on a Monday the week's figure is today's
+  alone and on the 1st the month's is too. They are the figures "so far this
+  week" and "so far this month" mean, not "in the last 7 / 30 days". A window
+  whose first day the history does not reach is drawn muted in the readout and
+  flagged in the Summary with the days it measured out of the days it spans.
 * **Day boundaries need samples.** A day is attributed to the later sample of its
   interval; if the app was closed across a day boundary the row is marked
   *coarse* and is the thing the manual override exists for. Totals of a week and
   a month are far less sensitive to this than a single day.
 * **Everything under the API key counts.** The balance is account-wide, so the
-  1d/1w/1m figures include any other machine or tool using the same key. Only the
-  session estimate is per-session; the Cost view shows that account-wide figure
-  beside the estimate as a calibration line whenever two or more samples fall
-  inside the session's interval.
+  today/week/month figures include any other machine or tool using the same key.
+  Only the session estimate is per-session; the Cost view shows that
+  account-wide figure beside the estimate as a calibration line whenever two or
+  more samples fall inside the session's interval.
 * **Subagents are their own sessions.** A session that spawns subagents marks the
   spawning Step and offers to read the subtree on a `Subagents` tab under the
   chart, but the child's cost is never folded into the session estimate: the
@@ -249,7 +258,7 @@ dropped with one warning in the Host log and the plugin keeps running on the def
 
 ```
 src/pricing.js        the tariff rule, phases and zone labels (pure)
-src/history.js        samples → intervals → day ledger → 1d/1w/1m (pure)
+src/history.js        samples → intervals → day ledger → the three windows (pure)
 src/session-cost.js   the sessionProjections unit (tokens priced per event time)
 src/indicators.js     the ten Indicators, their thresholds and the Findings (pure)
 src/store.js          samples.ndjson and state.json on disk

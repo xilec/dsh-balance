@@ -259,15 +259,15 @@ const payload = {
 }
 
 /** A fetch stub that answers the read route and records the writes. */
-function stubFetch({ posts = [], calls = [] } = {}) {
+function stubFetch({ posts = [], calls = [], answer = payload } = {}) {
   const previous = globalThis.fetch
   globalThis.fetch = async (url, options) => {
     calls.push({ url: String(url), method: options?.method ?? 'GET', body: options?.body })
     if (options?.method === 'POST') {
       posts.push({ url: String(url), body: options.body === undefined ? undefined : JSON.parse(options.body) })
-      return { ok: true, status: 200, json: async () => ({ ok: true, sampling: payload.sampling }) }
+      return { ok: true, status: 200, json: async () => ({ ok: true, sampling: answer.sampling }) }
     }
-    return { ok: true, status: 200, json: async () => payload }
+    return { ok: true, status: 200, json: async () => answer }
   }
   return () => {
     globalThis.fetch = previous
@@ -550,65 +550,132 @@ test('the summary tab spells out every figure the plugin holds', async () => {
   assert.match(text, /5m/, 'the median sampling gap is listed')
 })
 
-test('a window is labelled with the days it measured, not with a length of its own', async () => {
+test('a window is named for what it is, and never labelled with a length of its own', async () => {
   const { exported, react } = await loadClient()
   const ctx = clientContext()
   exported.apply(ctx)
   // A `t` that shows the arguments, so the label can be read as the view sends it.
   const t = (key, args) => (args === undefined ? key : `${key}:${JSON.stringify(args)}`)
-  const summary = (state) => {
+  const summary = (totals) => {
     react.beginRender()
-    return textOf(react.createElement(exported.__internals.Summary, { t, state, projection: null }))
+    return textOf(react.createElement(exported.__internals.Summary, {
+      t,
+      state: { status: 'ok', payload: { ...payload, ledger: { ...payload.ledger, totals } }, error: null, at: Date.now() },
+      projection: null,
+    }))
   }
-  const truncated = {
-    ...payload,
-    ledger: {
-      ...payload.ledger,
-      // What the Host sends for a ledger it could not fill: three measured days, a month
-      // window and `covered: false` rather than a 30-day claim over them.
-      totals: {
-        d1: { amount: 0.39, covered: true, days: 1 },
-        w1: { amount: 2.29, covered: true, days: 7 },
-        m1: { amount: 1.5, covered: false, days: 3 },
-      },
-    },
-  }
-  const state = (over) => ({ status: 'ok', payload: over, error: null, at: Date.now() })
-  const text = summary(state(truncated))
-  assert.match(text, /card\.month:{"days":3\}/, text)
-  assert.match(text, /tip\.spend1m:{"days":3\}/, 'the detail row says it as well')
-  assert.match(text, /tip\.partial:{"days":3\}/, 'and the flag names the shortfall')
-  assert.match(text, /card\.week:{"days":7\}/, 'a covered window keeps its own length')
 
-  // The shipped fixture reports no day count, as a Host from before the change does: the
-  // window lengths are the fallback, so the labels stay 7 and 30 rather than going blank.
-  const older = summary(state(payload))
-  assert.match(older, /card\.month:{"days":30\}/, older)
-  assert.match(older, /card\.week:{"days":7\}/)
+  // A ledger the Host could not fill: three measured days against the 24 the month spans, and a
+  // week that does reach back to its Monday.
+  const truncated = summary({
+    d1: { amount: 0.39, covered: true, days: 1, measured: 1 },
+    w1: { amount: 2.29, covered: true, days: 4, measured: 4 },
+    m1: { amount: 1.5, covered: false, days: 24, measured: 3 },
+  })
+  assert.match(truncated, /card\.month \$1\.50 window\.days:\{"days":24\}/, truncated)
+  assert.match(truncated, /tip\.spend1m · window\.days:\{"days":24\} \$1\.50/, 'the detail row names it as well')
+  assert.match(truncated, /card\.week \$2\.29 window\.days:\{"days":4\}/, 'the week card names its own span')
+  assert.match(
+    truncated,
+    /tip\.partial:\{"window":"tip\.spend1m","measured":3,"days":24\}/,
+    'and the flag names the shortfall of that window',
+  )
+  assert.equal(
+    (truncated.match(/tip\.partial/g) ?? []).length,
+    1,
+    'a covered week is not flagged, however short the month is',
+  )
 
-  // Zero days is a count and not a missing one, which is what a ledger no sample has reached
-  // reports: falling back to the length there would read "30 of 30 days measured".
-  const unreached = summary(state({
-    ...payload,
-    ledger: {
-      ...payload.ledger,
-      totals: {
-        d1: { amount: 0, covered: false, days: 0 },
-        w1: { amount: 0, covered: false, days: 0 },
-        m1: { amount: 0, covered: false, days: 0 },
-      },
-    },
-  }))
-  assert.match(unreached, /card\.month:{"days":0\}/, unreached)
-  assert.match(unreached, /tip\.partial:{"days":0\}/)
+  // The shipped fixture reports no day count, as a Host from before the change does. A calendar
+  // window has no length this half could know, so the label names the window and stops there.
+  const older = summary({
+    d1: { amount: 0.39, covered: true },
+    w1: { amount: 2.29, covered: true },
+    m1: { amount: 10.43, covered: true },
+  })
+  assert.match(older, /card\.week \$2\.29\s+card\.month/, older)
+  assert.doesNotMatch(older, /window\.days/, 'no count is invented for a payload that reports none')
+  assert.match(older, /tip\.spend1w \$2\.29 tip\.spend1m \$10\.43/)
 
-  // The copy carries no length of its own to drift from the payload.
+  // Zero measured days is a count like any other: a ledger no sample has reached is not a
+  // window of its full length, and naming 0 of 24 is what the reader needs to see.
+  const unreached = summary({
+    d1: { amount: 0, covered: false, days: 1, measured: 0 },
+    w1: { amount: 0, covered: false, days: 3, measured: 0 },
+    m1: { amount: 0, covered: false, days: 24, measured: 0 },
+  })
+  assert.match(unreached, /tip\.partial:\{"window":"tip\.spend1w","measured":0,"days":3\}/, unreached)
+  assert.match(unreached, /tip\.partial:\{"window":"tip\.spend1m","measured":0,"days":24\}/)
+  assert.match(unreached, /card\.month \$0\.00 window\.days:\{"days":24\}/)
+
+  // The copy carries no length of its own to drift from the payload, in either locale.
   const copy = ctx.dictionary()
   for (const locale of ['en', 'ru']) {
-    for (const key of ['card.week', 'card.month', 'tip.spend1w', 'tip.spend1m']) {
-      assert.ok(copy[locale][key].includes('{days}'), `${locale}.${key} reads the window's own count`)
+    for (const key of ['card.week', 'card.month', 'tip.spend1d', 'tip.spend1w', 'tip.spend1m']) {
+      assert.ok(!copy[locale][key].includes('{days}'), `${locale}.${key} names no length of its own`)
     }
-    assert.ok(copy[locale]['tip.partial'].includes('{days}'), `${locale}.tip.partial names the shortfall`)
+    assert.ok(copy[locale]['window.days'].includes('{days}'), `${locale}.window.days reads the span`)
+    assert.ok(copy[locale]['tip.partial'].includes('{measured}'), `${locale}.tip.partial names the shortfall`)
+  }
+})
+
+test('the labels hold at the start of a week, in the middle of one and at a month boundary', async () => {
+  const { exported, react } = await loadClient()
+  const ctx = clientContext()
+  exported.apply(ctx)
+  const t = (key, args) => (args === undefined ? key : `${key}:${JSON.stringify(args)}`)
+  const window = (amount, days, measured = days) => ({ amount, covered: measured === days, days, measured })
+  const state = (totals) => ({ status: 'ok', payload: { ...payload, ledger: { ...payload.ledger, totals } }, error: null, at: Date.now() })
+  const summary = (totals) => {
+    react.beginRender()
+    return textOf(react.createElement(exported.__internals.Summary, { t, state: state(totals), projection: null }))
+  }
+
+  // A Monday: the week is today alone, and a one-day week is not a shortfall.
+  const monday = summary({ d1: window(0.39, 1), w1: window(0.39, 1), m1: window(2.29, 21) })
+  assert.match(monday, /card\.week \$0\.39 window\.days:\{"days":1\}/, monday)
+  assert.doesNotMatch(monday, /tip\.partial/, 'nothing is flagged on a Monday: the week is whole')
+
+  // Wednesday: three days of the week, five of the month so far.
+  const wednesday = summary({ d1: window(0.39, 1), w1: window(1.5, 3), m1: window(2.29, 23) })
+  assert.match(wednesday, /card\.week \$1\.50 window\.days:\{"days":3\}/, wednesday)
+  assert.match(wednesday, /card\.month \$2\.29 window\.days:\{"days":23\}/)
+  assert.doesNotMatch(wednesday, /tip\.partial/)
+
+  // The 1st of a month: the month is today alone while the week still starts on the Monday
+  // before it, so the two cards show two different spans on the same day.
+  const first = summary({ d1: window(0.39, 1), w1: window(1.5, 4), m1: window(0.39, 1) })
+  assert.match(first, /card\.month \$0\.39 window\.days:\{"days":1\}/, first)
+  assert.match(first, /card\.week \$1\.50 window\.days:\{"days":4\}/)
+  assert.doesNotMatch(first, /tip\.partial/)
+
+  // The 31st: a month that is 31 days long, of which the ledger holds three.
+  const thirtyFirst = summary({ d1: window(0.39, 1), w1: window(1.5, 6, 3), m1: window(1.5, 31, 3) })
+  assert.match(thirtyFirst, /card\.month \$1\.50 window\.days:\{"days":31\}/, thirtyFirst)
+  assert.match(thirtyFirst, /tip\.partial:\{"window":"tip\.spend1w","measured":3,"days":6\}/)
+  assert.match(thirtyFirst, /tip\.partial:\{"window":"tip\.spend1m","measured":3,"days":31\}/)
+
+  // The readout's legend and its accessible name are built from the same keys, so they name the
+  // windows the same way and the panel is the only place the copy is written out.
+  const Readout = ctx.registered.find((entry) => entry.options.id === 'dsh-balance').component
+  const restore = stubFetch({
+    answer: { ...payload, ledger: { ...payload.ledger, totals: { d1: window(0.39, 1), w1: window(0.39, 1), m1: window(2.29, 21) } } },
+  })
+  try {
+    const props = { t, sessionId: 'session-7', useProjection: () => undefined }
+    react.beginRender()
+    textOf(react.createElement(Readout, props))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    react.beginRender()
+    const tree = react.createElement(Readout, props)
+    const pill = find(tree, (element) => element.type === 'button' && element.props?.className === 'dshb_pill')[0]
+    assert.match(pill.props.title, /tip\.spend1d\/tip\.spend1w · window\.days:\{"days":1\}\/tip\.spend1m · window\.days:\{"days":21\}/, pill.props.title)
+    assert.equal(pill.props['aria-label'].includes(pill.props.title.split(': ').slice(1).join(': ')), true)
+    const muted = find(tree, (element) => element.props?.className === 'dshb_metric_muted')
+    assert.equal(muted.length, 0, 'nothing is muted on a Monday: the ledger reaches the Monday')
+  } finally {
+    react.stop()
+    restore()
   }
 })
 

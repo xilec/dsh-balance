@@ -278,9 +278,9 @@ window.__ModuleLoader__.load({
         'tip.balance': 'Balance',
         'tip.toppedUp': 'Topped up',
         'tip.granted': 'Granted',
-        'tip.spend1d': 'Last day',
-        'tip.spend1w': 'Last {days} days',
-        'tip.spend1m': 'Last {days} days',
+        'tip.spend1d': 'Today',
+        'tip.spend1w': 'So far this week',
+        'tip.spend1m': 'So far this month',
         'tip.session': 'This session (estimate)',
         'tip.tariff': 'Tariff now',
         'tip.next': 'Next change',
@@ -288,9 +288,10 @@ window.__ModuleLoader__.load({
         'tip.cadence': 'Median gap',
         'tip.fetched': 'Balance read',
         'tip.credits': 'Credits in history',
-        'tip.partial': 'partial: {days} of 30 days measured',
+        'tip.partial': '{window}: {measured} of {days} days measured',
         'tip.coarse': 'some days are coarse — the app was closed across a day boundary',
         'tip.unpriced': 'not priced: {models}',
+        'window.days': '{days} days',
         'reason.peak': 'peak rates',
         'reason.soon': 'peak rates start soon',
         'reason.off-peak': 'off-peak rates',
@@ -307,8 +308,8 @@ window.__ModuleLoader__.load({
         'card.balance': 'Balance',
         'card.today': 'Today',
         'card.session': 'This session',
-        'card.week': '{days} days',
-        'card.month': '{days} days',
+        'card.week': 'Week from Monday',
+        'card.month': 'Month from the 1st',
         'card.unavailable': 'balance unavailable',
         'days.date': 'Day',
         'days.sampled': 'From samples',
@@ -538,9 +539,9 @@ window.__ModuleLoader__.load({
         'tip.balance': 'Баланс',
         'tip.toppedUp': 'Пополнено',
         'tip.granted': 'Подарочные',
-        'tip.spend1d': 'За сутки',
-        'tip.spend1w': 'За {days} дн.',
-        'tip.spend1m': 'За {days} дн.',
+        'tip.spend1d': 'Сегодня',
+        'tip.spend1w': 'С начала недели',
+        'tip.spend1m': 'С начала месяца',
         'tip.session': 'Эта сессия (оценка)',
         'tip.tariff': 'Тариф сейчас',
         'tip.next': 'Следующая смена',
@@ -548,9 +549,10 @@ window.__ModuleLoader__.load({
         'tip.cadence': 'Медианный интервал',
         'tip.fetched': 'Баланс прочитан',
         'tip.credits': 'Пополнения в истории',
-        'tip.partial': 'частично: измерено {days} из 30 дн.',
+        'tip.partial': '{window}: измерено {measured} из {days} дн.',
         'tip.coarse': 'часть дней помечена как грубые — приложение было закрыто через границу суток',
         'tip.unpriced': 'без цены: {models}',
+        'window.days': '{days} дн.',
         'reason.peak': 'пиковый тариф',
         'reason.soon': 'скоро пиковый тариф',
         'reason.off-peak': 'льготный тариф',
@@ -567,8 +569,8 @@ window.__ModuleLoader__.load({
         'card.balance': 'Баланс',
         'card.today': 'Сегодня',
         'card.session': 'Эта сессия',
-        'card.week': '{days} дн.',
-        'card.month': '{days} дн.',
+        'card.week': 'Неделя с понедельника',
+        'card.month': 'Месяц с 1-го',
         'card.unavailable': 'баланс недоступен',
         'days.date': 'День',
         'days.sampled': 'Из сэмплов',
@@ -807,28 +809,39 @@ window.__ModuleLoader__.load({
       return `${symbol(currency)}${fixed}`
     }
 
-    /** The windows as the Host defines them, for a payload that reports no day count. */
-    const WINDOW_DAYS = { w1: 7, m1: 30 }
-
     /**
-     * The days a window really measured, for the label that goes with its figure.
+     * The calendar days a window spans, when the Host names them.
      *
-     * The Host reports each window's own count of measured days, because a ledger the reader
-     * shortened cannot fill a 30-day window: `historyDays` goes down to 3, and a panel that
-     * says "30 days" over three days of samples makes a claim the data does not support. The
-     * window's own length is the fallback for a Host too old to report the count.
+     * The week and the month are calendar ranges — the week from its Monday, the month from its
+     * 1st — so their length follows from the day and the panel cannot know it in advance: a
+     * Monday carries one day of week and a Friday five. The Host reports the count for each
+     * window, and `null` stands for a payload that reports none, which is what a Host from
+     * before the change sends: the label then names the window and nothing else, rather than
+     * claiming a length this half cannot know.
      *
      * @param totals - one entry of `ledger.totals`, or nothing at all.
-     * @param length - that window's length in days.
-     * @returns the number of days the label should name.
+     * @returns the number of days the label should name, or null.
      */
-    function windowDays(totals, length) {
+    function windowSpan(totals) {
       const days = totals?.days
-      // Zero is a count like any other — a ledger no sample has reached is not a window of
-      // its full length, and a fallback here would print "0 of 30 days measured" as "30 of
-      // 30". Only a missing or malformed count, which is what a Host from before the change
-      // sends, falls back to the length.
-      return Number.isInteger(days) && days >= 0 ? days : length
+      return Number.isInteger(days) && days > 0 ? days : null
+    }
+
+    /**
+     * A window's label: what the window is, plus the span the payload reports for it.
+     *
+     * The count is a suffix rather than part of the copy, so the shipped strings hold no length
+     * of their own to drift away from the ledger, and a payload without one renders the name
+     * alone instead of "so far this week · undefined days".
+     *
+     * @param t - the locale function.
+     * @param name - the window's own name, e.g. `tip.spend1w`.
+     * @param totals - that entry of `ledger.totals`.
+     * @returns the label as one line of text.
+     */
+    function windowLabel(t, name, totals) {
+      const days = windowSpan(totals)
+      return days === null ? name : `${name} · ${t('window.days', { days })}`
     }
 
     /**
@@ -1231,8 +1244,8 @@ window.__ModuleLoader__.load({
         t('tip.balance'),
         [
           t('tip.spend1d'),
-          t('tip.spend1w', { days: windowDays(ledger?.totals?.w1, WINDOW_DAYS.w1) }),
-          t('tip.spend1m', { days: windowDays(ledger?.totals?.m1, WINDOW_DAYS.m1) }),
+          windowLabel(t, 'tip.spend1w', ledger?.totals?.w1),
+          windowLabel(t, 'tip.spend1m', ledger?.totals?.m1),
         ].join('/'),
         t('tip.session'),
       ].join(' · ')
@@ -1478,8 +1491,14 @@ window.__ModuleLoader__.load({
         hint === undefined ? null : h('div', { className: 'dshb_card_hint', key: 'h' }, hint),
       ])
 
-      // Balance, today and this session on the first row; then the two rolling
-      // totals, week first, month after it.
+      // Balance, today and this session on the first row; then the two calendar
+      // totals, the week from its Monday first and the month from its 1st after it.
+      // The card names the anchor and the hint carries the span, which follows from
+      // the day and is whatever the Host measured the window to be.
+      const spanHint = (totals) => {
+        const days = windowSpan(totals)
+        return days === null ? undefined : t('window.days', { days })
+      }
       const cards = h('div', { className: 'dshb_cards', key: 'cards' }, [
         card('bal', t('card.balance'),
           primary === null ? '—' : money(primary.total, currency),
@@ -1489,10 +1508,10 @@ window.__ModuleLoader__.load({
         card('d1', t('card.today'), ledger === null ? '—' : money(ledger.totals.d1.amount, currency)),
         card('ses', t('card.session'), sessionCost === null ? '—' : money(sessionCost, sessionCurrency),
           peak === null ? undefined : t(`reason.${peak.phase ?? 'off-peak'}`)),
-        card('w1', t('card.week', { days: windowDays(ledger?.totals?.w1, WINDOW_DAYS.w1) }),
-          ledger === null ? '—' : money(ledger.totals.w1.amount, currency)),
-        card('m1', t('card.month', { days: windowDays(ledger?.totals?.m1, WINDOW_DAYS.m1) }),
-          ledger === null ? '—' : money(ledger.totals.m1.amount, currency)),
+        card('w1', t('card.week'),
+          ledger === null ? '—' : money(ledger.totals.w1.amount, currency), spanHint(ledger?.totals?.w1)),
+        card('m1', t('card.month'),
+          ledger === null ? '—' : money(ledger.totals.m1.amount, currency), spanHint(ledger?.totals?.m1)),
       ])
 
       const rows = []
@@ -1507,10 +1526,8 @@ window.__ModuleLoader__.load({
       }
       if (ledger !== null) {
         row(t('tip.spend1d'), money(ledger.totals.d1.amount, currency))
-        row(t('tip.spend1w', { days: windowDays(ledger.totals.w1, WINDOW_DAYS.w1) }),
-          money(ledger.totals.w1.amount, currency))
-        row(t('tip.spend1m', { days: windowDays(ledger.totals.m1, WINDOW_DAYS.m1) }),
-          money(ledger.totals.m1.amount, currency))
+        row(windowLabel(t, 'tip.spend1w', ledger.totals.w1), money(ledger.totals.w1.amount, currency))
+        row(windowLabel(t, 'tip.spend1m', ledger.totals.m1), money(ledger.totals.m1.amount, currency))
       }
       row(t('tip.session'), sessionCost === null ? '—' : money(sessionCost, sessionCurrency))
       if (peak !== null) {
@@ -1530,8 +1547,16 @@ window.__ModuleLoader__.load({
 
       const flags = []
       if (payload?.session?.unpriced?.length > 0) flags.push(t('tip.unpriced', { models: payload.session.unpriced.join(', ') }))
-      if (ledger !== null && !ledger.totals.m1.covered) {
-        flags.push(t('tip.partial', { days: windowDays(ledger.totals.m1, WINDOW_DAYS.m1) }))
+      // One flag per window the ledger does not reach, not one for the month alone: a week is
+      // short whenever the samples miss its Monday, and it says which window it is about.
+      for (const [key, name] of [['w1', 'tip.spend1w'], ['m1', 'tip.spend1m']]) {
+        const window = ledger?.totals?.[key]
+        if (window === undefined || window.covered) continue
+        flags.push(t('tip.partial', {
+          window: t(name),
+          measured: Number.isInteger(window.measured) ? window.measured : windowSpan(window) ?? 0,
+          days: windowSpan(window) ?? 0,
+        }))
       }
       if (ledger !== null && ledger.rows.some((entry) => entry.coarse)) flags.push(t('tip.coarse'))
 
