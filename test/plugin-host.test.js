@@ -5,7 +5,7 @@ import { mkdtempSync } from 'node:fs'
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { isAbsolute, join, relative } from 'node:path'
-import { dayKeyOf, parseSamples } from '../src/history.js'
+import { dayKeyOf, parseSamples, recentDayKeys } from '../src/history.js'
 import { BJT_OFFSET_MS, OFF_PEAK_RATIO } from '../src/pricing.js'
 
 /** One instant, as a Beijing-time calendar field, in epoch milliseconds. */
@@ -383,6 +383,278 @@ test('the overrides route rejects a malformed day and a negative amount', async 
     await ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: '2026-09-24', amount: null }), cleared)
     assert.equal(cleared.status, 200)
     assert.deepEqual(JSON.parse(cleared.body).overrides, {})
+  })
+})
+
+test('the overrides route rejects a day the history cannot hold', async () => {
+  const day = Date.now()
+  const DAY = 86_400_000
+  // The window is the sample retention (`keepDays`, 120 by default) plus a day of slack for
+  // a reader whose ledger zone is ahead of the Host's clock. Both bounds are the ledger's own
+  // day keys, which is what the panel sends.
+  const oldest = dayKeyOf(day - 119 * DAY, 'local')
+  const tomorrow = dayKeyOf(day + DAY, 'local')
+  const today = dayKeyOf(day, 'local')
+  await withPlugin(async ({ ctx, home }) => {
+    const post = (body) => {
+      const res = response()
+      return ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', body), res).then(() => res)
+    }
+    // Every one of these is a well-formed `YYYY-MM-DD` and every one of them was a permanent
+    // key in the state document, re-read on every start, for a day no row can ever carry.
+    for (const date of ['9999-99-99', '0001-01-01', dayKeyOf(day + 14 * DAY, 'local')]) {
+      const res = await post({ date, amount: 1 })
+      assert.equal(res.status, 400, `${date} is not a day the history can hold`)
+      assert.equal(JSON.parse(res.body).ok, false)
+      assert.match(JSON.parse(res.body).error, /^date /, 'the error names the offending field')
+    }
+    const { readFile } = await import('node:fs/promises')
+    // Nothing is written until a write lands, and a rejected write lands nothing.
+    const stored = async () => {
+      try {
+        return JSON.parse(await readFile(join(home, 'dsh-balance', 'state.json'), 'utf8')).overrides
+      } catch {
+        return {}
+      }
+    }
+    assert.deepEqual(await stored(), {}, 'and nothing was stored for any of them')
+
+    // The ends of the window are accepted, so a reader correcting the oldest ledger day is not
+    // turned away by the bound.
+    assert.equal((await post({ date: oldest, amount: 1 })).status, 200)
+    assert.equal((await post({ date: tomorrow, amount: 1 })).status, 200)
+    assert.equal((await post({ date: today, amount: 1 })).status, 200)
+    assert.deepEqual(Object.keys(await stored()).sort(), [oldest, today, tomorrow].sort())
+
+    // A removal is not a storage decision: it can only shrink the document, so a reader
+    // clearing a correction they once made for a day the retention has since passed is served.
+    const removed = await post({ date: '2019-05-05', amount: null })
+    assert.equal(removed.status, 200)
+    assert.deepEqual(Object.keys(await stored()).sort(), [oldest, today, tomorrow].sort())
+  })
+})
+
+test('the stored corrections are bounded, oldest first', async () => {
+  const day = Date.now()
+  const DAY = 86_400_000
+  // `keepDays` at its schema maximum, so the window is wide enough to write past the cap:
+  // the bound has to be its own rule, not a side effect of the window.
+  await withPlugin(async ({ ctx, home }) => {
+    const { readFile } = await import('node:fs/promises')
+    const post = async (date, amount) => {
+      const res = response()
+      await ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date, amount }), res)
+      return res
+    }
+    // Oldest day first, so the write that fills the document past its bound is the newest day.
+    for (let i = 400; i >= 0; i -= 1) {
+      const res = await post(dayKeyOf(day - i * DAY, 'local'), 400 - i)
+      assert.equal(res.status, 200, res.body)
+    }
+    const state = JSON.parse(await readFile(join(home, 'dsh-balance', 'state.json'), 'utf8'))
+    assert.equal(Object.keys(state.overrides).length, 400, 'the document holds as many corrections as the longest ledger can show')
+    const oldest = dayKeyOf(day - 400 * DAY, 'local')
+    const newest = dayKeyOf(day, 'local')
+    assert.equal(state.overrides[oldest], undefined, 'the correction furthest back is the one that went')
+    assert.equal(state.overrides[newest].amount, 400, 'and the one just written is among those kept')
+  }, { config: { keepDays: 3650 } })
+})
+
+test('a correction written for the oldest day still survives a full document', async () => {
+  const day = Date.now()
+  const DAY = 86_400_000
+  await withPlugin(async ({ ctx, home }) => {
+    const { readFile } = await import('node:fs/promises')
+    const post = async (date, amount) => {
+      const res = response()
+      await ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date, amount }), res)
+      return res
+    }
+    for (let i = 400; i >= 1; i -= 1) assert.equal((await post(dayKeyOf(day - i * DAY, 'local'), i)).status, 200)
+    // The document is full and the reader reaches for the oldest day it still has samples for:
+    // the write is answered `ok: true`, so it cannot be the one the bound drops.
+    const oldest = dayKeyOf(day - 401 * DAY, 'local')
+    const answered = await post(oldest, 401)
+    assert.equal(answered.status, 200, answered.body)
+    const state = JSON.parse(await readFile(join(home, 'dsh-balance', 'state.json'), 'utf8'))
+    assert.equal(state.overrides[oldest].amount, 401, 'the correction just written is in the document')
+    assert.equal(Object.keys(state.overrides).length, 400)
+    assert.equal(state.overrides[dayKeyOf(day - 400 * DAY, 'local')], undefined, 'and the oldest of the rest went in its place')
+  }, { config: { keepDays: 3650 } })
+})
+
+test('a day zone the runtime cannot use is refused, and one it can is applied', async () => {
+  await withPlugin(async ({ ctx }) => {
+    const read = () => {
+      const res = response()
+      return ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), res).then(() => JSON.parse(res.body))
+    }
+    const before = await read()
+    const unusable = response()
+    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { dayZone: 'Mars/Olympus' }), unusable)
+    assert.equal(unusable.status, 400)
+    assert.match(JSON.parse(unusable.body).error, /dayZone/, 'the error names the offending key')
+    assert.equal((await read()).ledger.zone, before.ledger.zone, 'and the zone the ledger reads in is unchanged')
+
+    const usable = response()
+    await ctx.routes.get('/dsh-balance/settings')(request('POST', '/dsh-balance/settings', { dayZone: 'Asia/Kolkata' }), usable)
+    assert.equal(usable.status, 200)
+    assert.deepEqual(JSON.parse(usable.body).changed, ['dayZone'])
+    assert.equal((await read()).ledger.zone, 'Asia/Kolkata', 'a zone the runtime can use is the one the payload reports')
+  })
+})
+
+test('a day zone from the composition row the runtime cannot use falls back honestly', async () => {
+  await withPlugin(async ({ ctx }) => {
+    const res = response()
+    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), res)
+    const payload = JSON.parse(res.body)
+    // The ledger falls back to the Host's own zone for a name no formatter accepts, so the
+    // payload has to report that zone rather than the one that failed.
+    assert.equal(payload.ledger.zone, 'local')
+  }, { config: { dayZone: 'Mars/Olympus' } })
+})
+
+test('a stored day zone the runtime cannot use leaves the row in charge', async () => {
+  // The third door the same check has to guard, and the one a hand-edited or
+  // forward-migrated `state.json` comes through: a stored name no formatter accepts.
+  const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const ctx = hostContext()
+  try {
+    const module = await import(`../src/index.js?storedZone=${encodeURIComponent(home)}`)
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    await mkdir(join(home, 'dsh-balance'), { recursive: true })
+    await writeFile(
+      join(home, 'dsh-balance', 'state.json'),
+      JSON.stringify({ version: 1, prefs: { dayZone: 'Mars/Olympus' } }),
+      'utf8',
+    )
+    // The row names a zone the runtime can use, so that is the one the ledger must read in:
+    // the stored value is ignored rather than stored-on and fallen back from inside the ledger.
+    module.apply(ctx, module.Config({ apiKey: 'test-key', currency: 'CNY', dayZone: 'UTC' }))
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    const res = response()
+    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), res)
+    assert.equal(JSON.parse(res.body).ledger.zone, 'UTC', 'the payload reports the zone the ledger reads in')
+  } finally {
+    ctx.dispose()
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('the oldest day the window names is the oldest calendar day, whatever the zone clock does', async () => {
+  // The bound counts calendar days rather than subtracting twenty-four hours at a time, so a
+  // zone that keeps daylight saving cannot name one day and refuse another: `Pacific/Norfolk`
+  // is +11:30 in winter and +12:45 in summer, and a Host clock an hour ahead of the zone makes
+  // `now - N * 24h` land a whole day late for half of every year.
+  await withPlugin(async ({ ctx }) => {
+    const post = async (date) => {
+      const res = response()
+      await ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date, amount: 1 }), res)
+      return res
+    }
+    const keys = recentDayKeys(dayKeyOf(Date.now(), 'Pacific/Norfolk'), 3650)
+    // `recentDayKeys` counts oldest first, so `keys[0]` is the oldest day the window names and
+    // `keys[1]` is a day inside it; the day *before* the bound is what has to be refused.
+    assert.equal((await post(keys[0])).status, 200, 'the oldest calendar day of the window is inside it')
+    assert.equal((await post(keys[1])).status, 200, 'and the next one in is too')
+    const before = recentDayKeys(keys[0], 2)[0]
+    assert.equal((await post(before)).status, 400, 'while the day before it is not')
+  }, { config: { dayZone: 'Pacific/Norfolk', keepDays: 3650 } })
+})
+
+test('a correction is anchored to the instant its balance was read', async () => {
+  await withPlugin(async ({ ctx, home, setBalance }) => {
+    const { readFile } = await import('node:fs/promises')
+    const pause = () => new Promise((resolve) => setTimeout(resolve, 10))
+    const refresh = () => ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    await refresh()
+    const read = response()
+    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), read)
+    const payload = JSON.parse(read.body)
+    const today = payload.ledger.todayKey
+    // The instant stored with the balance is the one that balance was read at, not the one the
+    // write arrived at: only the first of the two is a measurement, and the reader's figure was
+    // made against the reading rather than against the moment they pressed the button.
+    const readAt = payload.balance.fetchedAt
+    assert.ok(readAt > 0)
+    // The reading and the write have to be a moment apart for the two instants to be told
+    // apart at all, and they are: a poll, a read and a write all land inside a millisecond.
+    await pause()
+    const written = response()
+    await ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: today, amount: 2 }), written)
+    assert.equal(written.status, 200, written.body)
+    const state = JSON.parse(await readFile(join(home, 'dsh-balance', 'state.json'), 'utf8'))
+    assert.equal(state.overrides[today].balance, 12.34)
+    assert.equal(state.overrides[today].at, readAt, 'the anchor carries the instant of the reading, not of the write')
+
+    // Which is what makes the day fill: spend after the reading is added to the reader's figure,
+    // with no second write involved — the correction keeps tracking the balance on its own.
+    setBalance(11.34)
+    await refresh()
+    const moved = response()
+    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), moved)
+    const row = JSON.parse(moved.body).ledger.rows.at(-1)
+    assert.equal(row.override, 2, 'the reader\'s own figure is untouched')
+    assert.equal(row.measuredAfter, 1, '12.34 − 11.34, one subtraction')
+    assert.equal(row.spend, 3, 'the base plus what the balance dropped')
+  })
+})
+
+test('a correction written while the balance is stale names the instant that reading was taken', async () => {
+  await withPlugin(async ({ ctx, home }) => {
+    const { readFile } = await import('node:fs/promises')
+    const pause = () => new Promise((resolve) => setTimeout(resolve, 10))
+    const refresh = () => ctx.routes.get('/dsh-balance/refresh')(request('POST', '/dsh-balance/refresh'), response())
+    await refresh()
+    const read = response()
+    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), read)
+    const today = JSON.parse(read.body).ledger.todayKey
+
+    // Polling breaks. The cache keeps the last good balance *and* the instant it was read, and
+    // the entry has to name that instant rather than the moment this write arrives: a reading
+    // from before the break is a reading from before the break, and the ledger then adds the
+    // spend it can actually measure from there rather than pretending it is a balance of now.
+    globalThis.fetch = async () => ({ ok: false, status: 503, json: async () => ({}) })
+    await refresh()
+    const staleRead = response()
+    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), staleRead)
+    const stale = JSON.parse(staleRead.body)
+    assert.equal(stale.balance.stale, true, 'the reading the Host holds really is a stale one')
+    const readAt = stale.balance.fetchedAt
+    await pause()
+    const written = response()
+    await ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: today, amount: 2 }), written)
+    assert.equal(written.status, 200, written.body)
+    const payload = JSON.parse(written.body)
+    assert.equal(payload.overrides[today].amount, 2)
+    assert.equal(payload.overrides[today].balance, 12.34, 'the last balance the Host did read')
+    assert.equal(payload.overrides[today].at, readAt, 'and the instant it was read at, not the one the write arrived at')
+    const state = JSON.parse(await readFile(join(home, 'dsh-balance', 'state.json'), 'utf8'))
+    assert.equal(state.overrides[today].at, readAt, 'which is what the document holds')
+    assert.equal(payload.ledger.rows.at(-1).measuredAfter, 0, 'while nothing new is sampled the day is the reader\'s own word')
+  })
+})
+
+test('a correction written before any balance was read has no anchor at all', async () => {
+  await withPlugin(async ({ ctx }) => {
+    // No poll has succeeded, so there is no balance and no instant: the entry must not claim
+    // one. An instant with no balance is a measurement moment for a measurement that was never
+    // taken, and the ledger has nothing to add to it.
+    const read = response()
+    await ctx.routes.get('/dsh-balance')(request('GET', '/dsh-balance'), read)
+    const today = JSON.parse(read.body).ledger.todayKey
+    const written = response()
+    await ctx.routes.get('/dsh-balance/overrides')(request('POST', '/dsh-balance/overrides', { date: today, amount: 2 }), written)
+    assert.equal(written.status, 200, written.body)
+    const payload = JSON.parse(written.body)
+    assert.deepEqual(payload.overrides[today], { amount: 2 }, 'the amount and nothing else')
+    assert.equal(payload.ledger.rows.at(-1).spend, 2)
+    assert.equal(payload.ledger.rows.at(-1).measuredAfter, 0)
   })
 })
 

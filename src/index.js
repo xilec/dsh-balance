@@ -19,7 +19,7 @@
  */
 import Schema from '@deepseek-ai/schemastery'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
-import { buildLedger, calibrationOf } from './history.js'
+import { buildLedger, calibrationOf, dayKeyOf, recentDayKeys } from './history.js'
 import { textRecordsOf } from './export-text.js'
 import {
   OFF_PEAK_RATIO, PUBLIC_HOLIDAYS_2026, RULE_SOURCE_URL, RULE_VERIFIED_ON,
@@ -34,6 +34,20 @@ export const name = 'dsh-balance'
 
 /** How often a fetch is treated as sampled even when the balance did not move. */
 const HEARTBEAT_MS = 30 * 60 * 1000
+
+/** A day in milliseconds, for the retention window the corrections are bounded by. */
+const DAY_MS = 24 * 60 * 60 * 1000
+
+/**
+ * How many corrections the state document may hold.
+ *
+ * The ledger shows `historyDays` rows and the schema caps that at 400, so a correction
+ * further back than the newest 400 days is a figure no row could ever carry: when a write
+ * pushes the map past this, the oldest day keys go. The reader loses nothing they could
+ * have seen, and a document edited by hand is left alone — the bound is on what a write
+ * adds, because a load must not rewrite the reader's own figures.
+ */
+const MAX_OVERRIDES = 400
 
 /**
  * How many samples are appended between two passes of retention thinning.
@@ -142,10 +156,32 @@ function normalizeFallbackRates(value) {
   return next
 }
 
+/**
+ * Whether a zone name the runtime can actually use.
+ *
+ * `Intl` throwing on a name it does not know is the only test there is, and the read route
+ * already made it for the browser's `zone` query. The ledger falls back to the Host's own zone
+ * for an unusable name, so accepting one would store a setting the ledger never applies while
+ * the payload still reports the name that failed — the panel showing a zone nothing reads in.
+ *
+ * @param value - `local`, or an IANA zone name.
+ * @returns whether the runtime can format instants in it.
+ */
+function isUsableZone(value) {
+  if (typeof value !== 'string' || value === '') return false
+  if (value === 'local') return true
+  try {
+    new Intl.DateTimeFormat('en-GB', { timeZone: value }).format(new Date())
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** Keys a runtime settings write may change, with the check each value must pass. */
 const MUTABLE_SETTINGS = {
   currency: (value) => typeof value === 'string' && /^[A-Z]{3}$/.test(value.toUpperCase()),
-  dayZone: (value) => typeof value === 'string' && value !== '',
+  dayZone: isUsableZone,
   refreshIntervalMs: (value) => Number.isFinite(value) && value >= 15000,
   clientPollIntervalMs: (value) => Number.isFinite(value) && value >= 2000,
   warningThreshold: (value) => Number.isFinite(value) && value >= 0,
@@ -182,7 +218,7 @@ export function apply(ctx, config) {
     refreshIntervalMs: config.refreshIntervalMs ?? 300000,
     clientPollIntervalMs: config.clientPollIntervalMs ?? 15000,
     currency: (config.currency ?? 'USD').toUpperCase(),
-    dayZone: config.dayZone ?? 'local',
+    dayZone: isUsableZone(config.dayZone) ? config.dayZone : 'local',
     historyDays: config.historyDays ?? 30,
     keepDays: config.keepDays ?? 120,
     warningThreshold: config.warningThreshold ?? 10,
@@ -397,6 +433,59 @@ export function apply(ctx, config) {
     return fallback
   }
 
+  /**
+   * The day a correction may name, as the two bounds a posted key has to fall between.
+   *
+   * The lower bound is the wider of the ledger's own rows and the sample retention: a day the
+   * panel offers the reader has to be correctable, and a day the log still covers stays
+   * correctable for when the reader widens the ledger. Bounding by retention alone would refuse
+   * a row at `historyDays: 400, keepDays: 120`; bounding by the rows alone would throw away a
+   * correction the moment the reader lowers the row count. The upper bound is the ledger's
+   * *tomorrow*, one day of slack, because the day boundary is the configured zone and it can be
+   * a whole day ahead of the Host's own clock — the panel sends the ledger's day keys.
+   *
+   * Both bounds come from the ledger's own calendar, and they are compared as strings:
+   * `YYYY-MM-DD` is fixed width and zero padded, so its order is the order of the days, and no
+   * window has to be built to test one key.
+   *
+   * The lower bound counts *calendar* days rather than subtracting twenty-four hours at a time,
+   * which is the same number everywhere except in a zone that keeps daylight saving: a host
+   * clock set an hour ahead of a zone that spends part of the year an hour behind it (`Pacific/
+   * Norfolk`, `+11:30` in winter and `+12:45` in summer) lands a whole day late by midsummer,
+   * and the oldest day the window names would then be refused by the very bound that names it.
+   * `recentDayKeys` counts days on the calendar, so the bound is the same in every zone and
+   * every season.
+   *
+   * @param nowMs - the instant the window is measured from.
+   * @returns `{ oldest, newest }` day keys in the ledger's zone.
+   */
+  const overrideWindow = (nowMs) => ({
+    oldest: recentDayKeys(dayKeyOf(nowMs, runtime.dayZone), Math.max(runtime.historyDays, runtime.keepDays))[0],
+    newest: dayKeyOf(nowMs + DAY_MS, runtime.dayZone),
+  })
+
+  /**
+   * The corrections, capped at what the longest ledger can show.
+   *
+   * The oldest day keys go: a correction the reader can no longer see on any row is worth less
+   * than the one they are writing now, and refusing the write instead would make correcting
+   * today impossible once the document filled up. The key just written always survives, even
+   * when it is the oldest of them — a write the route answered `ok: true` for and then dropped
+   * is the one failure mode a bounded document must not have.
+   *
+   * @param map - the corrections as they stand with the new one already in them.
+   * @param written - the day key the write is about.
+   * @returns the same map, or its newest {@link MAX_OVERRIDES} keys including that one.
+   */
+  const cappedOverrides = (map, written) => {
+    const keys = Object.keys(map)
+    if (keys.length <= MAX_OVERRIDES) return map
+    const kept = new Set([...keys.filter((key) => key !== written).sort().slice(-(MAX_OVERRIDES - 1)), written])
+    const next = {}
+    for (const [key, value] of Object.entries(map)) if (kept.has(key)) next[key] = value
+    return next
+  }
+
   const resolveKey = async () => {
     if (runtime.apiKey !== '') return runtime.apiKey
     const credentials = ctx.get('credentials')
@@ -599,15 +688,7 @@ export function apply(ctx, config) {
   }
 
   /** A zone the browser asked for, or the Host's own when it cannot be used. */
-  const requestZone = (value) => {
-    if (typeof value !== 'string' || value === '' || value === 'local') return 'local'
-    try {
-      new Intl.DateTimeFormat('en-GB', { timeZone: value }).format(new Date())
-      return value
-    } catch {
-      return 'local'
-    }
-  }
+  const requestZone = (value) => (isUsableZone(value) ? value : 'local')
 
   const pricePayload = () => {
     const models = ['deepseek-flash', 'deepseek-v4-pro']
@@ -1203,6 +1284,9 @@ export function apply(ctx, config) {
           return
         }
         if (body.amount === null || body.amount === undefined || body.amount === '') {
+          // A removal skips the window below: it can only shrink the document, and the
+          // reader clearing a correction they once made for an old day is a request in
+          // its own right whatever the retention is now.
           delete overrides[date]
         } else {
           const amount = Number(body.amount)
@@ -1210,19 +1294,35 @@ export function apply(ctx, config) {
             sendJson(res, 400, { ok: false, error: 'amount must be a non-negative number or null' })
             return
           }
+          // A day the retained history cannot hold is a key nothing can ever be read
+          // from, and an accepted one is a permanent entry in the state document that
+          // every start reads back: the window is what keeps that document finite.
+          const bounds = overrideWindow(Date.now())
+          if (date < bounds.oldest || date > bounds.newest) {
+            sendJson(res, 400, {
+              ok: false,
+              error: `date must be a day the history can hold: ${bounds.oldest} to ${bounds.newest}`,
+            })
+            return
+          }
           // The anchor matters: the ledger measures the drop from this balance to
           // the newest sample, so a corrected day keeps filling instead of freezing
-          // and a whole day costs one subtraction, not hundreds of additions.
+          // and a whole day costs one subtraction, not hundreds of additions. It is
+          // the balance *of an instant*, and the instant is the one the poll that read
+          // it ran at — the same reading the reader was looking at, so the figure they
+          // typed and the figure the arithmetic starts from are the same one. A failed
+          // poll leaves the last good balance and its instant where they were, and
+          // that is what the entry then names: a reading from an hour ago is an hour
+          // old, not a balance of the moment the correction arrived.
           const currency = effectiveCurrency()
           const anchor = cache.balances.find((entry) => entry.currency === currency) ?? cache.balances[0] ?? null
-          overrides = {
+          overrides = cappedOverrides({
             ...overrides,
             [date]: {
               amount: Math.round(amount * 1e6) / 1e6,
-              at: Date.now(),
-              ...(anchor === null ? {} : { balance: anchor.total }),
+              ...(anchor === null ? {} : { at: cache.fetchedAt, balance: anchor.total }),
             },
-          }
+          }, date)
         }
         // The correction is the reader's own figure: answering `ok: true` for a
         // write that did not land is how a hand-entered day used to disappear.
