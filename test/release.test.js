@@ -220,6 +220,18 @@ test('a lockfile whose root version cannot be found is refused, not guessed at',
   )
 })
 
+test('a lockfile whose root version is found twice is refused, not half rewritten', () => {
+  // Two matches for the first pattern and none for the second still add up to
+  // the number of patterns, so a total-only count would let this through.
+  const doubled = LOCKFILE
+    .replace(/    "": \{[^}]*"version": "0\.1\.0",\n/, '')
+    .replace('  "lockfileVersion": 3,', '  "lockfileVersion": 3,\n  "copy": { "version": "9.9.9", "lockfileVersion": 3 },')
+  assert.throws(
+    () => rewriteVersionIn(doubled, '0.2.0', place('package-lock.json')),
+    /expected one version line per pattern \(2\), found 2/,
+  )
+})
+
 test('a rewrite writes a longer version without shifting the line around it', () => {
   const rewritten = rewriteVersionIn(HOST, '10.20.30', place('src/index.js'))
   assert.equal(rewritten, "import { z } from 'zod'\n\nconst VERSION = '10.20.30'\n")

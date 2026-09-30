@@ -189,8 +189,12 @@ function oneVersion(found) {
  * about, and guessing is how a release ends up half-done.
  */
 export function rewriteVersionIn(text, version, place) {
-  const counted = place.patterns.reduce((sum, pattern) => sum + (text.match(new RegExp(pattern.source, 'g')) ?? []).length, 0)
-  if (counted !== place.patterns.length) {
+  const counts = place.patterns.map((pattern) => (text.match(new RegExp(pattern.source, 'g')) ?? []).length)
+  const counted = counts.reduce((sum, count) => sum + count, 0)
+  // Per pattern, not in total: a total that happens to equal the pattern count
+  // can be one pattern matching twice and another not at all, and the rewrite
+  // below would then walk into a null match.
+  if (counts.some((count) => count !== 1)) {
     throw new Error(`${place.file}: expected one version line per pattern (${place.patterns.length}), found ${counted}`)
   }
   return place.patterns.reduce((current, pattern) => {
