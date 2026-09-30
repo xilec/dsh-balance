@@ -361,7 +361,15 @@ test('a matching preference is honoured', async () => {
   })
 })
 
-test('the account currency replaces a preference the account does not have', async () => {
+test('the account currency replaces a preference the account does not have', async (t) => {
+  // Both columns of the price table are priced at *now*, and the table behind them is
+  // effective-dated — the 2026-09-10 Flash cut is a second entry, not a second constant.
+  // The USD numbers this asserts are therefore the numbers of one tariff era, so the
+  // instant that reads them is pinned rather than inherited: the literals are the point
+  // of the case (they are how "the USD table, not the CNY one" is proved) and a pinned
+  // clock keeps them exact. An inherited clock made them exact by luck, until the next
+  // cut moved them.
+  t.mock.timers.enable({ apis: ['Date'], now: bjt(2026, 9, 24, 10, 0) })
   const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
   const previousHome = process.env.DSH_HOME
   const previousFetch = globalThis.fetch
@@ -381,17 +389,20 @@ test('the account currency replaces a preference the account does not have', asy
     assert.equal(payload.balance.currencyPreference, 'CNY')
     assert.equal(payload.ledger.currency, 'USD')
     assert.equal(payload.prices.currency, 'USD')
-    assert.equal(payload.prices.peak['deepseek-flash'].cacheMiss, 0.3, 'USD peak rate for Flash')
-    // `current` is priced at the instant the payload was built, so the number itself moves
-    // with the tariff in force when the suite runs. What the field promises is the relation
-    // to the peak column beside it, and that is what this asserts; the two values are pinned
-    // down in the case below.
+    const peakFlash = payload.prices.peak['deepseek-flash']
+    assert.equal(peakFlash.cacheMiss, 0.3, 'USD peak rate for Flash')
+    // Read off the peak column rather than off the literal above: the two columns are
+    // built in one payload and are user-visible side by side, so the honest invariant is
+    // that `current` is that same rate, halved when the clock is outside a window. Stating
+    // it against a literal instead would only re-derive the ratio the payload was built by,
+    // and would hold for any rate table at all.
     const current = payload.prices.current['deepseek-flash']
     assert.equal(current.currency, 'USD')
-    assert.equal(current.cacheMiss, 0.3 * (current.peak ? 1 : OFF_PEAK_RATIO),
-      'off-peak is half of peak, whichever of the two is in force now')
+    assert.equal(current.cacheMiss, peakFlash.cacheMiss * (current.peak ? 1 : OFF_PEAK_RATIO),
+      'the current column is the peak column beside it, halved off-peak')
   } finally {
     ctx.dispose()
+    t.mock.timers.reset()
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
     globalThis.fetch = previousFetch
