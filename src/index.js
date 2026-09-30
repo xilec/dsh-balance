@@ -84,9 +84,13 @@ export const Config = Schema.object({
   historyDays: Schema.number().min(3).max(400).default(30),
   /** Full-resolution sample retention before hourly thinning. */
   keepDays: Schema.number().min(7).max(3650).default(120),
-  /** Balance below which the chip turns amber. */
+  /**
+   * Balance below which a surface would warn. Stored, relayed and editable, but
+   * reserved: nothing in the plugin colours the balance by it, and the peak chip's
+   * colour is the tariff phase.
+   */
   warningThreshold: Schema.number().min(0).default(10),
-  /** Balance below which the chip turns red. */
+  /** The companion of `warningThreshold`, and equally reserved. */
   dangerThreshold: Schema.number().min(0).default(5),
   /**
    * Chinese public holidays (Beijing-time dates) billed off peak. Defaults to

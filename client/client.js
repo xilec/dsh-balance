@@ -219,9 +219,9 @@ window.__ModuleLoader__.load({
         '.dshb_cost_tab{background:transparent;border:0;border-bottom:2px solid transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;font:var(--dsw-font-xxs-12);padding:3px 10px}',
         '.dshb_cost_tab:hover{color:var(--dsw-alias-label-primary)}',
         '.dshb_cost_tabOn{color:var(--dsw-alias-label-primary);border-bottom-color:var(--dsw-alias-state-business-primary,var(--dsw-static-blue-500,#4d6bfe))}',
-        // Two content columns and no more: on a wide screen a row that spans the whole
-        // window reads worse than a compact one, and the same cap keeps the tab strip
-        // aligned with the panes below it.
+        // Three content columns on a wide screen, two and then one as it narrows: a row
+        // that spans the whole window reads worse than a compact one, and the same cap
+        // keeps the tab strip aligned with the panes below it.
         '.dshb_cost_panes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-items:stretch;max-width:1380px}',
         // The three readings are cards of the same height, so neither looks like loose text.
         '.dshb_cost_pane{min-width:0;display:flex;flex-direction:column}',
@@ -274,7 +274,6 @@ window.__ModuleLoader__.load({
       en: {
         'readout.balance': 'b',
         'readout.session': 's',
-        'readout.aria': 'DeepSeek balance and spend',
         'tip.balance': 'Balance',
         'tip.toppedUp': 'Topped up',
         'tip.granted': 'Granted',
@@ -325,12 +324,13 @@ window.__ModuleLoader__.load({
         'settings.dayZone': 'Day boundary zone',
         'settings.refresh': 'Balance poll, ms',
         'settings.poll': 'Chip refresh, ms',
-        'settings.warning': 'Amber below',
-        'settings.danger': 'Red below',
+        'settings.warning': 'Warning below (reserved)',
+        'settings.danger': 'Danger below (reserved)',
         'settings.historyDays': 'Day rows kept',
         'settings.apply': 'Apply',
         'settings.saved': 'saved',
         'settings.failed': 'rejected: {error}',
+        'settings.reserved': 'The two balance thresholds are stored and relayed by the Host, but no surface colours the balance by them yet.',
         'settings.note': 'The Host samples the balance on its own schedule — the chip only reads its cached payload.',
         'settings.fallbackRates': 'Fallback rates for unpriced models',
         'footer.rule': 'Rates and tariff rule',
@@ -536,7 +536,6 @@ window.__ModuleLoader__.load({
       ru: {
         'readout.balance': 'б',
         'readout.session': 'с',
-        'readout.aria': 'Баланс и расход DeepSeek',
         'tip.balance': 'Баланс',
         'tip.toppedUp': 'Пополнено',
         'tip.granted': 'Подарочные',
@@ -587,12 +586,13 @@ window.__ModuleLoader__.load({
         'settings.dayZone': 'Зона границы суток',
         'settings.refresh': 'Опрос баланса, мс',
         'settings.poll': 'Обновление чипа, мс',
-        'settings.warning': 'Жёлтый ниже',
-        'settings.danger': 'Красный ниже',
+        'settings.warning': 'Порог предупреждения (зарезервирован)',
+        'settings.danger': 'Порог опасности (зарезервирован)',
         'settings.historyDays': 'Хранить дней',
         'settings.apply': 'Применить',
         'settings.saved': 'сохранено',
         'settings.failed': 'отклонено: {error}',
+        'settings.reserved': 'Оба порога баланса Хост хранит и передаёт, но ни одна поверхность пока не красит по ним баланс.',
         'settings.note': 'Хост опрашивает баланс по своему расписанию — чип только читает его кэш.',
         'settings.fallbackRates': 'Запасные ставки для моделей без цены',
         'footer.rule': 'Тарифы и правило峰/谷',
@@ -910,10 +910,30 @@ window.__ModuleLoader__.load({
       return `${seconds}s`
     }
 
+    /**
+     * A countdown, or the panel's own placeholder when the payload carries none.
+     *
+     * A nullish wait is a missing figure, not a zero: `formatRemaining(0)` would print
+     * `0s` and claim the change is due now. `'—'` is the glyph `duration` and `money` use
+     * for the same case, and the three places that render a remaining time go through
+     * here rather than each deciding what a missing one looks like.
+     */
+    function remainingText(ms) {
+      return ms === null || ms === undefined ? '—' : formatRemaining(ms)
+    }
+
+    /**
+     * An instant as the browser's locale writes a clock time: `05:07 PM`, `17:07`.
+     *
+     * The spec asks for the browser's locale rather than a hand-built `HH:MM`, and the
+     * peak panel's own line already sets the options: a 2-digit hour and minute and
+     * nothing else. Seconds would tick under the reader on the chart axis and in the
+     * tooltip for no gain, and dropping the leading zero makes the five axis ticks
+     * ragged in the 24-hour locales.
+     */
     function clock(ts) {
       if (typeof ts !== 'number' || ts <= 0) return null
-      const date = new Date(ts)
-      return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+      return new Date(ts).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
     }
 
     /**
@@ -928,16 +948,39 @@ window.__ModuleLoader__.load({
       return url.replace('/zh-cn/', '/')
     }
 
+    /**
+     * A day key as the browser's locale writes a date: `09/18`, `18.09`.
+     *
+     * The key is a calendar day in the ledger's own `dayZone`, not an instant, so it is
+     * not parsed as one: `new Date('2026-09-18')` is UTC midnight and reads as the 17th
+     * west of Greenwich. The parts go to the constructor as local components instead, so
+     * the day on screen is the day the ledger measured. The year is left out — the
+     * ledger is a rolling window and the oldest row is the only one that could want it.
+     */
     function dayLabel(key) {
-      const [y, m, d] = key.split('-')
-      return `${d}.${m}`
+      const [year, month, day] = String(key).split('-').map(Number)
+      if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return String(key)
+      return new Date(year, month - 1, day).toLocaleDateString(undefined, { day: '2-digit', month: '2-digit' })
     }
 
-    function statusLevel(balance, thresholds) {
-      if (balance === null || thresholds === undefined) return 'idle'
-      if (balance <= thresholds.danger) return 'danger'
-      if (balance <= thresholds.warning) return 'warning'
-      return 'success'
+    /**
+     * The `left` an anchored panel is drawn at, in pixels, so it stays in the window.
+     *
+     * Both panels hang off a pill that can sit at either end of the composer line, and
+     * the stylesheet's own `left: 0` puts the whole of a 560px popover past the right
+     * edge next to a right-aligned pill. A panel that already fits keeps the anchor's
+     * edge, so this returns `0` in the common case and only a clamped value otherwise.
+     *
+     * @param options - `anchorLeft` in viewport pixels, the panel's own `width`, the
+     *   `viewportWidth` and the `margin` kept from either edge.
+     * @returns the pixel `left` the panel is drawn at, never outside the margins.
+     */
+    function panelOffset({ anchorLeft, width, viewportWidth, margin = 8 }) {
+      if (!(width > 0) || !(viewportWidth > 0)) return 0
+      // A panel wider than the window is pinned to the left margin: there is no
+      // position that fits, and the near edge is the one the reader can scroll from.
+      const room = Math.max(margin, viewportWidth - margin - width)
+      return Math.min(Math.max(anchorLeft, margin), room) - anchorLeft
     }
     //#endregion
 
@@ -1216,14 +1259,53 @@ window.__ModuleLoader__.load({
 
     const useStore = () => react.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
 
-    /** A clock that ticks while a component is mounted, for countdowns. */
+    /**
+     * A clock that ticks while a component is mounted, for countdowns.
+     *
+     * An interval of `0` opens no timer at all, which is how a component that decides
+     * not to render says so: the hook still runs, the value is still there for anything
+     * that reads it, and nothing ticks.
+     */
     function useNow(intervalMs) {
       const [now, setNow] = react.useState(() => Date.now())
       react.useEffect(() => {
+        if (!(intervalMs > 0)) return undefined
         const timer = setInterval(() => setNow(Date.now()), intervalMs)
         return () => clearInterval(timer)
       }, [intervalMs])
       return now
+    }
+
+    /**
+     * The `left` an anchored panel is drawn at, re-measured when the window moves.
+     *
+     * The stylesheet anchors both panels at `left: 0` inside their pill's anchor box, so
+     * the only thing that can move a panel into the window is a measurement. The
+     * measure runs on every render — the panel's own width changes with its tab — while
+     * the `resize` listener is one registration for the life of the component, holding
+     * the same function every time so re-registering is a no-op rather than a swap.
+     */
+    function usePanelLeft(panelRef, open) {
+      const [left, setLeft] = react.useState(0)
+      const measure = react.useRef({ run: null })
+      if (measure.current.run === null) {
+        measure.current.run = () => {
+          const panel = panelRef.current
+          if (panel === null || panel === undefined || typeof panel.getBoundingClientRect !== 'function') return
+          const rect = panel.getBoundingClientRect()
+          const viewportWidth = typeof window === 'undefined' ? 0 : window.innerWidth
+          setLeft(panelOffset({ anchorLeft: rect.left, width: rect.width, viewportWidth }))
+        }
+      }
+      react.useEffect(() => { measure.current.run() })
+      react.useEffect(() => {
+        if (open !== true) return undefined
+        const { run } = measure.current
+        if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined
+        window.addEventListener('resize', run)
+        return () => window.removeEventListener('resize', run)
+      }, [])
+      return left
     }
     //#endregion
 
@@ -1313,7 +1395,9 @@ window.__ModuleLoader__.load({
           type: 'button',
           className: 'dshb_pill',
           title: legend,
-          'aria-label': `${t('readout.aria')}: ${legend}`,
+          // The accessible name is the legend itself: the line carries no visible labels,
+          // so a prefix here would announce a string no sighted reader can ever read.
+          'aria-label': legend,
           'aria-expanded': open,
           onClick: () => setOpen((value) => !value),
         }, line),
@@ -1327,8 +1411,8 @@ window.__ModuleLoader__.load({
       return function PeakChip(props) {
         const { t } = props
         const state = useStore()
-        const nowMs = useNow(1000)
         const [open, setOpen] = react.useState(false)
+        const panelRef = react.useRef(null)
         const prop = (name, ...args) => {
           try {
             return typeof props[name] === 'function' ? props[name](...args) : undefined
@@ -1340,15 +1424,24 @@ window.__ModuleLoader__.load({
         const projection = prop('useProjection', 'modelSelection')
         const payload = state.payload
         const route = effectiveRoute(projection, catalogSnapshot())
-        const local = payload?.peak === null || payload?.peak === undefined
-          ? null
-          : phaseFromSchedule(payload.peak.schedule, payload.host?.now ?? state.at, payload.peak.peak, nowMs)
+        // Half of the bail-out below is known before the clock is needed, and a chip
+        // that renders nothing must not keep a one-second interval alive for the whole
+        // session: `useNow(0)` opens none and the value stays where it was.
+        const wanted = isFreshSession === forNewSession
+          && route !== null && isPeakRuleRoute(route.provider)
+          && payload?.peak !== null && payload?.peak !== undefined
+        const nowMs = useNow(wanted ? 1000 : 0)
+        // The panel's own hooks run before the bail-out like every other one: whether a
+        // fresh session stops being fresh is a change the shell can make at any time,
+        // and a hook behind a conditional return is a hook the next render skips.
+        const panelLeft = usePanelLeft(panelRef, open)
+        const local = wanted
+          ? phaseFromSchedule(payload.peak.schedule, payload.host?.now ?? state.at, payload.peak.peak, nowMs)
+          : null
 
-        if (isFreshSession !== forNewSession) return null
-        if (route === null || !isPeakRuleRoute(route.provider)) return null
-        if (local === null) return null
+        if (!wanted) return null
 
-        const remaining = local.untilMs === null ? '—' : formatRemaining(local.untilMs)
+        const remaining = remainingText(local.untilMs)
         const text = local.phase === 'peak'
           ? t('peak.chip.peak', { remaining })
           : local.phase === 'soon'
@@ -1364,7 +1457,14 @@ window.__ModuleLoader__.load({
         }, text)
 
         if (open === false) return forNewSession ? h('div', { className: 'dshb_float' }, chip) : chip
-        const panel = h('div', { className: `dshb_panel ${forNewSession ? 'dshb_panel_above' : 'dshb_panel_below'}` }, [
+        const panel = h('div', {
+          className: `dshb_panel ${forNewSession ? 'dshb_panel_above' : 'dshb_panel_below'}`,
+          ref: panelRef,
+          // `right: auto` because the floating panel's own rule is `right: 0` and two
+          // opposite offsets with a definite width is a box whose meaning depends on
+          // the writing direction. The correction is one number either way.
+          style: panelLeft === 0 ? undefined : { left: `${panelLeft}px`, right: 'auto' },
+        }, [
           h('div', { className: 'dshb_panel_title', key: 'title' }, t('peak.title')),
           ...peakLines(t, payload, route, local, nowMs).map((line, index) => h('div', { key: `line-${index}` }, line)),
         ])
@@ -1405,7 +1505,7 @@ window.__ModuleLoader__.load({
         lines.push(t(local.changeToPeak ? 'peak.nextPeakStarts' : 'peak.nextPeakEnds', {
           day: dayWord,
           time: changeAt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }),
-          remaining: formatRemaining(local.untilMs ?? 0),
+          remaining: remainingText(local.untilMs),
         }))
       }
       if (!local.peak && (peak.reason === 'holiday' || peak.reason === 'weekend')) {
@@ -1432,6 +1532,7 @@ window.__ModuleLoader__.load({
       // element itself, so the header, the tab row and the footer are all counted.
       const panelRef = react.useRef(null)
       const [panelHeight, setPanelHeight] = react.useState(null)
+      const panelLeft = usePanelLeft(panelRef, true)
       const payload = state.payload
 
       react.useEffect(() => {
@@ -1459,7 +1560,11 @@ window.__ModuleLoader__.load({
           role: 'dialog',
           'aria-label': t('card.title'),
           // `max-height` in the stylesheet still wins in a short window.
-          style: panelHeight === null ? undefined : { height: `${panelHeight}px` },
+          style: {
+            ...(panelHeight === null ? {} : { height: `${panelHeight}px` }),
+            // The stylesheet's own `left: 0` stands unless the panel has to move in.
+            ...(panelLeft === 0 ? {} : { left: `${panelLeft}px` }),
+          },
         }, [
           h('div', { className: 'dshb_popover_head', key: 'head' }, [
             h('div', { key: 'titles' }, [
@@ -1579,7 +1684,7 @@ window.__ModuleLoader__.load({
       if (peak !== null) {
         row(t('tip.tariff'), t(`reason.${peak.phase ?? 'off-peak'}`))
         if (peak.changeAt !== null && peak.changeAt !== undefined) {
-          row(t('tip.next'), `${clock(peak.changeAt)} · ${formatRemaining(peak.untilMs ?? 0)}`)
+          row(t('tip.next'), `${clock(peak.changeAt)} · ${remainingText(peak.untilMs)}`)
         }
       }
       if (ledger !== null) {
@@ -1744,7 +1849,7 @@ window.__ModuleLoader__.load({
     }
 
     function Settings({ t, state }) {
-      const [draft, setDraft] = react.useState(() => settingsOf(state.payload) ?? {})
+      const [draft, setDraft] = react.useState(() => settingsOf(state.payload))
       const [status, setStatus] = react.useState('')
       const [busy, setBusy] = react.useState(false)
       // The fields the reader has typed in. A poll delivers a brand-new payload object
@@ -1822,6 +1927,10 @@ window.__ModuleLoader__.load({
           field('dangerThreshold', t('settings.danger')),
           field('historyDays', t('settings.historyDays'), 1),
         ]),
+        // The two thresholds are the Host's to store and this tab's to write, but
+        // nothing draws the balance by them: saying so is the difference between a
+        // setting and a control that appears to do something.
+        h('div', { className: 'dshb_footer', key: 'reserved' }, t('settings.reserved')),
         rateModels.length === 0 ? null : h('div', { className: 'dshb_settings_block', key: 'rates' }, [
           h('div', { className: 'dshb_settings_title', key: 'title' }, t('settings.fallbackRates')),
           h(RateEntry, {
@@ -2187,6 +2296,11 @@ window.__ModuleLoader__.load({
           else seen.push(visible)
         }
         if (seen.length === 0) continue
+        // The Step a row selects is the one the Finding starts at, as an index into the
+        // visible slice. The walk above starts at `refs.from`, so that is the first
+        // entry whenever the Step is in range; when the reader has panned or zoomed past
+        // it, the fallback is the first referenced Step the range still holds — the
+        // alternative is a row that selects something outside the plot.
         rows.push({ ...finding, at: seen[0], partial: hidden > 0 })
         for (const index of seen) {
           const list = at.get(index)
@@ -2217,17 +2331,32 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The last visible-range filter.
+     * The last visible-range filters, one entry per window.
      *
      * A wheel zoom re-renders on every frame and the filter is a pure function of the
-     * series and the window, so one entry is enough (design I24: the client filter is
-     * memoised on `(from, to)`).
+     * series and the window, so a key per window is enough (design I24: the client filter
+     * is memoised on `(from, to)`). One module-level slot was not: two Cost views bound
+     * to two sessions hold two different keys, and each render of either evicted the
+     * other's answer. The map is bounded because the key carries a session id and a
+     * window fraction, so a pan would otherwise leave one entry per frame behind.
      */
-    let overlayCache = null
+    const OVERLAY_MEMO_SLOTS = 4
+    const overlayCache = new Map()
+
     function overlayMemo(key, compute) {
-      if (overlayCache !== null && overlayCache.key === key) return overlayCache.value
+      const hit = overlayCache.get(key)
+      if (hit !== undefined) {
+        // Re-inserting makes the map's insertion order the order of last use, so the
+        // bound drops the window that has been untouched the longest.
+        overlayCache.delete(key)
+        overlayCache.set(key, hit)
+        return hit
+      }
       const value = compute()
-      overlayCache = { key, value }
+      overlayCache.set(key, value)
+      while (overlayCache.size > OVERLAY_MEMO_SLOTS) {
+        overlayCache.delete(overlayCache.keys().next().value)
+      }
       return value
     }
 
@@ -2431,22 +2560,46 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The clip threshold a plot of these values would use, and whether any of them
+     * reaches it.
+     *
+     * The two figures the note above the chart prints, without a plot: the caller that
+     * has no measured width pays for one map and one comparison instead of a second
+     * `buildPlot` with its own points, decimation, digest and scale closures per frame.
+     *
+     * @param values - the metric of each node, in order.
+     * @param clip - whether clipping is on at all; a `false` clips nothing.
+     * @returns `{ threshold, clipped }`, the threshold being `null` when nothing clips.
+     */
+    function clipOf(values, clip) {
+      const threshold = clip ? clipThreshold(values) : null
+      if (threshold === null) return { threshold, clipped: false }
+      return { threshold, clipped: values.some((value) => value > threshold) }
+    }
+
+    /**
      * The pixel-space model of the chart.
      *
      * @param nodes - the per-Step records the route served.
      * @param options - `width`, `height`, `metric`, `projection`, `clip`, `axis` and
-     * `window`: the `{ fromMs, toMs }` the X axis spans, which is the zoom window and
-     * not necessarily the extent of `nodes`.
+     *   `window`: the `{ fromMs, toMs }` the X axis spans, which is the zoom window and
+     *   not necessarily the extent of `nodes`.
      * @returns points (with their Step), the decimated bars and marks, the
-     * clipping threshold and the value the Y axis tops out at.
+     *   clipping threshold and the value the Y axis tops out at.
      */
     function buildPlot(nodes, options = {}) {
       const { width = 720, height = 240, metric = 'cost', projection = 'fact', clip = true, axis = 'time' } = options
       const { fromMs, toMs } = options.window ?? seriesWindow(nodes)
       const values = nodes.map((node) => metricOf(node, metric, projection))
-      const threshold = clip ? clipThreshold(values) : null
+      const { threshold } = clipOf(values, clip)
       const capped = values.map((value) => (threshold !== null && value > threshold ? threshold : value))
-      const scale = valueAxis(Math.max(0, ...capped))
+      // A loop rather than `Math.max(0, ...capped)`: one argument per plotted value, and
+      // a session long enough to overflow the argument list is a session a reader has.
+      let highest = 0
+      for (const value of capped) {
+        if (value > highest) highest = value
+      }
+      const scale = valueAxis(highest)
       const max = scale.max
       const xOf = axis === 'index'
         ? linearScale(0, Math.max(1, nodes.length - 1), 0, width)
@@ -3364,11 +3517,16 @@ window.__ModuleLoader__.load({
       // them to the visible range, and that filter is memoised on the window (I24).
       const findings = findingsOf(payload)
       const nodeAt = new Map(allNodes.map((node, index) => [node, index]))
-      const overlay = overlayMemo([
+      // The key of a visible-range filter: everything the answer depends on except the
+      // nodes themselves, which the caller already has. Both readings below are the same
+      // computation on the same nodes, so they share the cache rather than the session's
+      // entry evicting the subtree's on every render.
+      const overlayKey = (suffix, count) => [
         sessionId, payload?.seq ?? 0, payload?.anomalies?.preset ?? '',
         JSON.stringify(payload?.fallbackRates ?? {}),
-        axis, range === null ? 'all' : `${range.from}:${range.to}`, findings.length, slice.nodes.length,
-      ].join(':'), () => overlayOf(allNodes, slice.nodes, findings))
+        axis, range === null ? 'all' : `${range.from}:${range.to}`, count, slice.nodes.length, suffix,
+      ].join(':')
+      const overlay = overlayMemo(overlayKey('session', findings.length), () => overlayOf(allNodes, slice.nodes, findings))
       // Without a payload there is no figure to lead with: a dash beats a `$0.00`
       // that would read as "this session cost nothing".
       const total = payload === null ? null : session.totals[projection] ?? session.total
@@ -3507,19 +3665,32 @@ window.__ModuleLoader__.load({
       }
 
       // Left/right walk the Steps of the visible slice. The listener sits on the
-      // document because the plot is a canvas and never takes focus itself; it is
-      // re-registered every render so it always closes over the current selection.
+      // document because the plot is a canvas and never takes focus itself, and it is
+      // registered once: a pan re-renders at frame rate, so a dependency array over the
+      // slice and the selection would re-register on every frame of the drag, and no
+      // array at all would do the same. The three values it needs are read through a ref
+      // written on every render, so the handler is always the current one — and it is
+      // the *same* handler every time, so re-running the effect re-registers a
+      // registration the browser already holds rather than replacing it.
+      const walking = react.useRef({ nodes: slice.nodes, selected, select, onKey: null })
+      walking.current.nodes = slice.nodes
+      walking.current.selected = selected
+      walking.current.select = select
+      if (walking.current.onKey === null) {
+        walking.current.onKey = (event) => {
+          const current = walking.current
+          const delta = arrowDelta(event)
+          if (delta === 0 || current.nodes.length === 0) return
+          if (typeof event.preventDefault === 'function') event.preventDefault()
+          current.select(nextSelection(current.selected, delta, current.nodes.length))
+        }
+      }
       react.useEffect(() => {
         if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return undefined
-        const onKey = (event) => {
-          const delta = arrowDelta(event)
-          if (delta === 0 || slice.nodes.length === 0) return
-          if (typeof event.preventDefault === 'function') event.preventDefault()
-          select(nextSelection(selected, delta, slice.nodes.length))
-        }
+        const { onKey } = walking.current
         document.addEventListener('keydown', onKey)
         return () => document.removeEventListener('keydown', onKey)
-      })
+      }, [])
 
       // Which session this is, on a line of its own: the id is the handle the reader
       // passes on — to an agent, an export or a bug report — so it is shown in full,
@@ -3604,7 +3775,11 @@ window.__ModuleLoader__.load({
       const subtreeReading = tab === 'subagents' && subtree.status === 'ok'
       const reading = {
         subtree: subtreeReading,
-        rows: subtreeReading ? overlayOf(allNodes, slice.nodes, subtree.findings).rows : overlay.rows,
+        // The same filter on the same nodes, over the subtree's own Findings, and it
+        // shares the cache: recomputing it un-memoised cost a full pass per render.
+        rows: subtreeReading
+          ? overlayMemo(overlayKey('subtree', subtree.findings.length), () => overlayOf(allNodes, slice.nodes, subtree.findings).rows)
+          : overlay.rows,
       }
       const controls = h('div', { className: 'dshb_cost_controls', key: 'controls' }, [
         h(Segmented, {
@@ -3658,14 +3833,19 @@ window.__ModuleLoader__.load({
         ])
       }
 
-      const plot = buildPlot(slice.nodes, { clip, axis, metric, projection, window: { fromMs: slice.fromMs, toMs: slice.toMs } })
-      const clipped = plot.points.some((point) => point.clipped)
+      // Two figures for the note below, not a second plot: the chart builds its own at
+      // the measured width, and the width is the only thing this call would have got
+      // wrong. The threshold and the clipped flag are the same ones it will report.
+      const { threshold, clipped } = clipOf(
+        slice.nodes.map((node) => metricOf(node, metric, projection)),
+        clip,
+      )
       // A Compaction step is ranked with the Steps but draws no point of their line.
       const rows = topRows(slice.nodes, {
         metric, projection, mode: topk, count: TOP_K, compactions: visibleCompactions,
       })
       const note = h('div', { className: 'dshb_cost_note', key: 'note' }, [
-        h('span', { key: 'clip' }, clipped ? `${t('cost.clip', { value: costText(plot.threshold, currency) })} ` : ''),
+        h('span', { key: 'clip' }, clipped ? `${t('cost.clip', { value: costText(threshold, currency) })} ` : ''),
         clipped ? h('button', { key: 'unclip', className: 'dshb_btn', onClick: () => setClip(false) }, t('cost.unclip')) : null,
         windowed ? h('button', { key: 'reset', className: 'dshb_btn', onClick: () => setWindow(null) }, t('cost.zoom.reset')) : null,
         h('span', { key: 'hint' }, t('cost.zoom.hint')),
@@ -4415,12 +4595,6 @@ window.__ModuleLoader__.load({
       ])
     }
 
-    /** A share as a percentage, at the precision its own size deserves. */
-    function percentText(share) {
-      const value = (share ?? 0) * 100
-      return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)}%`
-    }
-
     /** A ratio as `4.2×`, which is how a spike names its distance from the median. */
     function multipleText(value, base) {
       if (!(base > 0) || !Number.isFinite(value)) return '—'
@@ -4448,7 +4622,7 @@ window.__ModuleLoader__.load({
             median: money(e.median),
             threshold: money(e.threshold),
             z: z(e.z),
-            share: percentText(e.share),
+            share: shareOf(e.share, 1),
           })
         case 'verbose-output':
           return t('cost.finding.verbose.text', {
@@ -4464,7 +4638,7 @@ window.__ModuleLoader__.load({
             : t('cost.finding.retry.step', { count: e.value, threshold: e.threshold, cost: money(e.cost) })
         case 'cache-miss':
           return t('cost.finding.cache.text', {
-            share: percentText(e.value), steps: e.steps, threshold: percentText(e.threshold),
+            share: shareOf(e.value, 1), steps: e.steps, threshold: shareOf(e.threshold, 1),
           })
         case 'tool-output-inflation':
           return t('cost.finding.tool.text', {
@@ -4479,15 +4653,15 @@ window.__ModuleLoader__.load({
           })
         case 'expensive-subtree':
           return t('cost.finding.subtree.text', {
-            share: percentText(e.value), cost: money(e.subtreeCost), session: money(e.sessionCost),
+            share: shareOf(e.value, 1), cost: money(e.subtreeCost), session: money(e.sessionCost),
           })
         case 'tariff-attributable':
           return t('cost.finding.tariff.text', {
-            share: percentText(e.value), delta: money(e.delta), total: money(e.total),
+            share: shareOf(e.value, 1), delta: money(e.delta), total: money(e.total),
           })
         case 'pricing-gap':
           return t('cost.finding.gap.text', {
-            share: percentText(e.value), steps: e.steps, tokens: tokens(e.unpricedTokens),
+            share: shareOf(e.value, 1), steps: e.steps, tokens: tokens(e.unpricedTokens),
           })
         default:
           return t('cost.finding.unknown', { kind: String(finding.kind) })
@@ -4515,10 +4689,17 @@ window.__ModuleLoader__.load({
       return rows
     }
 
-    /** A Step's share of the session, as a percentage of two significant digits. */
+    /**
+     * A value's share of a total, as a percentage of two significant digits.
+     *
+     * The one share formatter in the file: a Step's share of the session passes its
+     * total, a Finding's own `share` evidence passes a total of 1 because the Host has
+     * already done the division. A total of zero has no share to state, and neither has
+     * a value the payload left out.
+     */
     function shareOf(value, total) {
       if (!(total > 0)) return '0%'
-      const percent = (value / total) * 100
+      const percent = ((value ?? 0) / total) * 100
       return `${percent >= 10 ? percent.toFixed(0) : percent.toFixed(1)}%`
     }
 
@@ -4957,9 +5138,10 @@ window.__ModuleLoader__.load({
      */
     exports.__internals = {
       Readout, Popover, Summary, DaysTable, Credits, Settings, createPeakChip, createStore,
-      money, duration, formatRemaining, statusLevel, phaseFromSchedule, effectiveRoute,
+      money, duration, formatRemaining, remainingText, panelOffset, dayLabel, clock,
+      phaseFromSchedule, effectiveRoute,
       routeFromModelSelection, routeFromCatalogDefault, isPeakRuleRoute, settingsOf, peakLines,
-      CostView, CostChart, CostInspector, CostEmpty, drawPlot, metricOf, linearScale, clipThreshold,
+      CostView, CostChart, CostInspector, CostEmpty, drawPlot, metricOf, linearScale, clipThreshold, clipOf,
       decimatePoints, seriesWindow, phaseOf, bandRanges, turnSeparators, seriesSummary, seriesState,
       plotTicks, buildPlot, bucketLine, shareOf, tooltipPlacement, costDigits, costText,
       costColumnDigits, costCell, indexTicks, projectionOf, Segmented, RateEntry, rateDraftOf,
@@ -4969,7 +5151,7 @@ window.__ModuleLoader__.load({
       sessionPrompts, lastStep, subtreeReads, MAX_PROMPT_SESSIONS, MAX_STEP_SESSIONS,
       valueAxis, compactNumber, tickLabel, tooltipLines,
       Findings, findingsOf, overlayOf, overlayMemo, findingsAt, findingText, findingExplain, thresholdLines,
-      findingPlace, findingRank, MAX_BADGES, FINDING_GLYPH, compactionRows, percentText,
+      findingPlace, findingRank, MAX_BADGES, FINDING_GLYPH, compactionRows, OVERLAY_MEMO_SLOTS,
     }
     return module.exports
   },

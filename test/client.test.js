@@ -11,7 +11,7 @@ import { CATALOGUE } from '../src/indicators.js'
 
 /** A React stub: enough for the hooks the plugin uses, with effects run inline. */
 function reactStub() {
-  const state = { cursor: 0, slots: {} }
+  const state = { cursor: 0, slots: {}, box: { left: 0, top: 0, width: 0, height: 0 } }
   const subscriptions = []
   const cleanups = []
   const react = {
@@ -39,6 +39,17 @@ function reactStub() {
       }
     },
     /**
+     * The box every stand-in ref reports, for the tests that place an anchored panel.
+     *
+     * The stub has no layout, so a panel that measures itself would read zero and stay
+     * where the stylesheet put it; a test sets the box it wants to measure and reads
+     * the position the component derived from it.
+     */
+    setBox(box) {
+      state.box = { left: 0, top: 0, width: 0, height: 0, ...box }
+      return state.box
+    },
+    /**
      * Unmount the view the way the shell does when another conversation view takes
      * over: hook state and effects go away, module-level memory does not.
      */
@@ -56,11 +67,13 @@ function reactStub() {
     useRef(initial) {
       const index = state.cursor++
       // The plugin takes refs to measure elements and to attach the non-passive
-      // wheel listener, so the stub hands it a stand-in that can do both.
+      // wheel listener, so the stub hands it a stand-in that can do both. The box it
+      // reports is the one a test set: an anchored panel cannot be placed without one.
       if (!(index in state.slots)) {
         const target = {
           offsetHeight: 321,
           listeners: {},
+          getBoundingClientRect: () => state.box,
           addEventListener(type, fn) {
             this.listeners[type] = [...(this.listeners[type] ?? []), fn]
           },
@@ -350,10 +363,51 @@ test('the readout renders the compact balance and spend line', async () => {
     assert.match(pill.props.title, /tip\.spend1d\/tip\.spend1w\/tip\.spend1m/)
     assert.match(pill.props.title, /tip\.session/)
     assert.equal(pill.props['aria-expanded'], false)
+    // The accessible name is the legend a sighted reader reads on hover, verbatim: the
+    // line itself carries no labels, so a prefix would announce a string nothing shows.
+    assert.equal(pill.props['aria-label'], pill.props.title, 'the accessible name is the tooltip’s own legend')
+    assert.doesNotMatch(pill.props['aria-label'], /readout\.aria/, 'and the prefix it used to carry is gone')
   } finally {
     react.stop()
     restore()
   }
+})
+
+test('times and dates are the browser’s, and a day key is never shifted a zone', async () => {
+  const { exported, react } = await loadClient()
+  const { clock, dayLabel } = exported.__internals
+  // The spec asks for the browser's locale rather than a hand-built `HH:MM`/`dd.mm`, so
+  // the expectation is the platform's own rendering of the same instant and the same
+  // calendar day. Pinning the digits instead would fail on a machine whose locale is
+  // not this one's, which is exactly the failure the requirement exists to prevent.
+  const expectedTime = (ts) => new Date(ts).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+  const expectedDate = (key) => {
+    const [year, month, day] = key.split('-').map(Number)
+    return new Date(year, month - 1, day).toLocaleDateString(undefined, { day: '2-digit', month: '2-digit' })
+  }
+
+  assert.equal(clock(NOW), expectedTime(NOW), 'a time is the locale’s rendering of that instant')
+  assert.equal(clock(0), null, 'and an instant the panel has no clock for renders as nothing')
+  assert.equal(clock('noon'), null, 'whatever is not a positive instant')
+  // The day key is a calendar day in the ledger's own zone, not an instant: parsing it
+  // as UTC midnight would show the previous day west of Greenwich, which is the bug
+  // this assertion exists to hold shut in every `TZ` the suite is run under.
+  assert.equal(dayLabel('2026-09-18'), expectedDate('2026-09-18'))
+  assert.ok(dayLabel('2026-09-18').includes('18') && dayLabel('2026-09-18').includes('09'),
+    `the 18th of September reads as the 18th, not as the 17th (${dayLabel('2026-09-18')})`)
+  assert.equal(dayLabel('2026-12-31'), expectedDate('2026-12-31'), 'a year boundary is a day boundary too')
+
+  // The rendered Days table is where a reader meets the formatter, so it is checked
+  // there rather than only on the helper.
+  const ledger = { ...payload.ledger, rows: [payload.ledger.rows[0]] }
+  react.beginRender()
+  const cell = find(
+    react.createElement(exported.__internals.DaysTable, { t: (key) => key, ledger, currency: 'USD' }),
+    (element) => element.type === 'td' && typeof element.children?.[0] === 'string',
+  )
+  assert.equal(textOf(cell[0]).split(' · ')[0], expectedDate('2026-09-17'),
+    'the Days table prints the locale’s date for the key the ledger sent')
+  react.stop()
 })
 
 test('the session projection outranks the payload copy of the session cost', async () => {
@@ -471,6 +525,49 @@ test('the peak chip renders its countdown and hides for a foreign provider', asy
   }
 })
 
+test('a chip that renders nothing keeps no clock running', async () => {
+  const { exported, react } = await loadClient()
+  const catalogSnapshot = () => ({ value: { default: { provider: 'deepseek-official', model: 'deepseek-flash' } } })
+  const open = {
+    t: (key) => key,
+    useSession: (select) => select({ blank: false, running: false, promptAttempted: false }),
+    useProjection: (key) => (key === 'modelSelection' ? { next: null, lastUsed: null } : undefined),
+  }
+  const fresh = { ...open, useSession: (select) => select({ blank: true, running: false, promptAttempted: false }) }
+  const foreign = { ...open, useProjection: () => ({ next: { provider: 'pi-ai', model: 'x' }, lastUsed: null }) }
+  // A chip that returns `null` used to leave a one-second interval armed for the rest
+  // of the session, and there is no component left to clear it: the shell mounts the
+  // slot once and the bail-out is the end of its life.
+  const previousSetInterval = globalThis.setInterval
+  const armed = []
+  // A stand-in handle rather than a real timer: the test counts what the component
+  // arms, and a one-hour interval would keep the process alive past the suite.
+  globalThis.setInterval = (fn, ms) => {
+    armed.push(ms)
+    return { fn, ms }
+  }
+  const restore = stubFetch()
+  try {
+    const chip = exported.__internals.createPeakChip({ forNewSession: false, catalogSnapshot })
+    const floating = exported.__internals.createPeakChip({ forNewSession: true, catalogSnapshot })
+    react.beginRender()
+    textOf(react.createElement(floating, open))
+    assert.equal(textOf(react.createElement(floating, open)), '', 'the floating copy skips a session with a header')
+    react.beginRender()
+    textOf(react.createElement(chip, { ...open, useProjection: () => ({ next: { provider: 'pi-ai', model: 'x' }, lastUsed: null }) }))
+    assert.deepEqual(armed, [], 'a chip that renders nothing arms no interval at all')
+    await turn()
+
+    react.beginRender()
+    assert.match(textOf(react.createElement(chip, open)), /peak\.chip/, 'the chip on a rule route is on screen')
+    assert.ok(armed.length > 0 && armed.every((ms) => ms === 1000), `the one that is counts down (${armed})`)
+  } finally {
+    globalThis.setInterval = previousSetInterval
+    react.stop()
+    restore()
+  }
+})
+
 test('the route helpers prefer the projection and fall back to the catalog default', async () => {
   const { exported } = await loadClient()
   const { effectiveRoute, routeFromModelSelection, routeFromCatalogDefault, isPeakRuleRoute } = exported.__internals
@@ -553,6 +650,83 @@ test('the panel holds the summary height for every tab', async () => {
   assert.equal(body.props.style, undefined, 'the body itself is not sized: it fills the panel and scrolls')
   const tabs = find(tree, (element) => element.props?.className === 'dshb_tabs')[0]
   assert.ok(tabs !== undefined, 'the tab row sits outside the body')
+})
+
+test('an anchored panel is pulled back inside a narrow window', async () => {
+  const { exported, react } = await loadClient()
+  const { panelOffset } = exported.__internals
+  // The panel hangs off a pill that can sit at either end of the composer line, and the
+  // stylesheet's own `left: 0` puts a 560px popover past the right edge next to a
+  // right-aligned pill. What the helper returns is that correction in pixels.
+  assert.equal(panelOffset({ anchorLeft: 300, width: 560, viewportWidth: 1400 }), 0,
+    'a panel that fits keeps the anchor’s own edge')
+  assert.equal(panelOffset({ anchorLeft: 900, width: 560, viewportWidth: 1000 }), -468,
+    'a panel that would hang off the right is pulled back to the margin')
+  assert.equal(panelOffset({ anchorLeft: -40, width: 200, viewportWidth: 1000 }), 48,
+    'and one hanging off the left is pushed in')
+  assert.equal(panelOffset({ anchorLeft: 40, width: 1200, viewportWidth: 1000 }), -32,
+    'a panel wider than the window is pinned to the left margin, the edge a reader can scroll from')
+  assert.equal(panelOffset({ anchorLeft: 300, width: 0, viewportWidth: 1000 }), 0,
+    'an unmeasured panel is left where the stylesheet put it')
+
+  // The same correction on the rendered element, in a window the panel does not fit in.
+  globalThis.window.innerWidth = 1000
+  react.setBox({ left: 900, width: 560 })
+  try {
+    const mount = () => {
+      react.beginRender()
+      return react.createElement(exported.__internals.Popover, {
+        t: (key) => key,
+        state: { status: 'ok', payload, error: null, at: Date.now() },
+        projection: { cost: 0.33, currency: 'USD' },
+        onClose: () => {},
+      })
+    }
+    find(mount(), (element) => element.props?.className === 'dshb_popover')
+    const panel = find(mount(), (element) => element.props?.className === 'dshb_popover')[0]
+    assert.equal(panel.props.style.left, '-468px', 'the popover is drawn inside the window, not off its edge')
+    assert.equal(parseInt(panel.props.style.left, 10) + 900 + 560, 1000 - 8, 'its right edge sits on the margin')
+
+    // A window wide enough for the panel leaves it exactly where the anchor put it.
+    globalThis.window.innerWidth = 1400
+    react.setBox({ left: 300, width: 560 })
+    find(mount(), (element) => element.props?.className === 'dshb_popover')
+    const roomy = find(mount(), (element) => element.props?.className === 'dshb_popover')[0]
+    assert.equal(roomy.props.style.left, undefined, 'and then the stylesheet’s own edge stands')
+  } finally {
+    delete globalThis.window.innerWidth
+    react.stop()
+  }
+})
+
+test('a payload with no countdown renders the placeholder, not a zero', async () => {
+  const { exported, react } = await loadClient()
+  const { remainingText } = exported.__internals
+  assert.equal(remainingText(null), '—', 'a nullish wait is a missing figure')
+  assert.equal(remainingText(undefined), '—')
+  assert.equal(remainingText(0), '0s', 'and a wait of nothing is a real zero, spelled as one')
+
+  // The Host reports a change instant without a countdown when its schedule carries no
+  // future transition. Printing `0s` there claims the change is due now, and the rest of
+  // the panel spells a missing figure as a dash.
+  const counted = { ...payload, peak: { ...payload.peak, untilMs: 45 * 60_000 } }
+  const uncounted = { ...payload, peak: { ...payload.peak, untilMs: null } }
+  const nextRow = (current) => {
+    const summary = find(react.createElement(exported.__internals.Summary, {
+      t: (key) => key,
+      state: { status: 'ok', payload: current, error: null, at: Date.now() },
+      projection: { cost: 0.33, currency: 'USD' },
+    }), (element) => String(element.props?.className ?? '').includes('dshb_row')
+      && textOf(element).startsWith('tip.next'))
+    return textOf(summary[0])
+  }
+  react.beginRender()
+  assert.match(nextRow(counted), /45m/, 'a countdown is shown as itself')
+  react.beginRender()
+  const missing = nextRow(uncounted)
+  assert.match(missing, /· —$/, `the next-change row ends in the placeholder, not 0s (${missing})`)
+  assert.doesNotMatch(missing, /0s/)
+  react.stop()
 })
 
 test('the summary tab spells out every figure the plugin holds', async () => {
@@ -841,6 +1015,42 @@ test('the settings tab posts the fields it edits', async () => {
   }
 })
 
+test('the settings tab says the two balance thresholds are reserved', async () => {
+  const { exported, react } = await loadClient()
+  const ctx = clientContext()
+  exported.apply(ctx)
+  // The copy the tab actually renders, so the assertion is on what a reader reads in
+  // both shipped locales rather than on the keys the test happens to use.
+  const copy = ctx.dictionary()
+  const say = (locale) => (key, params) => {
+    const text = copy[locale][key] ?? key
+    return params === undefined ? text : text.replace(/\{(\w+)\}/g, (_, name) => params[name])
+  }
+  for (const locale of ['en', 'ru']) {
+    react.beginRender()
+    const text = textOf(react.createElement(exported.__internals.Settings, {
+      t: say(locale),
+      state: { status: 'ok', payload, error: null, at: Date.now() },
+    }))
+    assert.match(text, locale === 'en' ? /reserved/i : /зарезервирован/i,
+      `${locale}: the tab says the thresholds are reserved`)
+    assert.doesNotMatch(text, /Amber below|Red below|Жёлтый ниже|Красный ниже/,
+      `${locale}: no label promises a colour nothing draws`)
+    // The two inputs are still there and still write: the Host stores and validates
+    // them, and a setting a reader may set is not a control that was taken away.
+    const inputs = find(
+      react.createElement(exported.__internals.Settings, { t: say(locale), state: { status: 'ok', payload, error: null, at: Date.now() } }),
+      (element) => element.type === 'input',
+    )
+    assert.deepEqual(inputs.map((input) => input.props.value).slice(4, 6), [10, 5], `${locale}: both thresholds are offered`)
+  }
+  // Nothing colours the balance by them, so nothing offers a colouring either: the two
+  // helpers that could have been the implementation are gone rather than half-wired.
+  assert.equal(exported.__internals.statusLevel, undefined, 'no dead colouring helper is left exported')
+  assert.equal(exported.__internals.percentText, undefined, 'and the two share formatters are one')
+  react.stop()
+})
+
 test('a poll does not replace what the reader is typing in the settings tab', async () => {
   const { exported, react } = await loadClient()
   const posts = []
@@ -867,6 +1077,18 @@ test('a poll does not replace what the reader is typing in the settings tab', as
 
     assert.deepEqual(fields(payload), ['USD', 'Europe/Moscow', 300000, 15000, 10, 5, 2],
       'every field is prefilled from the payload')
+    // The tab seeds its draft straight from `settingsOf`, which builds the whole object
+    // and so can never hand back a nullish: the `?? {}` that used to guard that call
+    // was dead, and this is what says so rather than leaving it to be re-added.
+    assert.deepEqual(exported.__internals.settingsOf(null), {
+      currency: 'USD',
+      dayZone: 'local',
+      refreshIntervalMs: 300000,
+      clientPollIntervalMs: 15000,
+      warningThreshold: 10,
+      dangerThreshold: 5,
+      historyDays: 30,
+    }, 'even with no payload at all, the draft has every field it renders')
 
     // The reader types a currency, in the case a reader types one. Two polls land while
     // they are still typing: the Host answers each with the same settings it was asked
@@ -1437,8 +1659,54 @@ test('the chart data helpers decimate, clip and band without a DOM', async () =>
   assert.equal(seriesState('error', null, nodes, summary), 'error')
   assert.equal(SeriesStateNoRates(seriesState, seriesSummary), 'empty-rates')
   assert.equal(shareOf(5, 10), '50%')
-  assert.equal(shareOf(1, 0), '0%')
+  assert.equal(shareOf(1, 0), '0%', 'a total of nothing has no share to state')
+  assert.equal(shareOf(0.042, 1), '4.2%', 'a share the Host already divided is a share of one')
+  assert.equal(shareOf(undefined, 1), '0.0%', 'and one the payload left out reads as no share')
   assert.match(bucketLine(nodes[0].buckets), /1000000 in/)
+})
+
+test('the clip note’s two figures are the chart’s, without a second plot', async () => {
+  const { exported } = await loadClient()
+  const { clipOf, buildPlot, metricOf, clipThreshold } = exported.__internals
+  const long = [
+    ...Array.from({ length: 40 }, (_, index) => costNode({ turn: 1, step: index + 1, tStart: NOW - (40 - index) * MINUTE, tEnd: NOW - (39 - index) * MINUTE, cost: 1 })),
+    costNode({ turn: 2, step: 1, tStart: NOW, tEnd: NOW + MINUTE, cost: 1000 }),
+  ]
+  const values = long.map((node) => metricOf(node, 'cost', 'fact'))
+  // The note above the chart prints the threshold and whether anything reached it, and
+  // the component that prints it has no measured width: asking for the two figures is
+  // what keeps one plot per render instead of two.
+  assert.deepEqual(clipOf(values, true), {
+    threshold: clipThreshold(values),
+    clipped: values.some((value) => value > clipThreshold(values)),
+  })
+  assert.equal(clipOf(values, true).clipped, true, 'the outlier is the one that reaches the threshold')
+  assert.deepEqual(clipOf(values, false), { threshold: null, clipped: false }, 'clipping off clips nothing')
+  assert.deepEqual(clipOf([], true), { threshold: null, clipped: false }, 'and an empty range has nothing to clip')
+  // Same answer as the plot the chart builds, which is what makes the note honest.
+  const plot = buildPlot(long, { width: 300, height: 100, clip: true })
+  assert.equal(clipOf(values, true).threshold, plot.threshold)
+  assert.equal(clipOf(values, true).clipped, plot.points.some((point) => point.clipped))
+})
+
+test('a plot of a session long enough to overflow an argument list still builds', async () => {
+  const { exported } = await loadClient()
+  const { buildPlot } = exported.__internals
+  // `Math.max(0, ...values)` is one argument per plotted value, and V8 gives out at
+  // around a hundred and twenty-eight thousand of them (`node -e` on the kernel's 24:
+  // `Math.max(0, ...new Array(125000))` is fine, `130000` is a `RangeError`). Nothing
+  // caps a session series, so a long one used to throw where it should have drawn.
+  const many = Array.from({ length: 130_000 }, (_, index) => costNode({
+    turn: Math.floor(index / 50) + 1,
+    step: (index % 50) + 1,
+    tStart: NOW - (130_000 - index) * 1000,
+    tEnd: NOW - (129_999 - index) * 1000,
+    cost: 1,
+  }))
+  const plot = buildPlot(many, { width: 720, height: 240, clip: true })
+  assert.equal(plot.points.length, 130_000, 'every Step is a point')
+  assert.ok(Number.isFinite(plot.max) && plot.max > 0, `and the axis tops out at a real figure (${plot.max})`)
+  assert.ok(plot.bars.length <= 720, 'one bar per pixel column, whatever the series length')
 })
 
 /** The no-rates state: tokens were reported, but no rate applies to them. */
@@ -1606,7 +1874,13 @@ test('the tooltip names the model beside the Step, not on its own line', async (
   })
   assert.equal(lines.length, 4, 'the tooltip is four lines')
   assert.equal(lines[0], 'Turn 1 · Step 1 · deepseek-flash', 'the model shares the Step line')
-  assert.match(lines[1], /^\d{2}:\d{2} · cost\.tip\.phase\.off-peak$/, 'the time and the tariff phase share one line')
+  // The time is the browser's own rendering of that instant, not a hand-built `HH:MM`:
+  // a test that pinned the digits would go red on a machine whose locale is `en-US`.
+  assert.equal(
+    lines[1],
+    `${new Date(costNode().tStart).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })} · cost.tip.phase.off-peak`,
+    'the time and the tariff phase share one line, and the time is the locale’s',
+  )
   assert.equal(lines[2], '156 in · 7224 out · 184960 cache read · 0 cache write', 'input and output first, then the caches')
   assert.match(lines[3], /^\$0\.0049 · cost\.tip\.share$/)
   assert.ok(!lines.some((line) => line === 'deepseek-flash'), 'the model never takes a line of its own')
@@ -1977,7 +2251,6 @@ test('the Step reached from Trajectory is still marked when the view comes back'
 test('the arrow keys walk the Steps of the visible slice', async () => {
   const { exported } = await loadClient()
   const { arrowDelta, nextSelection } = exported.__internals
-
   assert.equal(arrowDelta({ key: 'ArrowRight' }), 1)
   assert.equal(arrowDelta({ key: 'ArrowLeft' }), -1)
   assert.equal(arrowDelta({ key: 'ArrowUp' }), 0)
@@ -2006,6 +2279,67 @@ test('the arrow keys walk the Steps of the visible slice', async () => {
   assert.equal(nextSelection(4, 1, 5), 4)
   assert.equal(nextSelection(3, 1, 0), -1, 'nothing on screen means nothing to select')
   assert.equal(nextSelection(9, 1, 5), 0, 'a stale index starts over instead of pointing nowhere')
+})
+
+test('the arrow-key listener is one listener, whatever the render rate', async () => {
+  const { exported, react } = await loadClient()
+  const nodes = Array.from({ length: 4 }, (_, index) => costNode({
+    turn: 1,
+    step: index + 1,
+    tStart: NOW - (4 - index) * HOUR,
+    tEnd: NOW - (3 - index) * HOUR,
+  }))
+  const posts = []
+  const restore = stubSeriesAndWrites(costPayload(nodes), posts)
+  // A document that behaves like the DOM's: the same type, listener and capture is one
+  // registration however often it is added. A pan re-renders at frame rate, and an
+  // effect that re-registers per frame churns two DOM calls per frame for a listener
+  // the reader cannot tell is there.
+  const keys = new Set()
+  const added = []
+  const removed = []
+  const previousDocument = globalThis.document
+  globalThis.document = {
+    hidden: false,
+    addEventListener(type, fn) {
+      if (type !== 'keydown') return
+      added.push(fn)
+      keys.add(fn)
+    },
+    removeEventListener(type, fn) {
+      if (type !== 'keydown') return
+      removed.push(fn)
+      keys.delete(fn)
+    },
+  }
+  try {
+    const props = { t: (key) => key, sessionId: 'session-7', useProjection: () => undefined }
+    react.beginRender()
+    textOf(react.createElement(exported.__internals.CostView, props))
+    await turn()
+    for (let frame = 0; frame < 10; frame += 1) {
+      react.beginRender()
+      textOf(react.createElement(exported.__internals.CostView, props))
+    }
+    assert.equal(keys.size, 1, `ten renders leave one keydown listener, not ten (${keys.size})`)
+    assert.ok(added.length >= 1, 'the view does register one')
+    assert.deepEqual(removed, [], 'and nothing tore it down on the way')
+
+    // The single listener is the current one: it reads the slice and the selection
+    // through a ref, so it walks the Steps the reader can see.
+    const before = find(react.createElement(exported.__internals.CostView, props), (element) => element.props?.className === 'dshb_cost_mark')
+    assert.equal(before.length, 0, 'nothing is selected yet')
+    for (const handler of [...keys]) handler({ key: 'ArrowRight', target: { tagName: 'DIV' }, preventDefault: () => {} })
+    react.beginRender()
+    const after = find(react.createElement(exported.__internals.CostView, props), (element) => element.props?.className === 'dshb_cost_mark')
+    assert.equal(after.length, 1, 'and the key that reaches it selects the first Step of the slice')
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document
+    else globalThis.document = previousDocument
+    await turn()
+    react.stop()
+    restore()
+  }
 })
 
 test('a stored projection and metric come back on mount, and a click is written through', async () => {
@@ -3395,6 +3729,44 @@ test('a Finding that reaches beyond the visible range is listed and marked', asy
   assert.deepEqual(beyond.rows, [], 'a Finding whose Steps are all outside the window is not listed')
 })
 
+test('a Finding row selects the Step it starts at, or the first one still in range', async () => {
+  const { exported, react } = await loadClient()
+  const { overlayOf } = exported.__internals
+  const nodes = Array.from({ length: 6 }, (_, index) => costNode({ turn: 1, step: index + 1 }))
+  const findings = [finding('context-growth', [1, 4])]
+  // The spec says activating a row selects the Step the Finding starts at. That Step is
+  // `refs.from`, an index into the whole series, and `at` is an index into the visible
+  // slice — so the two only agree while the window still holds the start.
+  const whole = overlayOf(nodes, nodes, findings)
+  assert.equal(whole.rows[0].at, 1, 'with the whole series in view, the row selects the Step it starts at')
+
+  // Panned right past the start: the first two Steps are off screen and the run's tail
+  // is not, so the row is listed, marked as reaching beyond the window, and lands on the
+  // first referenced Step the range still holds — the alternative is a selection off the
+  // plot, and the badge for the same Step sits on the same index.
+  const panned = overlayOf(nodes, nodes.slice(2), findings)
+  assert.equal(panned.rows[0].partial, true, 'the run starts before the window')
+  assert.equal(panned.rows[0].at, 0, 'and the row selects the first referenced Step the window holds')
+  assert.deepEqual(panned.marks.map((mark) => mark.index), [0, 1, 2], 'the badges are on the visible Steps it blames')
+  assert.deepEqual(overlayOf(nodes, nodes.slice(5), findings).rows, [],
+    'and a run with nothing of it in range is not listed at all')
+
+  // What the reader presses is what gets selected: the card hands the row's own index
+  // to the same handler a badge does.
+  const picked = []
+  const tree = react.createElement(exported.__internals.Findings, {
+    t: (key) => key,
+    rows: panned.rows,
+    currency: 'CNY',
+    steps: nodes.length,
+    onSelect: (at) => picked.push(at),
+  })
+  const row = find(tree, (element) => String(element.props?.className ?? '').split(' ').includes('dshb_finding_warn'))[0]
+  row.props.onClick()
+  assert.deepEqual(picked, [0], 'activating the row selects that Step')
+  react.stop()
+})
+
 test('the visible-range filter is memoised on the window and stays inside its budget', async () => {
   const { exported } = await loadClient()
   const { overlayOf, overlayMemo } = exported.__internals
@@ -3412,6 +3784,19 @@ test('the visible-range filter is memoised on the window and stays inside its bu
   const moved = overlayMemo('session-7:5:balanced:time:0.2:1:1:8', compute)
   assert.equal(computed, 2, 'a new window is a new filter')
   assert.notEqual(moved, first)
+  // One module-level slot was the bug: two Cost views bound to two sessions hold two
+  // keys, and each render of either threw the other's answer away, so the filter ran
+  // per frame for both. Asking for the first key again is what a second view does.
+  assert.equal(overlayMemo('session-7:5:balanced:time:0:1:1:8', () => { throw new Error('evicted') }), first,
+    'the window asked for first survives the one asked for second')
+  assert.equal(computed, 2, 'so neither view re-filters what it already has')
+  // A pan leaves a new key on every frame, so the map is bounded: the oldest window
+  // falls out and is filtered again, and the page holds a fixed number of answers.
+  const slots = exported.__internals.OVERLAY_MEMO_SLOTS
+  for (let frame = 0; frame < slots; frame += 1) overlayMemo(`pan:${frame}`, compute)
+  assert.equal(computed, 2 + slots, 'every new window is filtered once')
+  overlayMemo('session-7:5:balanced:time:0:1:1:8', compute)
+  assert.equal(computed, 2 + slots + 1, 'and the window a pan pushed out of the cache is filtered again')
 
   const wide = Array.from({ length: 10_000 }, (_, index) => costNode({ turn: 1, step: index + 1 }))
   const lots = Array.from({ length: 200 }, (_, index) => finding('spike', [index * 4, index * 4 + 3]))
