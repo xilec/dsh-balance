@@ -715,7 +715,11 @@ test('a partially shaped event contributes nothing, and a located Step with no u
     { type: 'step/start', time, data: { turn: null, step: 1 } },
     { type: 'step/start', time, data: { turn: '1', step: 1 } },
     { type: 'step/start', time, data: { turn: 1, step: -1 } },
-    { type: 'assistant/message', time, data: { turn: 1, step: 1, usage: { inputTokens: 1e6 } } },
+    // A report carrying real money on a location no Step can have. The alternative to
+    // dropping it is billing it onto whatever Step happens to be pending, which is the
+    // one thing the series cannot do: the reader would be looking at a fabricated Step.
+    { type: 'assistant/message', time, data: { turn: 'one', step: 1, usage: { inputTokens: 1e6, outputTokens: 1e6 } } },
+    { type: 'assistant/attempt', time, data: { turn: 1, stream: [{ type: 'chunk', chunk: { type: 'usage', usage: { inputTokens: 1e6, outputTokens: 1e6 } } }] } },
   ]
   const state = fold(unit, sequenced([
     ...pricedStep(time, 1, 1),
@@ -736,7 +740,8 @@ test('a partially shaped event contributes nothing, and a located Step with no u
     ['step', 2, 1, true, 2],
     ['compaction', 2, null, false, 0],
   ], 'only the located Step opened a node, it is visible with no cost, and the compaction kept its own rule')
-  assert.equal(view.cost, 4, 'the unlocatable report is not billed onto a Step that never made it')
+  assert.equal(view.cost, 4, 'a report on no valid location is not billed onto a Step that never made it')
+  assert.equal(view.tokens.output, 0, 'and its tokens are not counted either')
   assert.equal(view.steps, 3, 'a Compaction step is not a Step the reader walks through')
   assert.equal(nodes.reduce((sum, node) => sum + node.cost, 0), view.cost, 'the sum invariant still holds exactly')
   unit.stateSchema.parse(JSON.parse(JSON.stringify(state)), 'and no node was written the schema would refuse')
@@ -749,9 +754,10 @@ test('a tool call whose own fields are missing is still the call the log recorde
     ...pricedStep(time, 1, 1),
     { type: 'tool/call', time: time + 500, data: { turn: 1, step: 1, name: null, callId: null, arguments: null } },
   ]))
-  const [node] = seriesPayload(state, { currency: 'CNY' })
-  assert.deepEqual(node.calls.map((call) => [call.name, call.callId, call.preview]), [['', '', '']])
-  assert.equal(node.cost, 2, 'a call prices nothing, so the money is unchanged')
+  const nodes = seriesPayload(state, { currency: 'CNY' })
+  assert.deepEqual(nodes[0].calls.map((call) => [call.name, call.callId, call.preview]), [['', '', '']])
+  assert.equal(nodes[0].cost, 2, 'a call prices nothing, so the money is unchanged')
+  assert.equal(nodes.reduce((sum, node) => sum + node.cost, 0), unit.wire.view(state).cost, 'the sum invariant still holds exactly')
 })
 
 test('a fault in the fold is still a fault, not an empty series', () => {
@@ -760,8 +766,10 @@ test('a fault in the fold is still a fault, not an empty series', () => {
   const events = pricedStep(time, 1, 1)
   // A malformed event is skipped by a shape check; a state whose own internals are
   // broken is our bug, and must still throw rather than fold into an empty series.
+  // The events are the well-formed ones above, folded into the broken state: nothing
+  // here is malformed, so a catch anywhere in `apply` would swallow the fault.
   const broken = { ...unit.init(), byModel: null }
-  assert.throws(() => fold(unit, events.reduce((state) => broken, unit.init())), TypeError)
+  assert.throws(() => events.reduce((state, event) => unit.apply(state, event), broken), TypeError)
   const throwingConfig = makeSessionCostProjection(() => { throw new Error('the rule is unreadable') })
   assert.throws(() => fold(throwingConfig, events), /the rule is unreadable/)
 })

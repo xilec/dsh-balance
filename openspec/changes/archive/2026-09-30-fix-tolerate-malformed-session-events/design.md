@@ -146,4 +146,17 @@ route or payload changes, and reverting the commit restores the old behaviour ex
 
 ## Open Questions
 
-None.
+None blocking this change. Three findings were left open on purpose and belong to later work:
+
+- **A `tool/call` with no `callId` is folded as `callId: ''`, and dedupe is by `callId`** — so
+  several such calls in one Step collapse into the first. Pre-existing, not a regression, and
+  the fallback key is a design question of its own (`seq` collides for the same reason). Left
+  alone here: the change is about not throwing, and the collapse predates it.
+- **`projectionStateOf` answers `unknown-session` for a fault and for a session that is not
+  there** — both arrive as a throw from `readSession` or from the fold and leave through the
+  same `catch`, distinguishable only by the `detail` string. A bug in this code therefore
+  reads as "no such session". Left alone here: the error code is a wire contract the client
+  matches on, and separating the two is its own change with its own spec question.
+- **The `Date.now()` fallback for an event with no usable `time`** is the one impure read left
+  in a fold the rest of this change makes shape-checked. Left alone, and named in the module
+  doc: dropping the report instead would lose money to buy a purity the log never threatened.

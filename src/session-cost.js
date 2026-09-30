@@ -39,6 +39,12 @@
  * worse answer than a session that is short one Step. The checks are shape checks and not
  * a `try`/`catch` around the fold, so a fault in this code still surfaces as a fault.
  *
+ * The one clock read left in the fold is the fallback for an event with no usable `time`
+ * (`Date.now()`, in `withReport`, `withCall`, `withCompaction` and the two `step/*` arms).
+ * It predates the shape checks and stays: pricing the report is worth more than the purity,
+ * and a stored log always carries a time, so the fallback answers an event that never had
+ * one rather than a common case.
+ *
  * @module dsh-balance/session-cost
  */
 import { z } from 'zod'

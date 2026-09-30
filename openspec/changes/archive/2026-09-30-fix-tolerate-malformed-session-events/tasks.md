@@ -32,15 +32,22 @@
   with the sum invariant intact
   — done: one case folds the data-less events of all ten families between two priced Steps and
   asserts `Σ nodes === view.cost`, both Steps' costs, the Step count, and that the result still
-  passes `stateSchema`; it fails on `HEAD` with the reported
-  `Cannot destructure property 'turn' of 'event.data'`
+  passes `stateSchema`; on `main` it throws out of the first family it reaches,
+  `Cannot read properties of undefined (reading 'header')` — the `step/*`, `tool/call` and
+  `assistant/*` families report the same defect as
+  `Cannot destructure property 'turn' of 'event.data' as it is undefined`
 - [x] 2.2 Add the partially shaped cases the brief names: a `request/header` whose `header` holds
   no `config`, a `request/context` with no `model`, a `step/start` with a `turn` but no `step`, a
   `step/start` with a `null` turn, a string turn and a negative step, and an `assistant/message`
-  whose location is fine but whose Turn was never opened — asserting each contributes nothing and
-  the sum still holds exactly
+  and an `assistant/attempt` whose usage is real but whose location is not — asserting each
+  contributes nothing and the sum still holds exactly
   — done: the second case walks all of them plus a compaction naming an unusable Turn, and
-  re-asserts the invariant, the node count and the schema
+  re-asserts the invariant, the node count and the schema; the two unlocatable reports assert
+  that neither the cost nor the tokens of a report with no place to go reach the estimate, so
+  re-homing a report onto the pending Step fails the case
+  — note: a report on a *valid* location whose Step has not opened yet is **not** skipped. It
+  opens that node and is billed, exactly as a `tool/call` for the same location would; the
+  earlier wording of this item said otherwise and was wrong
 - [x] 2.3 Assert that a *located* `step/start` with no usage still opens a node, so the tolerance
   did not turn "no usage" into "no node" and silently redefine the series
   — done: the case in 2.2 asserts a `hasUsage: false` node survives between the two priced ones
