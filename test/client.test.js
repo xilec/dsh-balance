@@ -586,6 +586,22 @@ test('a window is labelled with the days it measured, not with a length of its o
   assert.match(older, /card\.month:{"days":30\}/, older)
   assert.match(older, /card\.week:{"days":7\}/)
 
+  // Zero days is a count and not a missing one, which is what a ledger no sample has reached
+  // reports: falling back to the length there would read "30 of 30 days measured".
+  const unreached = summary(state({
+    ...payload,
+    ledger: {
+      ...payload.ledger,
+      totals: {
+        d1: { amount: 0, covered: false, days: 0 },
+        w1: { amount: 0, covered: false, days: 0 },
+        m1: { amount: 0, covered: false, days: 0 },
+      },
+    },
+  }))
+  assert.match(unreached, /card\.month:{"days":0\}/, unreached)
+  assert.match(unreached, /tip\.partial:{"days":0\}/)
+
   // The copy carries no length of its own to drift from the payload.
   const copy = ctx.dictionary()
   for (const locale of ['en', 'ru']) {

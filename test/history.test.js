@@ -253,9 +253,10 @@ test('a ledger of 30 days or more produces the figures it produced before', () =
   // rows' own values rather than over the raw deltas.
   const samples = dailySamples(nowMs, 45)
   const overrides = { '2026-09-10': 3.25 }
-  // What `main` answered for these inputs, recorded before the change. The 1d and 1w figures
-  // are the same for every `historyDays`, and so is the month as long as the ledger is no
-  // longer than the window — including the corrected day, which is inside all of them.
+  // What `main` answered for these inputs, recorded before the change. The day total does not
+  // depend on `historyDays` at all and the week total only below 7 rows; the month is the sum
+  // of every row `main` kept, so it matches for as long as the ledger is no longer than the
+  // window — including the corrected day, which is inside all of them.
   const before = { 3: 1.5, 7: 3.5, 29: 17.25, 30: 17.75 }
   for (const zone of ['UTC', 'Europe/Berlin', 'Asia/Kolkata']) {
     for (const days of [3, 7, 29, 30]) {

@@ -539,8 +539,8 @@ window.__ModuleLoader__.load({
         'tip.toppedUp': 'Пополнено',
         'tip.granted': 'Подарочные',
         'tip.spend1d': 'За сутки',
-        'tip.spend1w': 'За {days} дней',
-        'tip.spend1m': 'За {days} дней',
+        'tip.spend1w': 'За {days} дн.',
+        'tip.spend1m': 'За {days} дн.',
         'tip.session': 'Эта сессия (оценка)',
         'tip.tariff': 'Тариф сейчас',
         'tip.next': 'Следующая смена',
@@ -567,8 +567,8 @@ window.__ModuleLoader__.load({
         'card.balance': 'Баланс',
         'card.today': 'Сегодня',
         'card.session': 'Эта сессия',
-        'card.week': '{days} дней',
-        'card.month': '{days} дней',
+        'card.week': '{days} дн.',
+        'card.month': '{days} дн.',
         'card.unavailable': 'баланс недоступен',
         'days.date': 'День',
         'days.sampled': 'Из сэмплов',
@@ -824,7 +824,11 @@ window.__ModuleLoader__.load({
      */
     function windowDays(totals, length) {
       const days = totals?.days
-      return Number.isInteger(days) && days > 0 ? days : length
+      // Zero is a count like any other — a ledger no sample has reached is not a window of
+      // its full length, and a fallback here would print "0 of 30 days measured" as "30 of
+      // 30". Only a missing or malformed count, which is what a Host from before the change
+      // sends, falls back to the length.
+      return Number.isInteger(days) && days >= 0 ? days : length
     }
 
     /**
