@@ -340,6 +340,7 @@ window.__ModuleLoader__.load({
         'footer.client': 'client {version}',
         'common.close': 'Close',
         'common.refresh': 'Refresh now',
+        'common.refreshFailed': 'refresh failed: {error}',
         'common.never': 'never',
         'peak.chip.peak': 'Peak · ends in {remaining}',
         'peak.chip.soon': 'Peak soon · {remaining}',
@@ -601,6 +602,7 @@ window.__ModuleLoader__.load({
         'footer.client': 'клиент {version}',
         'common.close': 'Закрыть',
         'common.refresh': 'Обновить',
+        'common.refreshFailed': 'не удалось обновить: {error}',
         'common.never': 'никогда',
         'peak.chip.peak': 'Пик · закончится через {remaining}',
         'peak.chip.soon': 'Скоро пик · {remaining}',
@@ -1132,6 +1134,32 @@ window.__ModuleLoader__.load({
         }, pollMs)
       }
 
+      /**
+       * Arm the next poll on the interval that is current now.
+       *
+       * `schedule` keeps its early return so exactly one timer is ever live, which means a
+       * cadence learned after that timer was armed is ignored until the timer fires: at the
+       * default fifteen seconds a written cadence is simply late, and from an old cadence of
+       * an hour the new one never runs. Both places that learn an interval outside a poll —
+       * a settings write and a session switch — re-arm through here instead.
+       *
+       * A read already in flight is left alone: it settles and reports as usual, and its own
+       * `schedule` finds the timer this call armed and does nothing, so the chain continues
+       * at the new interval from the moment it was learned.
+       *
+       * With no subscriber there is nothing to poll for — `subscribe` is what arms the
+       * first timer, and its disposer is what drops the last one — so a cadence learned
+       * while every surface is unmounted is remembered without leaving a timer behind.
+       */
+      const reschedule = () => {
+        if (subscribers === 0) return
+        if (timer !== null) {
+          clearTimeout(timer)
+          timer = null
+        }
+        schedule()
+      }
+
       async function post(path, body) {
         const response = await fetch(path, {
           method: 'POST',
@@ -1163,7 +1191,7 @@ window.__ModuleLoader__.load({
           const next = typeof id === 'string' ? id : ''
           if (next === currentSessionId) return
           currentSessionId = next
-          void read().then(schedule, schedule)
+          void read().then(reschedule, reschedule)
         },
         refresh: () => read(),
         async setOverride(date, amount) {
@@ -1175,6 +1203,9 @@ window.__ModuleLoader__.load({
           const result = await post('/dsh-balance/settings', values)
           pollMs = clamp(result?.sampling?.clientPollIntervalMs ?? pollMs, 2000, 3600000)
           await read()
+          // The timer armed before the write still carries the old interval, so it is
+          // dropped here rather than left to expire on it.
+          reschedule()
           return result
         },
         forceRefresh: () => post('/dsh-balance/refresh', {}).then(() => read()),
@@ -1228,7 +1259,10 @@ window.__ModuleLoader__.load({
       react.useEffect(() => {
         if (!open || typeof document === 'undefined') return undefined
         const onKey = (event) => {
-          if (event.key === 'Escape') setOpen(false)
+          // The day rows answer `Escape` themselves, by putting the stored value back on
+          // screen. Closing the panel as well would throw away the tab the reader is in
+          // for a keystroke that was meant for one cell.
+          if (event.key === 'Escape' && !editingTarget(event)) setOpen(false)
         }
         document.addEventListener('keydown', onKey)
         return () => document.removeEventListener('keydown', onKey)
@@ -1388,6 +1422,10 @@ window.__ModuleLoader__.load({
      */
     function Popover({ t, state, projection, onClose }) {
       const [tab, setTab] = react.useState('summary')
+      // The footer's refresh is a request the reader pressed and is waiting on, so a
+      // refusal is answered where they pressed rather than swallowed: the export line
+      // reports its outcome the same way, and the Days tab has to surface a failed write.
+      const [refreshError, setRefreshError] = react.useState('')
       // The panel is exactly as tall as the summary it opens on: a shorter tab is
       // padded to that height instead of shrinking the panel under the pointer, and a
       // taller one scrolls inside the same frame. The height comes from the panel
@@ -1462,8 +1500,16 @@ window.__ModuleLoader__.load({
               h('button', {
                 className: 'dshb_btn',
                 key: 'refresh',
-                onClick: () => store.forceRefresh().catch(() => {}),
+                onClick: () => {
+                  setRefreshError('')
+                  void store.forceRefresh().catch((cause) => {
+                    setRefreshError(cause instanceof Error ? cause.message : String(cause))
+                  })
+                },
               }, t('common.refresh')),
+              refreshError === ''
+                ? null
+                : h('span', { className: 'dshb_flag', key: 'refreshErr' }, t('common.refreshFailed', { error: refreshError })),
               h('span', { key: 'versions' }, `${t('footer.host', { version: payload?.host?.version ?? '?' })} · ${t('footer.client', { version: VERSION })}`),
             ]),
           ]),
@@ -1571,15 +1617,33 @@ window.__ModuleLoader__.load({
       const [drafts, setDrafts] = react.useState({})
       const [busy, setBusy] = react.useState('')
       const [error, setError] = react.useState('')
+      // The key of the row whose write has not settled. This is a ref rather than the
+      // `busy` state because `busy` only reaches the DOM on the next render, while a
+      // handler captured in this render still closes over the previous value: two Enters
+      // inside one frame would both see an idle row and post two corrections.
+      const inFlight = react.useRef('')
       if (ledger === null) return h('div', { className: 'dshb_footer' }, '…')
 
       const valueOf = (row) => Object.prototype.hasOwnProperty.call(drafts, row.key)
         ? drafts[row.key]
         : (row.override !== null ? String(row.override) : '')
 
-      const commit = async (row) => {
-        const raw = valueOf(row).trim()
+      /** Claim the row, or report that this reader's press is the second one. */
+      const begin = (row) => {
+        if (inFlight.current === row.key) return false
+        inFlight.current = row.key
         setBusy(row.key)
+        return true
+      }
+
+      const end = () => {
+        inFlight.current = ''
+        setBusy('')
+      }
+
+      const commit = async (row) => {
+        if (!begin(row)) return
+        const raw = valueOf(row).trim()
         setError('')
         try {
           await store.setOverride(row.key, raw === '' ? (row.computed > 0 ? row.computed : null) : Number(raw))
@@ -1590,7 +1654,7 @@ window.__ModuleLoader__.load({
         } catch (cause) {
           setError(cause instanceof Error ? cause.message : String(cause))
         } finally {
-          setBusy('')
+          end()
         }
       }
 
@@ -1615,6 +1679,9 @@ window.__ModuleLoader__.load({
               value: valueOf(row),
               placeholder: '—',
               inputMode: 'decimal',
+              // A row whose correction is on its way to the Host is not edited again,
+              // not even by a keystroke that beat the render.
+              disabled: busy === row.key,
               onChange: (event) => setDrafts((current) => ({ ...current, [row.key]: event.target.value })),
               onKeyDown: (event) => {
                 if (event.key === 'Enter') void commit(row)
@@ -1639,12 +1706,14 @@ window.__ModuleLoader__.load({
                 className: 'dshb_btn',
                 disabled: busy === row.key,
                 onClick: () => {
+                  // The same guard as a commit: two clicks on a stale handler, or a
+                  // reset while a correction on this row is in flight, post one request.
+                  if (!begin(row)) return
                   setDrafts((current) => {
                     const { [row.key]: _dropped, ...rest } = current
                     return rest
                   })
-                  setBusy(row.key)
-                  void store.setOverride(row.key, null).catch((cause) => setError(String(cause))).finally(() => setBusy(''))
+                  void store.setOverride(row.key, null).catch((cause) => setError(String(cause))).finally(end)
                 },
               }, t('days.reset')) : null,
             ])),
@@ -1674,6 +1743,11 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = react.useState(() => settingsOf(state.payload) ?? {})
       const [status, setStatus] = react.useState('')
       const [busy, setBusy] = react.useState(false)
+      // The fields the reader has typed in. A poll delivers a brand-new payload object
+      // every fifteen seconds, so seeding the whole draft from it would replace a
+      // half-typed currency or cadence before Apply is ever pressed. An untouched field
+      // still follows the payload; a touched one keeps the reader's value until they save.
+      const [touched, setTouched] = react.useState({})
 
       // The models worth a rate: the ones the reader already priced and the ones the
       // open session could not price. Anything else would be a guess about the future.
@@ -1683,8 +1757,16 @@ window.__ModuleLoader__.load({
       ])]
 
       react.useEffect(() => {
-        if (state.payload !== null) setDraft(settingsOf(state.payload))
-      }, [state.payload])
+        if (state.payload === null) return
+        const fresh = settingsOf(state.payload)
+        setDraft((current) => {
+          const merged = { ...fresh }
+          for (const key of Object.keys(touched)) {
+            if (Object.prototype.hasOwnProperty.call(current, key)) merged[key] = current[key]
+          }
+          return merged
+        })
+      }, [state.payload, touched])
 
       const field = (key, label, step) => h('label', { className: 'dshb_field', key }, [
         h('span', { key: 'l' }, label),
@@ -1693,7 +1775,10 @@ window.__ModuleLoader__.load({
           value: draft?.[key] ?? '',
           type: key === 'currency' || key === 'dayZone' ? 'text' : 'number',
           step,
-          onChange: (event) => setDraft((current) => ({ ...current, [key]: event.target.value })),
+          onChange: (event) => {
+            setTouched((current) => ({ ...current, [key]: true }))
+            setDraft((current) => ({ ...current, [key]: event.target.value }))
+          },
         }),
       ])
 
@@ -1708,6 +1793,10 @@ window.__ModuleLoader__.load({
             if (Number.isFinite(value)) body[key] = key === 'historyDays' ? Math.round(value) : value
           }
           await store.saveSettings(body)
+          // The write is the Host's answer, so the payload behind it is what the tab
+          // shows from now on: a value it rounded or stored differently replaces what
+          // the reader typed.
+          setTouched({})
           setStatus(t('settings.saved'))
         } catch (cause) {
           setStatus(t('settings.failed', { error: cause instanceof Error ? cause.message : String(cause) }))
@@ -3116,6 +3205,20 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Whether the event came from a field the reader is typing in.
+     *
+     * Both the arrow keys and `Escape` are claimed by the surface they sit in — the chart's
+     * selection and the panel's own close — but a caret and a half-typed amount are the
+     * reader's: the arrows must move through text, and `Escape` must discard the edit in a
+     * day row rather than close the panel that holds it.
+     */
+    function editingTarget(event) {
+      const target = event?.target ?? {}
+      const tag = String(target.tagName ?? '').toLowerCase()
+      return tag === 'input' || tag === 'textarea' || tag === 'select' || target.isContentEditable === true
+    }
+
+    /**
      * Which way an arrow key moves the selection: -1 back, 1 on, 0 for anything else.
      *
      * The keys belong to the view, but a reader typing in the composer or in a settings
@@ -3124,9 +3227,7 @@ window.__ModuleLoader__.load({
     function arrowDelta(event) {
       if (event === null || event === undefined) return 0
       if (event.altKey === true || event.ctrlKey === true || event.metaKey === true) return 0
-      const target = event.target ?? {}
-      const tag = String(target.tagName ?? '').toLowerCase()
-      if (tag === 'input' || tag === 'textarea' || tag === 'select' || target.isContentEditable === true) return 0
+      if (editingTarget(event)) return 0
       if (event.key === 'ArrowLeft') return -1
       if (event.key === 'ArrowRight') return 1
       return 0
@@ -4856,7 +4957,7 @@ window.__ModuleLoader__.load({
       plotTicks, buildPlot, bucketLine, shareOf, tooltipPlacement, costDigits, costText,
       costColumnDigits, costCell, indexTicks, projectionOf, Segmented, RateEntry, rateDraftOf,
       TopK, topRows, visibleSlice, sumBuckets, zoomWindow, panWindow, clampWindow, isFullWindow, turnSpans,
-      arrowDelta, nextSelection, subtreeOf, stepGroups, Subagents, SubagentOpen, openSessionCost, preferCostView,
+      arrowDelta, nextSelection, editingTarget, subtreeOf, stepGroups, Subagents, SubagentOpen, openSessionCost, preferCostView,
       costHistory, exportFileName, truncateText, EXPORT_DETAILS, CostExport, saveTextFile, readSeries, readText, promptForNode,
       sessionPrompts, lastStep, subtreeReads, MAX_PROMPT_SESSIONS, MAX_STEP_SESSIONS,
       valueAxis, compactNumber, tickLabel, tooltipLines,
