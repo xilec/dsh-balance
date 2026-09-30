@@ -31,6 +31,20 @@
  * rate reprices the whole history — including the running aggregates, which carry the
  * rule they were priced with and are rebuilt from the series when that rule changes.
  *
+ * A stored log is data, not a contract this unit can rely on: an event may arrive with
+ * no `data`, or with one that names no `(Turn, Step)` the series can hold it at. The
+ * fold therefore reads every event through an explicit shape check and skips what does
+ * not match, so one odd entry leaves the rest of the session priced — the Host turns a
+ * throw out of this fold into `unknown-session` for the *whole* session, which is a far
+ * worse answer than a session that is short one Step. The checks are shape checks and not
+ * a `try`/`catch` around the fold, so a fault in this code still surfaces as a fault.
+ *
+ * The one clock read left in the fold is the fallback for an event with no usable `time`
+ * (`Date.now()`, in `withReport`, `withCall`, `withCompaction` and the two `step/*` arms).
+ * It predates the shape checks and stays: pricing the report is worth more than the purity,
+ * and a stored log always carries a time, so the fallback answers an event that never had
+ * one rather than a common case.
+ *
  * @module dsh-balance/session-cost
  */
 import { z } from 'zod'
@@ -64,6 +78,53 @@ export function makeFallbackResolver(config = {}) {
     if (own !== undefined) return own
     return config.fallbackPrices
   }
+}
+
+/**
+ * The `data` of one stored event, or an empty object when it is not one.
+ *
+ * A session log is read back from disk, so a stored event may be missing its `data`
+ * entirely or hold something that is not an object at all. `projectionStateOf` folds
+ * a session's stored log through this unit and its `catch` turns *any* throw into
+ * `unknown-session`, which would hide the whole session — hours of priced work —
+ * behind one odd entry. Reading the data through here turns "no data" into the same
+ * empty case a partially shaped event already produces, so the arm below decides what
+ * an event with nothing to say means instead of the exception deciding it.
+ *
+ * The alternative, a `try`/`catch` around the fold, is deliberately not used: it
+ * cannot tell a malformed event from a fault in this code, because both arrive as the
+ * same `TypeError` at the same place. This check names the input it rejects, so
+ * everything else still throws and a real bug is still reported as one.
+ *
+ * @param event - the stored event.
+ * @returns its own `data` when that is an object, `{}` otherwise.
+ */
+const dataOf = (event) => (typeof event?.data === 'object' && event.data !== null ? event.data : {})
+
+/**
+ * Whether one field is an index this series accepts: a non-negative integer.
+ *
+ * The series holds one node per `(Turn, Step)` location and `nodeSchema` declares
+ * both as non-negative integers or `null`, with `null` reserved for a Compaction
+ * step — "it belongs to no Step, and to no Turn when none precedes it". So a
+ * `(Turn, Step)` that is not a pair of non-negative integers names no node the
+ * series can hold, and an event naming none contributes nothing.
+ */
+const isIndex = (value) => Number.isInteger(value) && value >= 0
+
+/**
+ * The `(turn, step)` location one event names, or `null` when it names none.
+ *
+ * `null` is the honest answer for an event whose data is missing, holds a `null`
+ * field, a string, a float, a negative number, or only one half of the pair: there
+ * is no node such an event can be folded onto, and inventing one would put the
+ * event's money and tool calls on a Step the conversation never had.
+ *
+ * @param data - the event's data, already through `dataOf`.
+ * @returns `{ turn, step }`, or `null` when the pair is not two valid indices.
+ */
+function locationOf(data) {
+  return isIndex(data.turn) && isIndex(data.step) ? { turn: data.turn, step: data.step } : null
 }
 
 const bucketsSchema = z.object({
@@ -259,9 +320,10 @@ function lastUsageChunk(stream) {
 
 /** The usage a durable assistant settlement reports for its attempt, if any. */
 function usageOf(event) {
-  if (event.type === 'assistant/message' && event.data.usage !== undefined) return event.data.usage
+  const data = dataOf(event)
+  if (event.type === 'assistant/message' && data.usage !== undefined) return data.usage
   if (event.type !== 'assistant/message' && event.type !== 'assistant/attempt') return null
-  return lastUsageChunk(event.data.stream)
+  return lastUsageChunk(data.stream)
 }
 
 /**
@@ -542,14 +604,26 @@ export function makeSessionCostProjection(getConfig) {
     }
   }
 
-  /** Attach a tool call to its Step, opening the node if nothing else has. */
-  const withCall = (state, event) => {
-    const { turn, step, callId, name, arguments: args } = event.data
+  /**
+   * Attach a tool call to its Step, opening the node if nothing else has.
+   *
+   * The location is checked by the caller, because an event that names none is
+   * skipped before it reaches here: there is no node to attach a call to. The
+   * call's own fields are read defensively, so a call missing its name or id still
+   * becomes the call the log says happened rather than a throw.
+   *
+   * @param state - the projection state.
+   * @param event - the `tool/call` event, read for the call's own fields.
+   * @param at - the `{ turn, step }` the event named, already validated.
+   */
+  const withCall = (state, event, at) => {
+    const { turn, step } = at
+    const data = dataOf(event)
     const time = typeof event.time === 'number' ? event.time : Date.now()
     const call = {
-      name: String(name ?? ''),
-      callId: String(callId ?? ''),
-      preview: previewOf(args),
+      name: String(data.name ?? ''),
+      callId: String(data.callId ?? ''),
+      preview: previewOf(data.arguments),
       time,
       seq: typeof event.seq === 'number' ? event.seq : 0,
     }
@@ -566,7 +640,7 @@ export function makeSessionCostProjection(getConfig) {
     }
     const opened = openNode(state, turn, step, time)
     const node = opened.pending
-    if (node.calls.some((existing) => existing.callId === callId)) return state
+    if (node.calls.some((existing) => existing.callId === call.callId)) return state
     return {
       ...opened,
       pending: { ...node, calls: [...node.calls, call] },
@@ -583,7 +657,7 @@ export function makeSessionCostProjection(getConfig) {
    * still kept, because the export needs the spawn even when no Step owns it.
    */
   const withSpawn = (state, event) => {
-    const { childId, childCreatedAt, mode, label } = event.data ?? {}
+    const { childId, childCreatedAt, mode, label } = dataOf(event)
     if (typeof childId !== 'string' || childId === '') return state
     const spawns = state.spawns ?? []
     if (spawns.some((spawn) => spawn.id === childId)) return state
@@ -614,14 +688,19 @@ export function makeSessionCostProjection(getConfig) {
    * `compaction/start`, `compaction/end` and `compaction/prune` carry no money of
    * their own: a compaction that never wrote a summary bills nothing, and a prune
    * only shadows tokens the summary already accounted for.
+   *
+   * A compaction is placed by its own `compactionId` and not by a `(Turn, Step)`
+   * location, because the spec lets one stay turn-less when no Turn precedes it; the
+   * one thing it must name is the id, without which it can be neither deduplicated
+   * nor exported.
    */
   const withCompaction = (state, event) => {
-    const data = event.data ?? {}
+    const data = dataOf(event)
     const id = typeof data.compactionId === 'string' ? data.compactionId : ''
     if (id === '') return state
     if ((state.compactions ?? []).includes(id)) return state
     const time = typeof event.time === 'number' ? event.time : Date.now()
-    const named = Number.isInteger(data.turn) && data.turn >= 0 ? data.turn : null
+    const named = isIndex(data.turn) ? data.turn : null
     const turn = named ?? state.lastTurn ?? null
     const usage = data.usage
     const model = typeof data.model === 'string' && data.model !== ''
@@ -712,30 +791,47 @@ export function makeSessionCostProjection(getConfig) {
   /** The state priced with the live rule; the aggregates are rebuilt when it moved. */
   const current = (state) => (state.ruleKey === ruleKeyOf() ? state : reprice(state))
 
-  /** The fold proper; `apply` stamps `seq` on every state it actually changes. */
+  /**
+   * The fold proper; `apply` stamps `seq` on every state it actually changes.
+   *
+   * Every arm reads its data through `dataOf` and, where the series places the
+   * event by `(Turn, Step)`, requires a location. An event that names none is
+   * skipped: the rest of the session is then priced and reported as usual instead
+   * of the whole Cost view answering `unknown-session`. Nothing here catches, so a
+   * fault in this code still propagates to the caller that knows how to report it.
+   */
   const reduce = (state, event) => {
+    const data = dataOf(event)
     if (event.type === 'request/header') {
-      const selected = event.data.header?.config?.model
+      const selected = data.header?.config?.model
       if (typeof selected !== 'string' || selected === '' || selected === state.model) return state
       return { ...state, model: selected }
     }
     if (event.type === 'request/context') {
-      const selected = event.data.model
+      const selected = data.model
       if (typeof selected !== 'string' || selected === '' || selected === state.model) return state
       return { ...state, model: selected }
     }
     if (event.type === 'step/start') {
-      const { turn, step } = event.data
+      const at = locationOf(data)
+      if (at === null) return state
       const time = typeof event.time === 'number' ? event.time : Date.now()
-      return openNode(state, turn, step, time)
+      return openNode(state, at.turn, at.step, time)
     }
     if (event.type === 'step/end') {
-      const { turn, step } = event.data
-      return withStepEnd(state, turn, step, typeof event.time === 'number' ? event.time : Date.now())
+      const at = locationOf(data)
+      if (at === null) return state
+      return withStepEnd(state, at.turn, at.step, typeof event.time === 'number' ? event.time : Date.now())
     }
     if (event.type === 'turn/end') return flush(state)
-    if (event.type === 'llm/retry-started') return withRetry(state, event.data.turn, event.data.step)
-    if (event.type === 'tool/call') return withCall(state, event)
+    if (event.type === 'llm/retry-started') {
+      const at = locationOf(data)
+      return at === null ? state : withRetry(state, at.turn, at.step)
+    }
+    if (event.type === 'tool/call') {
+      const at = locationOf(data)
+      return at === null ? state : withCall(state, event, at)
+    }
     if (event.type === 'subagent/catalog') return withSpawn(state, event)
     if (event.type === 'compaction/summary') return withCompaction(state, event)
     // Start, end and prune carry no money of their own: a compaction is billed by its
@@ -744,10 +840,12 @@ export function makeSessionCostProjection(getConfig) {
       return state
     }
     if (event.type === 'assistant/message' || event.type === 'assistant/attempt') {
-      const { turn, step } = event.data
+      const at = locationOf(data)
+      if (at === null) return state
+      const { turn, step } = at
       const usage = usageOf(event)
       let next = state
-      if (event.type === 'assistant/message' && event.data.interrupted === true) {
+      if (event.type === 'assistant/message' && data.interrupted === true) {
         const node = next.pending
         if (node !== null && node.turn === turn && node.step === step && !node.interrupted) {
           next = { ...next, pending: { ...node, interrupted: true } }
