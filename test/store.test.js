@@ -16,7 +16,13 @@ async function withDir(run) {
   try {
     return await run(dir)
   } finally {
-    await rm(home, { recursive: true, force: true })
+    // Every store call a test here makes is awaited, so unlike the plugin fixtures there is
+    // nothing in flight to dispose first and nothing to reorder. The retries are still the
+    // right default: `rm` gives a path one attempt, and every store write does `mkdir -p`
+    // before it writes (`src/store.js:120` and `:165`), so a single un-awaited call added to
+    // this file later would repopulate the directory mid-removal and answer `ENOTEMPTY` —
+    // a failure of the teardown that would look like a flake in whichever test added it.
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 }
 

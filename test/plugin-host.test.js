@@ -199,6 +199,34 @@ const balanceBody = (total, extra = {}) => ({
   }],
 })
 
+/**
+ * Remove a throwaway home, retrying while the plugin under test may still be writing into it.
+ *
+ * `rm` is a single attempt by default — `maxRetries: 0` — and every write the store makes is
+ * a `mkdir -p` first: `writeAtomic` creates the directory before its temp file
+ * (`src/store.js:165`), and `appendSample` creates it before its line (`src/store.js:120`). A
+ * removal that ran between the directory's own `readdir` and its `rmdir` therefore finds the
+ * path repopulated and answers `ENOTEMPTY`, which is a failure of the *teardown* and not of
+ * anything the test asserted. That is not a rare interleaving: the sampling loop arms its
+ * first tick 500 ms after `apply`, so on a loaded machine the append is routinely in flight
+ * when the `finally` runs.
+ *
+ * The retries are the belt, not the fix. Disposing the plugin first is the fix: it clears the
+ * loop's timer and sets the flag that stops a tick re-arming, so after it nothing *new* can be
+ * written. It cannot recall a tick that had already fired — that callback only checks the flag
+ * after its own poll, and its `mkdir` + `appendFile` are already under way — so the removal
+ * still has to tolerate exactly one write landing under it. Both halves are here, and both
+ * stay: disposal alone leaves the window it cannot close, retries alone leave the loop free to
+ * arm another tick after the directory is gone.
+ *
+ * @param home - the directory a test made with `mkdtemp`. Never a real harness home: the
+ * suite home at the top of this file is created once and deliberately never removed.
+ * @returns when the directory is gone, or when the retries are spent and it is still not.
+ */
+async function removeHome(home) {
+  await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+}
+
 async function withPlugin(run, options = {}) {
   const home = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
   const previousHome = process.env.DSH_HOME
@@ -217,7 +245,7 @@ async function withPlugin(run, options = {}) {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
     globalThis.fetch = previousFetch
-    await rm(home, { recursive: true, force: true })
+    await removeHome(home)
   }
 }
 
@@ -542,7 +570,7 @@ test('a stored day zone the runtime cannot use leaves the row in charge', async 
     ctx.dispose()
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+    await removeHome(home)
   }
 })
 
@@ -756,7 +784,7 @@ test('the account currency replaces a preference the account does not have', asy
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
     globalThis.fetch = previousFetch
-    await rm(home, { recursive: true, force: true })
+    await removeHome(home)
   }
 })
 
@@ -818,7 +846,7 @@ test('the composition row wins at startup, and a panel setting overrides it', as
     ctx.dispose()
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+    await removeHome(home)
   }
 })
 
@@ -884,7 +912,7 @@ test('the log is thinned in the zone the reader stored, not in UTC', async () =>
     ctx.dispose()
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+    await removeHome(home)
   }
 })
 
@@ -927,7 +955,7 @@ test('an override from the previous release gets its balance anchor back', async
     ctx.dispose()
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+    await removeHome(home)
   }
 })
 
@@ -1163,7 +1191,7 @@ test('a missing key is reported instead of throwing', async () => {
     ctx.dispose()
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+    await removeHome(home)
   }
 })
 
@@ -1377,7 +1405,7 @@ test('a write that arrives while the state is still loading survives the load', 
   globalThis.fetch = async () => ({ ok: true, json: async () => balanceBody(12.34) })
   const ctx = hostContext()
   try {
-    const { mkdir, writeFile, readFile, rm } = await import('node:fs/promises')
+    const { mkdir, writeFile, readFile } = await import('node:fs/promises')
     await mkdir(join(home, 'dsh-balance'), { recursive: true })
     const at = Date.now() - 86_400_000
     // A sample just before the override, so the migration has a balance to anchor to.
@@ -1408,12 +1436,15 @@ test('a write that arrives while the state is still loading survives the load', 
     assert.equal(state.prefs.costMetric, 'cost', 'with the one the request changed')
     assert.equal(state.client.version, '9.9.9', 'and the saved client identity was not blanked')
     assert.equal(state.overrides['2026-09-01'].balance !== undefined, true, 'while the override got its anchor')
-    await rm(home, { recursive: true, force: true })
   } finally {
+    // Dispose before the home goes, not after: the sampling loop is still armed until
+    // `ctx.dispose()` clears its timer, so removing the directory first leaves a tick free
+    // to `mkdir -p` and append into a path Node is already deleting.
     ctx.dispose()
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
     globalThis.fetch = previousFetch
+    await removeHome(home)
   }
 })
 
@@ -1425,7 +1456,7 @@ test('the client heartbeat that lands during the load does not blank the stored 
   globalThis.fetch = async () => ({ ok: true, json: async () => balanceBody(12.34) })
   const ctx = hostContext()
   try {
-    const { mkdir, writeFile, readFile, rm } = await import('node:fs/promises')
+    const { mkdir, writeFile, readFile } = await import('node:fs/promises')
     await mkdir(join(home, 'dsh-balance'), { recursive: true })
     // A document big enough that reading it outlasts the heartbeat below: the heartbeat
     // persists the whole state, so a write built before the load has restored it would
@@ -1457,12 +1488,18 @@ test('the client heartbeat that lands during the load does not blank the stored 
     assert.equal(Object.keys(state.overrides ?? {}).length, Object.keys(overrides).length, 'every stored correction is still on disk')
     assert.equal(state.prefs.costMetric, 'output', 'and so is the stored panel choice')
     assert.equal(state.client.version, 'test', 'with the heartbeat’s own identity on top')
-    await rm(home, { recursive: true, force: true })
   } finally {
+    // Reading the document back does not mean the plugin has stopped writing. The
+    // sampling loop is armed until `ctx.dispose()` clears its timer, and it fired in this
+    // test in under a second, so removing the home first deleted a directory a tick was
+    // about to `mkdir -p` into — `ENOTEMPTY` from the teardown, not from any assertion
+    // above. Disposal first; `removeHome` then absorbs the one tick already inside its
+    // own `mkdir` + `appendFile`, which disposal cannot recall.
     ctx.dispose()
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
     globalThis.fetch = previousFetch
+    await removeHome(home)
   }
 })
 
@@ -1611,8 +1648,7 @@ test('the sampling loop stops for good when the plugin is disposed with a fetch 
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
     globalThis.fetch = previousFetch
-    const { rm } = await import('node:fs/promises')
-    await rm(home, { recursive: true, force: true })
+    await removeHome(home)
   }
 })
 
@@ -1937,7 +1973,7 @@ test('the sampling loop asks again after a poll that rejected', async (t) => {
     else process.env.DSH_HOME = previousHome
     if (previousRef !== undefined) process.env.DSH_BALANCE_ABSENT_KEY = previousRef
     globalThis.fetch = previousFetch
-    await rm(home, { recursive: true, force: true })
+    await removeHome(home)
   }
 })
 
@@ -1975,7 +2011,7 @@ test('a settings write that lands after the plugin was disposed arms no timer', 
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
     globalThis.fetch = previousFetch
-    await rm(home, { recursive: true, force: true })
+    await removeHome(home)
   }
 })
 
@@ -2065,7 +2101,7 @@ test('a settings write during a poll in flight does not arm a second loop', asyn
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
     globalThis.fetch = previousFetch
-    await rm(home, { recursive: true, force: true })
+    await removeHome(home)
   }
 })
 
@@ -2109,7 +2145,7 @@ test('a refresh answered during the load reports the history on disk', async () 
     else process.env.DSH_HOME = previousHome
     if (previousRef !== undefined) process.env.DSH_BALANCE_ABSENT_KEY = previousRef
     globalThis.fetch = previousFetch
-    await rm(home, { recursive: true, force: true })
+    await removeHome(home)
   }
 })
 
