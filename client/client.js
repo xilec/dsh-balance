@@ -1315,8 +1315,9 @@ window.__ModuleLoader__.load({
     /**
      * The compact readout in the composer dock, left of the shipped stats entry.
      *
-     * The format is deliberately terse — `b:`, `1d`, `1w`, `1m`, `s:` — because it
-     * shares one line with the turn counters and the token pills.
+     * The format is deliberately terse — three unlabelled figures separated by dots
+     * and slashes, in the order session, balance, windows — because it shares one line
+     * with the turn counters and the token pills.
      */
     function Readout(props) {
       const { t } = props
@@ -1351,19 +1352,19 @@ window.__ModuleLoader__.load({
       }, [open])
 
       /**
-       * The line carries no labels: balance, the three window totals and the session
-       * estimate, each figure keeping its own currency symbol. The legend lives in
+       * The line carries no labels: the session estimate, the balance and the three
+       * window totals, each figure keeping its own currency symbol. The legend lives in
        * the native title and in the panel, because the pill shares one line with the
        * turn counters and the token pills.
        */
       const legend = [
+        t('tip.session'),
         t('tip.balance'),
         [
           t('tip.spend1d'),
           windowLabel(t, 'tip.spend1w', ledger?.totals?.w1),
           windowLabel(t, 'tip.spend1m', ledger?.totals?.m1),
         ].join('/'),
-        t('tip.session'),
       ].join(' · ')
 
       const window_ = (key, value, covered) => h('span', {
@@ -1382,11 +1383,11 @@ window.__ModuleLoader__.load({
         ])
 
       const line = [
-        h('span', { key: 'balance' }, primary === null ? '—' : money(primary.total, currency)),
-        h('span', { className: 'dshb_sep', key: 'sep1' }),
-        spend,
-        h('span', { className: 'dshb_sep', key: 'sep2' }),
         h('span', { key: 'session' }, sessionCost === null ? '—' : money(sessionCost, sessionCurrency)),
+        h('span', { className: 'dshb_sep', key: 'sep1' }),
+        h('span', { key: 'balance' }, primary === null ? '—' : money(primary.total, currency)),
+        h('span', { className: 'dshb_sep', key: 'sep2' }),
+        spend,
       ]
 
       return h('div', { className: 'dshb_readout' }, h('div', { className: 'dshb_anchor' }, [

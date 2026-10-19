@@ -353,15 +353,19 @@ test('the readout renders the compact balance and spend line', async () => {
     await new Promise((resolve) => setTimeout(resolve, 10))
     react.beginRender()
     const tree = react.createElement(Readout, props)
-    // Balance, the three window totals and the session estimate, with no labels:
+    // The session estimate, the balance and the three window totals, with no labels:
     // the pill shares one line with the turn counters and the token pills.
-    assert.equal(line(tree), '$19.52 $0.39/$2.29/$10.43 $0.33')
+    assert.equal(line(tree), '$0.33 $19.52 $0.39/$2.29/$10.43')
     const pill = find(tree, (element) => element.type === 'button' && element.props?.className === 'dshb_pill')[0]
     assert.ok(pill !== undefined, 'the readout is a pill button, like the token usage pills')
     // The legend is the only place the labels live, since the line itself has none.
     assert.match(pill.props.title, /tip\.balance/)
     assert.match(pill.props.title, /tip\.spend1d\/tip\.spend1w\/tip\.spend1m/)
     assert.match(pill.props.title, /tip\.session/)
+    assert.ok(pill.props.title.indexOf('tip.session') < pill.props.title.indexOf('tip.balance'),
+      'the legend names the session first, as the line shows it')
+    assert.ok(pill.props.title.indexOf('tip.balance') < pill.props.title.indexOf('tip.spend1d'),
+      'and the balance precedes the three windows')
     assert.equal(pill.props['aria-expanded'], false)
     // The accessible name is the legend a sighted reader reads on hover, verbatim: the
     // line itself carries no labels, so a prefix would announce a string nothing shows.
@@ -466,7 +470,7 @@ test('the session projection outranks the payload copy of the session cost', asy
     react.beginRender()
     assert.equal(
       textOf(react.createElement(Readout, props)).replace(/\s*\/\s*/g, '/').replace(/\s+/g, ' ').trim(),
-      '$19.52 $0.39/$2.29/$10.43 $0.91',
+      '$0.91 $19.52 $0.39/$2.29/$10.43',
     )
   } finally {
     react.stop()
