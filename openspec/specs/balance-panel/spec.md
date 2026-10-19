@@ -31,8 +31,8 @@ depend on any other plugin's JavaScript.
 
 ### Requirement: The composer readout
 
-The readout SHALL show, in one unlabelled line, the account balance, the spend of today, of the
-week so far and of the month so far, and the current session's estimated cost, separated by dots
+The readout SHALL show, in one unlabelled line, the current session's estimated cost, the account
+balance, and the spend of today, of the week so far and of the month so far, separated by dots
 and slashes. It MUST carry no visible labels: the legend MUST be the native tooltip and the
 panel. The legend MUST name the three windows as today, the week so far and the month so far, and
 MUST append the number of calendar days the week and the month span when the payload reports
@@ -46,7 +46,7 @@ the same legend the tooltip shows.
 #### Scenario: Figures and their legend
 
 - **WHEN** a payload is available
-- **THEN** the line shows the balance, the three windows and the session estimate without
+- **THEN** the line shows the session estimate, the balance and the three windows without
   labels, and hovering reveals what each figure is
 
 #### Scenario: Not enough samples for a window
