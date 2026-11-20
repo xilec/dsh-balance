@@ -255,16 +255,16 @@ export function ghReleaseArgs({ version, slug, title, notes, sha }) {
  * or equal to it and on `origin/main` (`publish`) is a question each subcommand
  * asks for itself.
  */
-function report(state) {
+function report(state, currentOverride = state.current) {
   const { label, tag } = releaseRange({ root: state.root, warn: (message) => process.stderr.write(`release: ${message}\n`) })
   const lines = [
     `tree: ${state.root}`,
-    `version: ${state.current ?? `mismatched (${JSON.stringify(state.versions)})`}`,
+    `version: ${currentOverride ?? `mismatched (${JSON.stringify(state.versions)})`}`,
     `last tag: ${tag ?? 'none'}`,
     `next release would cover: ${label}`,
   ]
   const problems = checkRefusals({
-    current: state.current,
+    current: currentOverride,
     lastTag: tag,
     tagExists: state.tagExists,
     dirty: state.dirty,
@@ -344,7 +344,10 @@ function prepare(version) {
   const state = inspect(root, version)
   const behind = notAheadReason(version, state.current)
   if (behind !== null) fail(behind)
-  if (report(state).length > 0) fail('nothing was written')
+  // Preparing means the tree still carries the previous version: the bump is what
+  // this command writes. Judge the gate against the requested version, not the old
+  // one, which by definition equals the last tag at this point.
+  if (report(state, version).length > 0) fail('nothing was written')
   for (const place of VERSION_PLACES) {
     const file = join(root, place.file)
     writeFileSync(file, rewriteVersionIn(readFileSync(file, 'utf8'), version, place))

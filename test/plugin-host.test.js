@@ -1236,7 +1236,7 @@ test('the child route walks the subagent tree while the main route stays on its 
     const tree = JSON.parse(direct.body)
     assert.equal(tree.ok, true, direct.body)
     assert.equal(tree.full, false)
-    assert.deepEqual(listings, [{ kind: 'children', id: 'session-1' }], 'the first ask walks direct children only')
+    assert.deepEqual(listings, [{ kind: 'descendants', id: 'session-1' }], 'the first ask walks direct children only')
     assert.equal(tree.children.length, 1)
     assert.deepEqual(reads, ['child-1'], 'and reads exactly the child it reports')
     assert.equal(tree.children[0].id, 'child-1')
@@ -1274,10 +1274,6 @@ test('the child route walks the subagent tree while the main route stays on its 
       throw new Error(`unexpected session ${id}`)
     },
     subagents: {
-      async listChildren(id) {
-        listings.push({ kind: 'children', id })
-        return [{ id: 'child-1', createdAt: time + 600, mode: 'continuable', label: 'Survey the tree' }]
-      },
       async listDescendants(id) {
         listings.push({ kind: 'descendants', id })
         return [
@@ -1771,8 +1767,8 @@ test('a subtree Finding appears only where the subtree was asked for', async () 
       throw new Error(`unexpected session ${id}`)
     },
     subagents: {
-      async listChildren() {
-        return [{ id: 'child-1', createdAt: time + 600, mode: 'continuable', label: 'Survey the tree' }]
+      async listDescendants() {
+        return [{ kind: 'child', id: 'child-1', parentId: 'session-1', depth: 1, mode: 'continuable', label: 'Survey the tree', activity: 'inactive' }]
       },
     },
   })
@@ -1924,8 +1920,8 @@ test('a stored log with one malformed event is still a session with a cost, and 
     sessionOf: () => undefined,
     readSession: async (id) => ({ session: { id }, inheritedEventCount: 0, events: log(1, 1) }),
     subagents: {
-      async listChildren() {
-        return [{ id: 'child-1', createdAt: time, mode: 'continuable', label: 'Survey the tree' }]
+      async listDescendants() {
+        return [{ kind: 'child', id: 'child-1', parentId: 'session-1', depth: 1, mode: 'continuable', label: 'Survey the tree', activity: 'inactive' }]
       },
     },
   })
@@ -2205,11 +2201,11 @@ test('the subtree walk stops when the reader goes away, and only then', async ()
     assert.equal(signals.at(-1).aborted, false, 'a read that was answered is not a disconnect')
   }, {
     subagents: {
-      async listChildren(id, signal) {
+      async listDescendants(id, signal) {
         signals.push(signal)
         announceWalk()
         for (let step = 0; step < 5; step += 1) await new Promise((resolve) => setImmediate(resolve))
-        return [{ id: 'child-1', createdAt: Date.now(), mode: 'continuable', label: 'Survey the tree' }]
+        return [{ kind: 'child', id: 'child-1', parentId: 'session-1', depth: 1, mode: 'continuable', label: 'Survey the tree', activity: 'inactive' }]
       },
     },
   })

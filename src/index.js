@@ -888,9 +888,11 @@ export function apply(ctx, config) {
   /**
    * The subagent tree of one session, each child priced by the same unit.
    *
-   * This is the only route that reads other sessions, and it does so only when it
-   * is asked: with `full` it walks every session below through `listDescendants`,
-   * without it only the direct children are read (D26). Nothing here feeds the
+   * This route reads other sessions only when asked: it walks the children through
+   * `listDescendants`, keeping only the direct entries without `full` and the whole
+   * tree with it (D26). The current Host exposes only `listDescendants` on the
+   * `subagents` service — the old `listChildren` method was removed — so direct
+   * children are the `depth: 1` rows of the same walk. Nothing here feeds the
    * parent's total — a child line is a line of its own (D25) — and a child that
    * cannot be read becomes a diagnostic line instead of failing the request, so
    * one corrupt branch does not hide the rest of the tree.
@@ -909,9 +911,8 @@ export function apply(ctx, config) {
     }
     let rows
     try {
-      rows = full === true
-        ? await subagents.listDescendants(sessionId, signal)
-        : (await subagents.listChildren(sessionId, signal)).map((entry) => ({ ...entry, parentId: sessionId, depth: 1, kind: 'child' }))
+      rows = await subagents.listDescendants(sessionId, signal)
+      if (full !== true) rows = rows.filter((row) => row.depth === 1)
     } catch (error) {
       return { ok: false, error: message(error) }
     }
@@ -1386,7 +1387,7 @@ export function normalizeBalances(data) {
   }))
 }
 
-const VERSION = '0.2.0'
+const VERSION = '0.2.1'
 
 const amount = (value) => {
   const n = Number(value)
