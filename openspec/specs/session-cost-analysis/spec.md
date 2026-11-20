@@ -373,12 +373,13 @@ reads the child sessions through a separate route walking the subagent catalog; 
 route MUST NOT serve any child session. That walk MUST stop when the reader's connection closes
 before the answer has been written, and MUST NOT stop for any other signal: a request whose
 body has already been consumed is a finished request, not a reader who went away. Per-child lines and the subtree cost attributed to the
-spawning Step SHALL be shown only after that action: the first ask reads the direct children,
-and the explicit "load full history" action — which exists for the subtree only — extends the
-read to every session below the session. Reading the subtree SHALL be a tab of the view beside
-the session's own reading, so including or excluding subagents is a tab switch and never a
-change to what the header total means; the selection of the session's own tab SHALL be a saved
-view choice. Each child line SHALL offer a one-click jump into that child session's own Cost
+spawning Step SHALL be shown only after that action: both read levels SHALL come from the Host's
+descendant listing, with the first ask taking only its direct-child rows and the explicit "load
+full history" action — which exists for the subtree only — taking every session below the
+session. No read level SHALL depend on a separate direct-child listing method. Reading the
+subtree SHALL be a tab of the view beside the session's own reading, so including or excluding
+subagents is a tab switch and never a change to what the header total means; the selection of
+the session's own tab SHALL be a saved view choice. Each child line SHALL offer a one-click jump into that child session's own Cost
 view, so following the money does not require retyping an id. The jump SHALL open the session
 through the shell and SHALL ask for the Cost tab both as that session's stored view preference
 and on the live conversation binding, because a session the shell has not bound yet can only be
